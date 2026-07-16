@@ -1,0 +1,61 @@
+{
+  "name": "@ceifa/eleven",
+  "version": "0.1.1",
+  "description": "A featherweight personal AI gateway: channels, providers, workspaces, threads — on the pi SDK",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "start": "node src/cli.ts start",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/dashboard/public dist/dashboard/public",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "gateway",
+    "llm",
+    "telegram",
+    "chatbot",
+    "pi",
+    "cli"
+  ],
+  "author": "ceifa <gabriel@goodstream.com>",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ceifa/eleven.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ceifa/eleven/issues"
+  },
+  "homepage": "https://github.com/ceifa/eleven#readme",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.7",
+    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.80.7",
+    "@grammyjs/runner": "2.0.3",
+    "@grammyjs/transformer-throttler": "1.2.1",
+    "grammy": "1.44.0",
+    "typebox": "^1.3.6",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2"
+  },
+  "bin": {
+    "eleven": "dist/cli.js"
+  }
+}

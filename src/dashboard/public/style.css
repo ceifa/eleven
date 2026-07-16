@@ -1,0 +1,725 @@
+/* eleven — Hawkins theme, hand-written. No Tailwind, no daisyUI: just the
+   handful of components and layout helpers this dashboard actually uses.
+   Void-black base, neon-red display type with a CRT glow, amber string-lights
+   for live activity. */
+
+/* ---------- fonts ---------- */
+
+@font-face { font-family: "Grenze"; font-weight: 600; src: url("/fonts/grenze-600.ttf") format("truetype"); font-display: swap; }
+@font-face { font-family: "Grenze"; font-weight: 700; src: url("/fonts/grenze-700.ttf") format("truetype"); font-display: swap; }
+@font-face { font-family: "Grenze"; font-weight: 800; src: url("/fonts/grenze-800.ttf") format("truetype"); font-display: swap; }
+
+/* ---------- theme tokens ---------- */
+
+/* Structural tokens are theme-agnostic; per-theme palettes live in their own
+   [data-theme] block below, so adding a theme later is just another block —
+   set data-theme on <html> to switch. */
+:root {
+  --radius-field: 0.375rem;
+  --radius-box: 0.75rem;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+}
+
+[data-theme="hawkins"] {
+  color-scheme: dark;
+  --color-base-100: oklch(14% 0.012 20);
+  --color-base-200: oklch(18% 0.014 20);
+  --color-base-300: oklch(23% 0.016 20);
+  --color-base-content: oklch(91% 0.012 60);
+  --color-primary: oklch(55% 0.22 27);
+  --color-primary-content: oklch(97% 0.014 40);
+  --color-accent: oklch(78% 0.16 70);
+  --color-success: oklch(70% 0.16 155);
+  --color-success-content: oklch(20% 0.06 160);
+  --color-warning: oklch(80% 0.17 75);
+  --color-warning-content: oklch(24% 0.08 60);
+  --color-error: oklch(62% 0.24 27);
+  --color-error-content: white;
+}
+
+/* ---------- reset + base ---------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--color-base-content);
+  /* the void: subtle red vignette bleeding from the edges */
+  background:
+    radial-gradient(ellipse 120% 90% at 50% -20%, oklch(30% 0.09 27 / 0.25), transparent 60%),
+    radial-gradient(ellipse 100% 60% at 50% 115%, oklch(25% 0.08 27 / 0.2), transparent 55%),
+    var(--color-base-100);
+}
+
+button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; text-align: inherit; }
+input, textarea, select { font: inherit; color: inherit; }
+a { color: inherit; }
+h1, h2 { font-weight: 700; line-height: 1.2; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--color-base-300); border-radius: 6px; }
+
+/* ---------- signature type (Hawkins) ---------- */
+
+.display { font-family: "Grenze", serif; letter-spacing: 0.04em; }
+
+/* the wordmark — neon-red Grenze with a CRT glow */
+.wordmark {
+  font-family: "Grenze", serif;
+  font-weight: 800;
+  font-size: 1.9rem;
+  letter-spacing: 0.06em;
+  display: inline-flex;
+  align-items: baseline;
+  color: oklch(60% 0.23 27);
+  text-shadow:
+    0 0 6px oklch(55% 0.22 27 / 0.9),
+    0 0 22px oklch(55% 0.22 27 / 0.45),
+    0 0 50px oklch(55% 0.22 27 / 0.25);
+  text-decoration: none;
+}
+/* while a turn is streaming, the sign burns brighter — a certain wall of lights */
+.wordmark.live { color: oklch(68% 0.24 27); animation: e11-glow 1.1s ease-in-out infinite alternate; }
+@keyframes e11-glow {
+  from { text-shadow: 0 0 6px oklch(55% 0.22 27 / 0.9), 0 0 22px oklch(55% 0.22 27 / 0.45), 0 0 50px oklch(55% 0.22 27 / 0.25); }
+  to   { text-shadow: 0 0 8px oklch(62% 0.24 27), 0 0 30px oklch(60% 0.24 27 / 0.7), 0 0 70px oklch(58% 0.24 27 / 0.45); }
+}
+/* the sign stutters to life when a turn begins — a light finding its feet.
+   Placed after .live so it wins the equal-specificity tie while present; when
+   the animation ends the class is dropped and the steady glow takes over. */
+.wordmark.flicker { animation: e11-flicker 0.55s steps(1, end); }
+@keyframes e11-flicker {
+  0%   { opacity: 0.25; text-shadow: none; }
+  8%   { opacity: 1;    text-shadow: 0 0 8px oklch(62% 0.24 27), 0 0 30px oklch(60% 0.24 27 / 0.7); }
+  15%  { opacity: 0.35; text-shadow: none; }
+  24%  { opacity: 1;    text-shadow: 0 0 8px oklch(62% 0.24 27); }
+  33%  { opacity: 0.5;  text-shadow: none; }
+  45%  { opacity: 1;    text-shadow: 0 0 8px oklch(62% 0.24 27), 0 0 30px oklch(60% 0.24 27 / 0.7); }
+  60%  { opacity: 0.7; }
+  72%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) { .wordmark.live, .wordmark.flicker { animation: none; } }
+
+/* ---------- string lights (the wall) ---------- */
+
+/* A string of bulbs sagging under the sign. Bulbs idle dim with a slow
+   staggered twinkle; every live event flares the next bulb along the wire, so
+   a streaming turn chases light across the string. app.js places the bulbs on
+   the wire and sets each one's --twinkle phase; colors come from the
+   nth-of-type rules below. */
+.string-lights { display: block; width: 100%; height: 30px; overflow: visible; }
+.string-lights .wire { fill: none; stroke: oklch(32% 0.02 25); stroke-width: 1.2; }
+.string-lights .bulb {
+  fill: var(--bulb, var(--color-warning));
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: e11-twinkle 5.2s ease-in-out infinite;
+  /* stagger comes via --twinkle, NOT an inline animation-delay — inline would
+     outrank the .lit rule below and delay the flare too. */
+  animation-delay: var(--twinkle, 0s);
+}
+/* the wall's palette: mostly amber (the fill fallback above), with stray red,
+   green and blue — the show's bulbs, muted to the theme. In CSS so another
+   [data-theme] block can repaint the wall. */
+.string-lights .bulb:nth-of-type(2), .string-lights .bulb:nth-of-type(8) { --bulb: oklch(62% 0.2 27); }
+.string-lights .bulb:nth-of-type(4) { --bulb: oklch(65% 0.13 150); }
+.string-lights .bulb:nth-of-type(6) { --bulb: oklch(65% 0.1 250); }
+.string-lights .bulb.lit { animation: e11-bulb 0.7s ease-out; }
+/* turn-error: every light on the wall flares red at once — something's wrong
+   in Hawkins. After .lit so it wins when both land on the same bulb. */
+.string-lights .bulb.err { animation: e11-bulb-err 0.9s ease-out; }
+@keyframes e11-twinkle { 0%, 100% { opacity: 0.22; } 50% { opacity: 0.4; } }
+@keyframes e11-bulb {
+  0%   { opacity: 1; transform: scale(1.4);
+         filter: drop-shadow(0 0 4px var(--bulb, var(--color-warning))) drop-shadow(0 0 9px var(--bulb, var(--color-warning))); }
+  100% { opacity: 0.3; transform: scale(1); filter: none; }
+}
+@keyframes e11-bulb-err {
+  0%   { opacity: 1; transform: scale(1.5); fill: var(--color-error);
+         filter: drop-shadow(0 0 5px var(--color-error)) drop-shadow(0 0 12px var(--color-error)); }
+  100% { opacity: 0.3; transform: scale(1); fill: var(--bulb, var(--color-warning)); filter: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .string-lights .bulb, .string-lights .bulb.lit, .string-lights .bulb.err { animation: none; opacity: 0.3; }
+}
+
+.page-title {
+  font-family: "Grenze", serif;
+  font-weight: 700;
+  font-size: 1.6rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: oklch(85% 0.06 30);
+  text-shadow: 0 0 18px oklch(55% 0.22 27 / 0.35);
+}
+
+.section-label {
+  font-family: "Grenze", serif;
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: oklch(70% 0.14 27);
+}
+
+/* Field labels dim via text color, NOT element opacity — opacity on an ancestor
+   would fade the info popover nested inside the label. */
+.dim-label { color: color-mix(in oklab, var(--color-base-content) 60%, transparent); }
+
+/* ---------- sidebar nav (.menu) ---------- */
+
+.menu { list-style: none; display: flex; flex-direction: column; }
+.menu li a {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-field);
+  text-decoration: none;
+  color: color-mix(in oklab, var(--color-base-content) 78%, transparent);
+  transition: background-color 0.15s, color 0.15s;
+}
+.menu li a:hover { background: var(--color-base-200); color: var(--color-base-content); }
+.menu li a.menu-active { background: var(--color-base-300); color: var(--color-base-content); }
+
+/* ---------- cards ---------- */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-box);
+  transition: background-color 0.15s, box-shadow 0.15s;
+}
+.card-body { display: flex; flex-direction: column; gap: 1rem; padding: 1.25rem; }
+.card-sm .card-body { padding: 0.6rem 1rem; gap: 0.3rem; }
+.card-title { font-size: 1.05rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
+.card-actions { display: flex; gap: 0.5rem; }
+button.card { text-align: left; }
+button.card:hover { background-color: var(--color-base-300); }
+/* active thread: a red accent bar down the left edge + a faint primary wash,
+   instead of a hard outline ring. The bar is a pseudo-element (not box-shadow)
+   so the is-live halo below owns box-shadow alone — the combined open+streaming
+   state needs no merged keyframe. overflow clips the bar to the rounded corners. */
+.card.is-active,
+button.card.is-active:hover {
+  background-color: color-mix(in oklab, var(--color-primary) 12%, var(--color-base-200));
+}
+/* overflow:hidden drops a flex item's automatic min-height to 0, and thread
+   cards sit in an overflowing flex column — without flex-shrink:0 the active
+   card would be the only squeezable item and collapse to nothing. */
+.card.is-active { position: relative; overflow: hidden; flex-shrink: 0; }
+.card.is-active::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--color-primary);
+}
+/* a thread whose turn is running — a neon amber halo that breathes around the
+   card. A ring (not a bar), so it reads as its own state and layers cleanly
+   with the is-active accent. button-scoped + placed after the hover rules so
+   it survives hover. Both keyframes carry the SAME two shadow layers (soft
+   bloom + 1px ring) and only shift their strength, so the halo eases in and
+   out instead of a layer popping into existence mid-cycle. */
+button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
+@keyframes e11-live {
+  0%, 100% { box-shadow: 0 0 5px -2px color-mix(in oklab, var(--color-warning) 28%, transparent),
+                         0 0 0 1px color-mix(in oklab, var(--color-warning) 38%, transparent); }
+  50%      { box-shadow: 0 0 14px -2px color-mix(in oklab, var(--color-warning) 60%, transparent),
+                         0 0 0 1px color-mix(in oklab, var(--color-warning) 72%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.card.is-live { animation: none;
+    box-shadow: 0 0 8px -3px color-mix(in oklab, var(--color-warning) 45%, transparent), 0 0 0 1px color-mix(in oklab, var(--color-warning) 60%, transparent); }
+}
+/* channel origin glyph in the thread-list meta row — sized down to sit inline
+   with the mono metadata; inherits the row's dimming. */
+/* Dim the thread-list meta via TEXT color, not row opacity: the channel glyph's
+   fills are hardcoded, so alpha-dimming the row would just muddy it. Colour
+   dimming leaves the SVG at full strength while the mono text stays muted. */
+.thread-meta { color: color-mix(in oklab, var(--color-base-content) 58%, transparent); }
+.channel-glyph { display: inline-flex; align-items: center; opacity: 0.8; }
+/* Integer px (1rem = 16px) keeps the small icon's edges crisp. */
+.channel-glyph svg { display: block; width: 1rem; height: 1rem; }
+
+/* warning-tinted panel (pairing requests) */
+.card.warn {
+  background: color-mix(in oklab, var(--color-warning) 8%, var(--color-base-200));
+  border: 1px solid color-mix(in oklab, var(--color-warning) 35%, transparent);
+}
+
+/* ---------- buttons ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-base-300);
+  border-radius: var(--radius-field);
+  background: var(--color-base-300);
+  color: var(--color-base-content);
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn:hover { background: color-mix(in oklab, var(--color-base-300) 70%, var(--color-base-content)); }
+.btn-sm { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
+.btn-xs { padding: 0.2rem 0.55rem; font-size: 0.75rem; }
+.btn-primary { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-primary-content); }
+.btn-primary:hover { background: color-mix(in oklab, var(--color-primary) 88%, white); }
+.btn-success { background: var(--color-success); border-color: var(--color-success); color: var(--color-success-content); }
+.btn-success:hover { background: color-mix(in oklab, var(--color-success) 88%, white); }
+.btn-ghost { background: transparent; border-color: transparent; }
+.btn-ghost:hover { background: color-mix(in oklab, var(--color-base-content) 12%, transparent); }
+
+/* provider-request chip: a plain, dim meta row that lines up with the message
+   column's left edge (no button padding pushing it out of alignment). */
+.request-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.2rem 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--color-base-content);
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+.request-chip:hover { opacity: 1; }
+
+/* ---------- badges ---------- */
+
+.badge[hidden] { display: none; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  background: var(--color-base-300);
+  color: var(--color-base-content);
+}
+.badge-sm { font-size: 0.72rem; padding: 0.1rem 0.45rem; }
+.badge-xs { font-size: 0.65rem; padding: 0.05rem 0.4rem; }
+.badge-ghost { background: var(--color-base-300); color: color-mix(in oklab, var(--color-base-content) 75%, transparent); }
+.badge-warning { background: var(--color-warning); color: var(--color-warning-content); }
+.badge-success { background: var(--color-success); color: var(--color-success-content); }
+.badge-error { background: var(--color-error); color: var(--color-error-content); }
+.badge-soft.badge-warning { background: color-mix(in oklab, var(--color-warning) 20%, transparent); color: var(--color-warning); }
+.badge-soft.badge-success { background: color-mix(in oklab, var(--color-success) 20%, transparent); color: var(--color-success); }
+.badge-soft.badge-error { background: color-mix(in oklab, var(--color-error) 22%, transparent); color: var(--color-error); }
+
+/* ---------- form controls ---------- */
+
+.input, .select, .textarea {
+  width: auto;
+  padding: 0.5rem 0.7rem;
+  background: var(--color-base-100);
+  border: 1px solid var(--color-base-300);
+  border-radius: var(--radius-field);
+  color: var(--color-base-content);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.textarea { resize: vertical; }
+.input:focus, .select:focus, .textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 35%, transparent);
+}
+.input-sm, .select-sm { padding: 0.3rem 0.55rem; font-size: 0.85rem; }
+.input-xs { padding: 0.2rem 0.45rem; font-size: 0.78rem; }
+.select { appearance: none; padding-right: 1.8rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23888' stroke-width='1.5'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1rem; }
+::placeholder { color: color-mix(in oklab, var(--color-base-content) 40%, transparent); }
+
+/* checkbox + toggle */
+.checkbox {
+  appearance: none;
+  width: 1.15rem; height: 1.15rem;
+  border: 1px solid var(--color-base-300);
+  border-radius: 0.3rem;
+  background: var(--color-base-100);
+  display: inline-grid; place-content: center;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.checkbox-sm { width: 1rem; height: 1rem; }
+.checkbox:checked { background: var(--color-primary); border-color: var(--color-primary); }
+.checkbox:checked::after { content: ""; width: 0.32rem; height: 0.6rem; margin-bottom: 0.12rem;
+  border: solid var(--color-primary-content); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+
+.toggle {
+  appearance: none;
+  width: 2.4rem; height: 1.35rem;
+  border: 1px solid var(--color-base-300);
+  border-radius: 999px;
+  background: var(--color-base-100);
+  position: relative;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.toggle-sm { width: 2rem; height: 1.15rem; }
+.toggle::after { content: ""; position: absolute; top: 50%; left: 0.18rem; transform: translateY(-50%);
+  width: 0.9rem; height: 0.9rem; border-radius: 50%; background: var(--color-base-content); transition: left 0.15s; }
+.toggle-sm::after { width: 0.75rem; height: 0.75rem; }
+.toggle:checked { background: var(--color-primary); border-color: var(--color-primary); }
+.toggle:checked::after { left: calc(100% - 1.08rem); background: var(--color-primary-content); }
+.toggle-sm:checked::after { left: calc(100% - 0.93rem); }
+
+.label { display: inline-flex; align-items: center; }
+
+/* ---------- collapse (checkbox-driven disclosure) ---------- */
+
+.collapse { display: grid; border-radius: var(--radius-box); }
+.collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; opacity: 0; cursor: pointer; margin: 0; }
+.collapse-title { grid-area: 1 / 1; z-index: 1; position: relative; padding: 0.5rem 0.9rem; padding-right: 2rem; }
+.collapse-content { grid-area: 2 / 1; display: none; padding: 0 0.9rem 0.9rem; }
+.collapse:has(> input:checked) > .collapse-content { display: flex; flex-direction: column; }
+/* rotating chevron */
+.collapse-arrow > .collapse-title::after {
+  content: ""; position: absolute; right: 1rem; top: 50%;
+  width: 0.5rem; height: 0.5rem; margin-top: -0.35rem;
+  border: solid color-mix(in oklab, var(--color-base-content) 60%, transparent);
+  border-width: 0 2px 2px 0; transform: rotate(45deg); transition: transform 0.2s;
+}
+.collapse-arrow:has(> input:checked) > .collapse-title::after { transform: rotate(-135deg); margin-top: 0; }
+
+/* ---------- modal (native <dialog>) ---------- */
+
+dialog.modal { position: fixed; inset: 0; width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+  border: 0; padding: 0; background: transparent; align-items: center; justify-content: center; }
+dialog.modal[open] { display: flex; }
+dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
+.modal-box {
+  position: relative; z-index: 1;
+  width: min(92vw, 64rem); max-height: 85vh; overflow: auto;
+  background: var(--color-base-200);
+  border: 1px solid var(--color-base-300);
+  border-radius: var(--radius-box);
+  padding: 1.25rem;
+}
+.modal-backdrop { position: fixed; inset: 0; z-index: 0; }
+.modal-backdrop button { width: 100%; height: 100%; background: transparent; border: 0; cursor: default; }
+
+/* ---------- chat bubbles ---------- */
+
+.chat { display: flex; flex-direction: column; margin-bottom: 0.75rem; }
+.chat-start { align-items: flex-start; }
+.chat-end { align-items: flex-end; }
+.chat-bubble {
+  position: relative;
+  max-width: 80%;
+  padding: 0.5rem 0.9rem;
+  border-radius: 1rem;
+  background-color: var(--color-base-200);
+  color: var(--color-base-content);
+  white-space: normal;
+}
+.chat-bubble-primary { background-color: var(--color-primary); color: var(--color-primary-content); }
+/* speech-bubble tail: a small triangle of the bubble's own colour tucked into
+   the bottom outer corner. It overlaps the bubble edge, so it's always flush —
+   no gap. */
+.chat-start .chat-bubble { border-end-start-radius: 0.25rem; }
+.chat-end   .chat-bubble { border-end-end-radius: 0.25rem; }
+.chat-bubble::after {
+  content: ""; position: absolute; bottom: 0;
+  width: 0.7rem; height: 0.55rem;
+  background-color: inherit;
+}
+.chat-start .chat-bubble::after { left: -0.45rem; clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+.chat-end   .chat-bubble::after { right: -0.45rem; clip-path: polygon(0 0, 100% 100%, 0 100%); }
+
+/* ---------- table ---------- */
+
+.table { width: 100%; border-collapse: collapse; }
+.table th { text-align: left; font-weight: 600; }
+.table th, .table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--color-base-300); }
+.table-sm th, .table-sm td { padding: 0.3rem 0.55rem; font-size: 0.85rem; }
+
+/* ---------- alerts + toasts ---------- */
+
+.alert { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.9rem; border-radius: var(--radius-field);
+  border: 1px solid var(--color-base-300); background: var(--color-base-200); }
+.alert-error { border-color: color-mix(in oklab, var(--color-error) 45%, transparent);
+  background: color-mix(in oklab, var(--color-error) 15%, var(--color-base-200)); }
+.alert-success { border-color: color-mix(in oklab, var(--color-success) 45%, transparent);
+  background: color-mix(in oklab, var(--color-success) 15%, var(--color-base-200)); }
+
+.toast { position: fixed; display: flex; flex-direction: column; gap: 0.5rem; padding: 1rem; }
+.toast-end { right: 0; bottom: 0; }
+.toast .alert { box-shadow: 0 8px 24px oklch(0% 0 0 / 0.5); }
+
+/* ---------- misc components ---------- */
+
+.divider { height: 1px; background: var(--color-base-300); margin: 1rem 0; }
+
+.join { display: inline-flex; }
+.join .join-item { border-radius: 0; margin-left: -1px; }
+.join .join-item:first-child { border-top-left-radius: var(--radius-field); border-bottom-left-radius: var(--radius-field); margin-left: 0; }
+.join .join-item:last-child { border-top-right-radius: var(--radius-field); border-bottom-right-radius: var(--radius-field); }
+
+.link { color: var(--color-base-content); text-decoration: underline; }
+.link-hover { text-decoration: none; }
+.link-hover:hover { text-decoration: underline; }
+
+/* connection-status dot */
+.status { width: 0.6rem; height: 0.6rem; border-radius: 50%; display: inline-block; background: var(--color-base-300); }
+.status-success { background: var(--color-success); box-shadow: 0 0 6px color-mix(in oklab, var(--color-success) 70%, transparent); }
+.status-error { background: var(--color-error); }
+
+/* ---------- info-icon tooltips ---------- */
+
+.info-icon { display: inline-flex; align-items: center; cursor: help; }
+.info-icon svg { opacity: 0.5; }
+.info-icon:hover svg { opacity: 1; }
+
+.tooltip { position: relative; }
+.tooltip::before {
+  content: attr(data-tip);
+  position: absolute;
+  opacity: 0; pointer-events: none;
+  max-width: 16rem; width: max-content;
+  white-space: normal; text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.78rem; line-height: 1.35;
+  color: var(--color-base-content);
+  background: oklch(28% 0.02 20);
+  border: 1px solid oklch(42% 0.03 25);
+  border-radius: var(--radius-field);
+  box-shadow: 0 6px 20px oklch(0% 0 0 / 0.55);
+  z-index: 50;
+  transition: opacity 0.12s;
+}
+.tooltip:hover::before { opacity: 1; }
+.tooltip-right::before { left: 100%; top: 50%; transform: translateY(-50%); margin-left: 0.5rem; }
+
+/* ---------- transcript markdown ---------- */
+
+.msg-body { white-space: pre-wrap; word-break: break-word; }
+.msg-body pre { background: oklch(0% 0 0 / 0.35); border-radius: 0.5rem; padding: 0.6rem 0.8rem;
+  overflow-x: auto; white-space: pre; font-size: 0.8rem; margin: 0.4rem 0; }
+.msg-body code { font-size: 0.85em; background: oklch(0% 0 0 / 0.35); padding: 0.1em 0.35em; border-radius: 0.25rem;
+  font-family: var(--font-mono); }
+.msg-body pre code { background: none; padding: 0; }
+.msg-streaming .msg-body::after { content: "▍"; color: var(--color-accent); animation: e11-blink 1s steps(1) infinite; }
+@keyframes e11-blink { 50% { opacity: 0; } }
+
+/* ---------- layout utilities (only what the markup uses) ---------- */
+
+.flex { display: flex; }
+.grid { display: grid; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.flex-1 { flex: 1 1 0%; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.justify-end { justify-content: flex-end; }
+.self-start { align-self: flex-start; }
+.shrink-0 { flex-shrink: 0; }
+
+/* responsive form grids */
+.grid-2, .grid-3 { display: grid; grid-template-columns: 1fr; }
+@media (min-width: 640px) { .grid-2 { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1024px) { .grid-3 { grid-template-columns: repeat(3, 1fr); } }
+
+.gap-1 { gap: 0.25rem; }
+.gap-1\.5 { gap: 0.375rem; }
+.gap-2 { gap: 0.5rem; }
+.gap-3 { gap: 0.75rem; }
+.gap-4 { gap: 1rem; }
+.gap-5 { gap: 1.25rem; }
+.gap-6 { gap: 1.5rem; }
+
+.p-0 { padding: 0; }
+.p-3 { padding: 0.75rem; }
+.p-4 { padding: 1rem; }
+.p-6 { padding: 1.5rem; }
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.pr-2 { padding-right: 0.5rem; }
+.pt-1 { padding-top: 0.25rem; }
+.py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+.py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+.py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+
+.mt-1 { margin-top: 0.25rem; }
+.mt-auto { margin-top: auto; }
+.mb-1 { margin-bottom: 0.25rem; }
+.mb-3 { margin-bottom: 0.75rem; }
+.mb-4 { margin-bottom: 1rem; }
+.mb-6 { margin-bottom: 1.5rem; }
+.my-0 { margin-top: 0; margin-bottom: 0; }
+.ml-auto { margin-left: auto; }
+.mr-2 { margin-right: 0.5rem; }
+
+.w-full { width: 100%; }
+.w-28 { width: 7rem; }
+.w-32 { width: 8rem; }
+.w-36 { width: 9rem; }
+.w-40 { width: 10rem; }
+.w-44 { width: 11rem; }
+.w-52 { width: 13rem; }
+.w-56 { width: 14rem; }
+.w-72 { width: 18rem; }
+.max-w-md { max-width: 28rem; }
+.max-w-3xl { max-width: 48rem; }
+.min-w-0 { min-width: 0; }
+.h-full { height: 100%; }
+.h-screen { height: 100vh; }
+.min-h-0 { min-height: 0; }
+.min-h-10 { min-height: 2.5rem; }
+.max-h-40 { max-height: 10rem; }
+
+.text-xs { font-size: 0.75rem; }
+.text-sm { font-size: 0.875rem; }
+.text-base { font-size: 1rem; }
+.text-lg { font-size: 1.125rem; }
+.text-xl { font-size: 1.25rem; }
+.font-mono { font-family: var(--font-mono); }
+.font-semibold { font-weight: 600; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.text-base-content { color: var(--color-base-content); }
+.text-warning { color: var(--color-warning); }
+.text-success { color: var(--color-success); }
+.text-error { color: var(--color-error); }
+
+.opacity-40 { opacity: 0.4; }
+.opacity-50 { opacity: 0.5; }
+.opacity-60 { opacity: 0.6; }
+
+/* background-color (not the shorthand) so a gradient background-image set on
+   the same element — e.g. body's vignette — survives the utility. */
+.bg-base-100 { background-color: var(--color-base-100); }
+.bg-base-200 { background-color: var(--color-base-200); }
+
+/* Two-pane threads layout height. The mobile block swaps this for a dvh value
+   that also accounts for the top bar; keeping it in CSS (not an inline style on
+   the element) lets that override win by source order without !important. */
+.threads-layout { height: calc(100vh - 7rem); }
+
+/* ---------- mobile top bar + nav drawer (hidden on desktop) ---------- */
+
+.topbar { display: none; }
+.nav-backdrop { display: none; }
+.mobile-only { display: none; }
+
+/* ---------- responsive: phones + narrow tablets ---------- */
+
+@media (max-width: 768px) {
+  /* A slim fixed top bar carries the hamburger and the wordmark; the sidebar
+     slides in over the content as a drawer instead of eating half the width. */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: 3.25rem;
+    padding: 0 0.5rem;
+    z-index: 55;
+    background: color-mix(in oklab, var(--color-base-100) 90%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--color-base-300);
+  }
+  /* square icon-button; the rest (flex centering, radius, ghost hover) rides on
+     the shared .btn .btn-ghost classes in the markup */
+  .nav-toggle { width: 2.5rem; height: 2.5rem; padding: 0; }
+  .topbar-wordmark { font-size: 1.45rem; }
+
+  /* the sidebar becomes an off-canvas drawer. Scoped to #sidebar so the width
+     beats the .w-52 utility on the same element (a bare `aside` rule would lose
+     to the class and silently keep 13rem). */
+  #sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 15rem;
+    max-width: 82vw;
+    z-index: 60;
+    background: var(--color-base-100);
+    transform: translateX(-100%);
+    transition: transform 0.24s ease;
+    overflow-y: auto;
+  }
+  body.nav-open #sidebar {
+    transform: none;
+    box-shadow: 0 0 40px oklch(0% 0 0 / 0.6);
+  }
+  .nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 58;
+    background: oklch(0% 0 0 / 0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.24s ease;
+  }
+  body.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
+  @media (prefers-reduced-motion: reduce) {
+    #sidebar, .nav-backdrop { transition: none; }
+  }
+  /* Don't animate what nobody sees: the closed drawer's lights and sign idle
+     until it slides open (the top-bar wordmark keeps carrying the live glow). */
+  body:not(.nav-open) #sidebar .bulb, body:not(.nav-open) #sidebar .wordmark { animation-play-state: paused; }
+
+  /* main content clears the fixed top bar and gets phone-sized padding
+     (#view's id already outranks the .p-6 utility — no !important needed) */
+  #view { padding: 4rem 1rem 1.25rem; }
+  .page-title { font-size: 1.4rem; }
+  .mb-6 { margin-bottom: 1rem; }
+
+  .mobile-only { display: inline-flex; }
+
+  /* Threads: swap between the list and the open conversation instead of
+     showing both side by side. These rules sit after the utilities they
+     override, so source order wins without !important. */
+  .threads-layout { height: calc(100dvh - 8.5rem); gap: 0; }
+  .threads-list-col { width: 100%; }
+  #thread-pane { display: none; }
+  .threads-layout.pane-open .threads-list-col { display: none; }
+  .threads-layout.pane-open #thread-pane { display: flex; width: 100%; }
+
+  /* Config forms: fixed-width field rows stack into full-width columns. The
+     child rule sits after the .w-28/.w-36 utilities it overrides, so it wins
+     on source order. */
+  .stack-mobile { flex-direction: column; align-items: stretch; }
+  .stack-mobile > * { width: 100%; }
+
+  /* Crowded single-line rows are allowed to wrap on narrow screens. */
+  .wrap-mobile { flex-wrap: wrap; }
+
+  /* 16px inputs stop iOS from auto-zooming on focus (.input covers .input-sm,
+     which always carries .input too); .input-xs stays compact. Roomier taps. */
+  .input, .select, .textarea { font-size: 16px; }
+  .input-xs { font-size: 0.85rem; }
+  .btn { min-height: 2.5rem; }
+  .btn-sm { min-height: 2.25rem; }
+
+  /* Info tooltips flip to the left near the right edge so they stay on-screen. */
+  .tooltip-right::before { left: auto; right: 100%; margin-left: 0; margin-right: 0.5rem; }
+
+  /* Toasts span the width so they read comfortably (.toast-end already sets right:0). */
+  .toast { left: 0; padding: 0.75rem; }
+}
+
+.border { border: 1px solid var(--color-base-300); }
+.border-t { border-top: 1px solid var(--color-base-300); }
+.border-b { border-bottom: 1px solid var(--color-base-300); }
+.border-r { border-right: 1px solid var(--color-base-300); }
+.border-base-300 { border-color: var(--color-base-300); }
+
+.rounded-box { border-radius: var(--radius-box); }
+.overflow-auto { overflow: auto; }
+.overflow-y-auto { overflow-y: auto; }
+.cursor-pointer { cursor: pointer; }
+.z-50 { z-index: 50; }

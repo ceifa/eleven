@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en" data-theme="hawkins">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>eleven</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='8.2' y='13' font-size='14' font-family='Georgia,serif' font-weight='bold' fill='none' stroke='%23e7000b' stroke-width='0.9' text-anchor='middle'>E</text></svg>" />
+</head>
+<body class="h-screen flex bg-base-100 text-base-content">
+  <header class="topbar">
+    <button id="nav-toggle" class="nav-toggle btn btn-ghost" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+    </button>
+    <a class="wordmark topbar-wordmark" href="#/threads" title="eleven">eleven</a>
+  </header>
+  <div id="nav-backdrop" class="nav-backdrop" aria-hidden="true"></div>
+  <aside id="sidebar" class="w-52 shrink-0 flex flex-col gap-6 p-4 border-r border-base-300">
+    <div class="flex flex-col gap-2">
+      <a class="wordmark" href="#/threads" title="eleven — the sign glows while a turn is running">eleven</a>
+      <!-- the wall of lights: bulbs are placed along the wire by app.js -->
+      <svg class="string-lights" id="string-lights" viewBox="0 0 176 30" aria-hidden="true"><path class="wire" d="M2,8 C 40,22 70,4 96,12 S 150,22 174,10"/></svg>
+    </div>
+    <ul class="menu w-full gap-1 p-0">
+      <li><a href="#/threads" data-view="threads">Threads</a></li>
+      <li><a href="#/workspaces" data-view="workspaces">Workspaces<span class="badge badge-warning badge-sm" id="pairing-badge" hidden></span></a></li>
+      <li><a href="#/providers" data-view="providers">Providers</a></li>
+      <li><a href="#/settings" data-view="settings">Settings</a></li>
+    </ul>
+    <div class="mt-auto flex items-center gap-2 text-xs opacity-60 font-mono">
+      <span class="status" id="ws-dot" aria-hidden="true"></span><span id="ws-label">connecting</span>
+    </div>
+  </aside>
+  <main id="view" tabindex="-1" class="flex-1 min-w-0 overflow-y-auto p-6"></main>
+  <div class="toast toast-end z-50" id="toasts"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

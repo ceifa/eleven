@@ -159,7 +159,7 @@ function connectWs() {
         const container = document.getElementById("messages");
         if (container) {
           const stick = atBottom(container);
-          const chip = h("div", { class: "mt-1 text-xs opacity-60 font-mono" }, `⚙ ${message.name} ${message.summary ?? ""}`.trim());
+          const chip = toolCallRow(message.name, { summary: message.summary ?? "" });
           const streaming = container.querySelector("[data-streaming]");
           streaming ? container.insertBefore(chip, streaming) : container.append(chip);
           if (stick) container.scrollTop = container.scrollHeight;
@@ -364,13 +364,28 @@ const backButton = () =>
   h("button", { class: "btn btn-ghost btn-sm mobile-only px-2", "aria-label": "Back to threads", onclick: closePaneMobile },
     h("span", { html: "‹", style: "font-size:1.3rem;line-height:1" }));
 
+// One tool call, rendered identically for the live indicator and the durable
+// transcript. The arg preview is truncated to a single line by CSS; durable
+// rows carry a call id, so they're clickable and open the modal with the full
+// args and the recorded result. Live rows have no id yet — the turn-done
+// refetch replaces them with clickable durable ones.
+function toolCallRow(name, { summary, args, id } = {}) {
+  return h("div", {
+    class: `tool-call${id ? " is-clickable" : ""}`,
+    ...(id ? { title: "ver argumentos e resultado", onclick: () => openToolCallModal(name, args, id) } : {}),
+  },
+    h("span", { class: "tool-call-name" }, `⚙ ${name}`),
+    summary ? h("span", { class: "tool-call-arg" }, summary) : null,
+  );
+}
+
 function messageBubble(message, streaming = false) {
   const isUser = message.role === "user";
   return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}` },
     h("div", { class: `chat-bubble ${isUser ? "chat-bubble-primary" : "bg-base-200 text-base-content"} ${streaming ? "msg-streaming" : ""}` },
       h("div", { class: "msg-body", html: md(message.text) }),
       message.toolCalls
-        ? h("div", { class: "mt-1 text-xs opacity-60 font-mono" }, message.toolCalls.map((t) => `⚙ ${t.name} ${t.summary}`).join("\n"))
+        ? h("div", { class: "tool-calls" }, message.toolCalls.map((t) => toolCallRow(t.name, { summary: t.summary, args: t.args, id: t.id })))
         : null,
     ),
   );
@@ -546,14 +561,33 @@ function jsonTree(value) {
   };
 }
 
-async function openRequestModal(request) {
-  if (!state.activeThread) return; // chip clicked after the thread was cleared
-  const entry = await api.get(`/requests/${state.activeThread.id}/${request.id}`).catch((e) => (toast(e.message, true), null));
-  if (!entry) return;
-  const json = JSON.stringify(entry.payload, null, 2);
-  document.getElementById("request-modal")?.remove();
+// Shared modal shell: title, subtitle, a right-aligned toolbar of buttons, and
+// a body. Only one modal exists at a time (fixed id), so opening a new one
+// replaces the last.
+function openModal(title, subtitle, toolbar, body) {
+  document.getElementById("json-modal")?.remove();
+  const dialog = h("dialog", { class: "modal", id: "json-modal" },
+    h("div", { class: "modal-box" },
+      h("div", { class: "flex items-center gap-3 mb-3 wrap-mobile" },
+        h("span", { class: "section-label" }, title),
+        subtitle ? h("span", { class: "font-mono text-xs opacity-60" }, subtitle) : null,
+        h("div", { class: "flex items-center gap-1 ml-auto" }, ...toolbar),
+        h("form", { method: "dialog" }, h("button", { class: "btn btn-xs btn-ghost" }, "✕")),
+      ),
+      body,
+    ),
+    // Full-screen click target that closes the dialog — no visible label.
+    h("form", { method: "dialog", class: "modal-backdrop" }, h("button", { "aria-label": "fechar" })),
+  );
+  document.body.append(dialog);
+  dialog.showModal();
+}
 
-  const tree = jsonTree(entry.payload);
+// JSON inspector (tree ⇄ raw, expand/collapse, copy) — used for the raw
+// provider-request payload.
+function showJsonModal(title, subtitle, value) {
+  const json = JSON.stringify(value, null, 2);
+  const tree = jsonTree(value);
   const raw = h("pre", { class: "json-raw text-xs", hidden: true }, json);
   const panel = h("div", { class: "bg-base-100 rounded-box p-4 overflow-auto font-mono", style: "max-height: 70vh" }, tree.el, raw);
 
@@ -566,25 +600,58 @@ async function openRequestModal(request) {
     rawBtn.textContent = showRaw ? "tree" : "raw";
   });
 
-  const dialog = h("dialog", { class: "modal", id: "request-modal" },
-    h("div", { class: "modal-box" },
-      h("div", { class: "flex items-center gap-3 mb-3 wrap-mobile" },
-        h("span", { class: "section-label" }, "Provider request"),
-        h("span", { class: "font-mono text-xs opacity-60" }, `${entry.model} · ${fmtTime(entry.at)} · ${fmtBytes(json.length)}`),
-        h("div", { class: "flex items-center gap-1 ml-auto" },
-          h("button", { class: "btn btn-xs btn-ghost", title: "expand every node", onclick: () => tree.expandAll() }, "expand"),
-          h("button", { class: "btn btn-xs btn-ghost", title: "collapse to the top level", onclick: () => tree.collapseAll() }, "collapse"),
-          rawBtn,
-          h("button", { class: "btn btn-xs", onclick: () => navigator.clipboard.writeText(json).then(() => toast("Copied.")) }, "copy"),
-        ),
-        h("form", { method: "dialog" }, h("button", { class: "btn btn-xs btn-ghost" }, "✕")),
-      ),
-      panel,
-    ),
-    h("form", { method: "dialog", class: "modal-backdrop" }, h("button", {}, "close")),
+  openModal(title, subtitle, [
+    h("button", { class: "btn btn-xs btn-ghost", title: "expand every node", onclick: () => tree.expandAll() }, "expand"),
+    h("button", { class: "btn btn-xs btn-ghost", title: "collapse to the top level", onclick: () => tree.collapseAll() }, "collapse"),
+    rawBtn,
+    h("button", { class: "btn btn-xs", onclick: () => navigator.clipboard.writeText(json).then(() => toast("Copied.")) }, "copy"),
+  ], panel);
+}
+
+async function openRequestModal(request) {
+  if (!state.activeThread) return; // chip clicked after the thread was cleared
+  const entry = await api.get(`/requests/${state.activeThread.id}/${request.id}`).catch((e) => (toast(e.message, true), null));
+  if (!entry) return;
+  const bytes = fmtBytes(JSON.stringify(entry.payload, null, 2).length);
+  showJsonModal("Provider request", `${entry.model} · ${fmtTime(entry.at)} · ${bytes}`, entry.payload);
+}
+
+// Args (as a JSON tree) plus the recorded result (raw text, so command output
+// and file contents read naturally instead of as an escaped JSON string).
+// `result` is undefined when none was recorded (e.g. the turn is still running).
+function showToolCallModal(name, args, result) {
+  const hasArgs = args && Object.keys(args).length > 0;
+  const argsTree = hasArgs ? jsonTree(args) : null;
+  const output = result?.output ?? "";
+  const resultBlock = result
+    ? h("pre", { class: `toolcall-result${result.isError ? " is-error" : ""}` }, output || "(sem saída)")
+    : h("div", { class: "opacity-60 text-xs" }, "Sem resultado registrado (turno em andamento?).");
+
+  const body = h("div", { class: "overflow-auto", style: "max-height: 72vh" },
+    hasArgs ? h("div", { class: "section-label mb-1" }, "arguments") : null,
+    argsTree ? h("div", { class: "bg-base-100 rounded-box p-3 mb-4 font-mono text-xs" }, argsTree.el) : null,
+    h("div", { class: "section-label mb-1" }, result?.isError ? "result · error" : "result"),
+    h("div", { class: "bg-base-100 rounded-box p-3 font-mono text-xs" }, resultBlock),
   );
-  document.body.append(dialog);
-  dialog.showModal();
+
+  const toolbar = [];
+  if (argsTree) toolbar.push(
+    h("button", { class: "btn btn-xs btn-ghost", title: "expand every arg", onclick: () => argsTree.expandAll() }, "expand"),
+    h("button", { class: "btn btn-xs btn-ghost", title: "collapse args", onclick: () => argsTree.collapseAll() }, "collapse"),
+  );
+  if (result) toolbar.push(h("button", { class: "btn btn-xs", onclick: () => navigator.clipboard.writeText(output).then(() => toast("Copied.")) }, "copy result"));
+
+  // Prefix with the same ⚙ the rows use, so the header clearly reads as the
+  // tool that ran (not just another section label like ARGUMENTS/RESULT).
+  openModal(`⚙ ${name}`, "tool call", toolbar, body);
+}
+
+async function openToolCallModal(name, args, callId) {
+  // 404 (no result yet) resolves to undefined — the modal still shows the args.
+  const result = callId && state.activeThread
+    ? await api.get(`/threads/${state.activeThread.id}/toolresult?call=${encodeURIComponent(callId)}`).catch(() => undefined)
+    : undefined;
+  showToolCallModal(name, args, result);
 }
 
 // Re-rendering the whole in-progress reply per delta is quadratic in reply

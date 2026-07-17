@@ -8,7 +8,7 @@ import { BUILTIN_TOOLS, CHANNEL_TYPES, isUnresolved, type ConfigStore, type Elev
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
-import { readThreadMessages } from "../threads/reader.ts";
+import { readThreadMessages, readToolResult } from "../threads/reader.ts";
 import { modelRegistry } from "../agent/pi.ts";
 import { logger } from "../log.ts";
 
@@ -169,6 +169,16 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const entry = await gateway.requests.get(threadId, requestId);
         if (!entry) return send(404, { error: "request not found" });
         return send(200, entry);
+      }
+      // Tool-call output, fetched on click. The call id goes in a query param
+      // (it can contain "|" and other path-hostile characters).
+      if (method === "GET" && path.match(/^\/threads\/[^/]+\/toolresult$/)) {
+        const thread = gateway.threads.get(path.split("/")[2]);
+        const call = url.searchParams.get("call");
+        if (!thread?.sessionFile || !call) return send(404, { error: "not found" });
+        const result = await readToolResult(thread.sessionFile, call);
+        if (!result) return send(404, { error: "result not found" });
+        return send(200, result);
       }
       if (method === "DELETE" && path.match(/^\/threads\/[^/]+$/)) {
         const id = path.split("/")[2];

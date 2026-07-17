@@ -514,6 +514,33 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .msg-streaming .msg-body::after { content: "▍"; color: var(--color-accent); animation: e11-blink 1s steps(1) infinite; }
 @keyframes e11-blink { 50% { opacity: 0; } }
 
+/* ---------- tool calls ---------- */
+/* One row per call (the durable render used to join with \n, which the bubble's
+   white-space:normal collapsed into a single run-on line). The arg preview
+   truncates to one line; clickable rows open the JSON viewer with every arg. */
+.tool-calls { margin-top: 0.35rem; }
+.tool-call {
+  display: flex; gap: 0.5rem; align-items: baseline;
+  font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;
+  opacity: 0.6;
+}
+.tool-call.is-clickable { cursor: pointer; }
+.tool-call.is-clickable:hover { opacity: 0.9; }
+.tool-call-name { flex: 0 0 auto; white-space: nowrap; }
+.tool-call-arg {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: 0.85;
+}
+/* Tool result body in the modal: raw text (newlines preserved), scrollable so a
+   big output doesn't push the args off-screen; a red tint when the call errored. */
+.toolcall-result {
+  margin: 0; max-height: 48vh; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+  font-size: 0.78rem; line-height: 1.5;
+}
+.toolcall-result.is-error { color: var(--color-error); }
+
 /* ---------- JSON viewer ---------- */
 
 .json-raw { white-space: pre; line-height: 1.55; }

@@ -6,15 +6,26 @@ export interface ThreadMessage {
   role: "user" | "assistant";
   text: string;
   timestamp?: string;
-  /** Tool calls made by an assistant message, name + one-line summary. */
-  toolCalls?: { name: string; summary: string }[];
+  /** Tool calls made by an assistant message: the call id (to fetch its result
+   *  lazily), name, a one-line preview, and the full argument object — the
+   *  dashboard renders args + result in a JSON viewer on click. */
+  toolCalls?: { id: string; name: string; summary: string; args?: Record<string, unknown> }[];
 }
 
-/** A session entry slimmed to its tree link plus the rendered message, if displayable. */
+/** A tool call's recorded output, fetched on demand (results can be large, so
+ *  they're kept out of the thread payload and its turn-done refreshes). */
+export interface ToolResult {
+  output: string;
+  isError: boolean;
+}
+
+/** A session entry slimmed to its tree link plus what's displayable: the
+ *  rendered message, or — for toolResult entries — the recorded output. */
 interface Node {
   id: string;
   parentId: string | null;
   message?: ThreadMessage;
+  result?: ToolResult & { toolCallId: string };
 }
 
 // Session files are append-only and re-read on every dashboard view — cache the
@@ -35,12 +46,24 @@ export function readThreadMessages(sessionFile: string): Promise<ThreadMessage[]
   return keyedLane(lanes, sessionFile, () => readMessages(sessionFile));
 }
 
-async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
+/** The recorded output of one tool call, or undefined if the session has none
+ *  (e.g. the turn is still running, or the id doesn't match). */
+export function readToolResult(sessionFile: string, toolCallId: string): Promise<ToolResult | undefined> {
+  return keyedLane(lanes, sessionFile, async () => {
+    const parsed = await ensureParsed(sessionFile);
+    const node = parsed?.nodes.find((n) => n.result?.toolCallId === toolCallId);
+    return node?.result && { output: node.result.output, isError: node.result.isError };
+  });
+}
+
+// Parses the appended tail into the cached node tree and returns it, or null if
+// the file is gone. Callers run inside keyedLane so the cache grows once.
+async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId: Map<string, Node> } | null> {
   let size: number;
   try {
     size = (await stat(sessionFile)).size;
   } catch {
-    return [];
+    return null;
   }
   let cached = lruTouch(cache, sessionFile);
   if (cached && cached.size > size) cached = undefined; // truncated/replaced — start over
@@ -57,13 +80,20 @@ async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
 
     for (const entry of parseSessionEntries(complete)) {
       if (entry.type === "session") continue; // header — not part of the tree
-      const node: Node = { id: entry.id, parentId: entry.parentId, message: renderMessage(entry) };
+      const node: Node = { id: entry.id, parentId: entry.parentId, message: renderMessage(entry), result: renderResult(entry) };
       nodes.push(node);
       byId.set(node.id, node);
     }
     cache.set(sessionFile, { size: from + lastNewline + 1, nodes, byId });
     if (cache.size > MAX_CACHED_FILES) cache.delete(cache.keys().next().value!);
   }
+  return { nodes, byId };
+}
+
+async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
+  const parsed = await ensureParsed(sessionFile);
+  if (!parsed) return [];
+  const { nodes, byId } = parsed;
 
   // Appending always advances the leaf, so the last entry is the tip of the
   // active branch. The hop cap guards against a malformed parent cycle.
@@ -85,7 +115,7 @@ function renderMessage(entry: SessionEntry): ThreadMessage | undefined {
     const text = contentText(message.content).trim();
     const toolCalls = message.content
       .filter((c) => c.type === "toolCall")
-      .map((c) => ({ name: c.name, summary: summarizeArgs(c.arguments) }));
+      .map((c) => ({ id: c.id, name: c.name, summary: summarizeArgs(c.arguments), args: c.arguments }));
     if (text || toolCalls.length) {
       return { role: "assistant", text, timestamp: entry.timestamp, toolCalls: toolCalls.length ? toolCalls : undefined };
     }
@@ -93,8 +123,20 @@ function renderMessage(entry: SessionEntry): ThreadMessage | undefined {
   return undefined;
 }
 
+// toolResult entries aren't shown as their own messages — their output is
+// attached to the originating tool call and fetched on demand by call id.
+function renderResult(entry: SessionEntry): (ToolResult & { toolCallId: string }) | undefined {
+  if (entry.type !== "message") return undefined;
+  const { message } = entry as SessionMessageEntry;
+  if (message.role !== "toolResult") return undefined;
+  return { toolCallId: message.toolCallId, output: contentText(message.content), isError: !!message.isError };
+}
+
+// Just the inline one-liner preview — the full argument object travels in `args`
+// and the dashboard shows it in a JSON viewer on click, so a short cap here is
+// fine (the row truncates to one line anyway).
 function summarizeArgs(args: Record<string, unknown> | undefined): string {
   if (!args) return "";
   const value = args.path ?? args.file_path ?? args.command ?? args.pattern ?? Object.values(args)[0];
-  return typeof value === "string" ? value.slice(0, 120) : "";
+  return typeof value === "string" ? value.slice(0, 160) : "";
 }

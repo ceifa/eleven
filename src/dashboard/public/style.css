@@ -514,6 +514,53 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .msg-streaming .msg-body::after { content: "▍"; color: var(--color-accent); animation: e11-blink 1s steps(1) infinite; }
 @keyframes e11-blink { 50% { opacity: 0; } }
 
+/* ---------- JSON viewer ---------- */
+
+.json-raw { white-space: pre; line-height: 1.55; }
+
+.json-viewer { line-height: 1.6; }
+/* A node's open/closed state lives in one place: the .is-open class on the
+   .json-node. Collapsed shows the "… } 5 keys" preview; open shows the
+   children and the closing bracket on its own row. */
+.json-node > .json-children,
+.json-node > .json-close-row { display: none; }
+.json-node.is-open > .json-children { display: block; }
+.json-node.is-open > .json-close-row { display: flex; }
+.json-node.is-open > .json-branch > .json-ellipsis,
+.json-node.is-open > .json-branch > .json-inline-close,
+.json-node.is-open > .json-branch > .json-count { display: none; }
+/* Each line is a flex row so the "key: value" pieces sit on one baseline.
+   Keys/punctuation keep their intrinsic width (flex: none); only the value may
+   shrink and wrap — otherwise a giant string (a whole system prompt) squeezes
+   the key column down to one character stacked vertically. */
+.json-line { display: flex; align-items: flex-start; }
+.json-line > * { flex: none; }
+.json-string, .json-number, .json-bool, .json-null { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.json-branch { cursor: pointer; border-radius: 0.25rem; }
+.json-branch:hover { background: color-mix(in oklab, var(--color-base-content) 8%, transparent); }
+
+/* nested rows indent under their parent, with a faint guide rail */
+.json-children { padding-left: 1.15rem; border-left: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+
+.json-caret { display: inline-block; width: 1.1rem; margin-left: -1.1rem; text-align: center; flex: 0 0 auto;
+  color: color-mix(in oklab, var(--color-base-content) 50%, transparent); font-size: 0.7rem; user-select: none; }
+.json-branch:hover .json-caret { color: var(--color-accent); }
+
+.json-key    { color: var(--color-accent); }
+.json-index  { color: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
+.json-string { color: var(--color-success); }
+.json-number { color: oklch(74% 0.13 230); }
+.json-bool   { color: oklch(76% 0.15 310); }
+.json-null   { color: color-mix(in oklab, var(--color-base-content) 45%, transparent); font-style: italic; }
+.json-punct  { color: color-mix(in oklab, var(--color-base-content) 45%, transparent); white-space: pre; }
+.json-ellipsis { color: color-mix(in oklab, var(--color-base-content) 45%, transparent); padding: 0 0.35em; }
+.json-count  { color: color-mix(in oklab, var(--color-base-content) 42%, transparent); font-style: italic; margin-left: 0.5em; }
+/* the "more (N chars)" / "less" toggle on a clamped string */
+.json-expand { font-family: inherit; font-size: 0.9em; color: var(--color-accent);
+  border: 1px solid color-mix(in oklab, var(--color-accent) 35%, transparent); border-radius: 0.25rem;
+  padding: 0 0.35em; margin-left: 0.35em; white-space: nowrap; opacity: 0.85; }
+.json-expand:hover { opacity: 1; background: color-mix(in oklab, var(--color-accent) 12%, transparent); }
+
 /* ---------- layout utilities (only what the markup uses) ---------- */
 
 .flex { display: flex; }

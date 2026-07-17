@@ -439,21 +439,147 @@ function requestChip(request) {
   }, "⚡", [request.model, request.bytes ? fmtBytes(request.bytes) : null, fmtTime(request.at)].filter(Boolean).join(" · "));
 }
 
+// ---- JSON viewer -------------------------------------------------------
+// Provider payloads nest deep (system prompt, tool schemas, message history);
+// a flat <pre> means scrolling past everything to find one field. This renders
+// a collapsible, syntax-highlighted tree instead. Container nodes lazy-build
+// their children on first open, so a huge payload costs nothing until you
+// actually drill into it.
+
+const isContainer = (v) => v !== null && typeof v === "object";
+
+// Long strings (a whole system prompt lands in one value) would flood the
+// panel, so anything over this many characters is clamped to a preview with a
+// "more" toggle that reveals the rest in place.
+const STRING_CLAMP = 240;
+
+function jsonStringValue(value) {
+  const full = JSON.stringify(value); // includes the surrounding quotes
+  if (full.length <= STRING_CLAMP) return h("span", { class: "json-string" }, full);
+
+  const span = h("span", { class: "json-string" });
+  const text = h("span", {});
+  const toggle = h("button", { class: "json-expand" });
+  let open = false;
+  const set = (o) => {
+    open = o;
+    text.textContent = open ? full : full.slice(0, STRING_CLAMP) + '…"';
+    toggle.textContent = open ? "less" : `more (${full.length.toLocaleString()} chars)`;
+  };
+  toggle.addEventListener("click", (e) => { e.stopPropagation(); set(!open); }); // don't also toggle a parent branch
+  set(false);
+  span.append(text, " ", toggle);
+  return span;
+}
+
+function jsonPrimitive(value) {
+  if (value === null) return h("span", { class: "json-null" }, "null");
+  const t = typeof value;
+  if (t === "string") return jsonStringValue(value);
+  if (t === "number") return h("span", { class: "json-number" }, String(value));
+  if (t === "boolean") return h("span", { class: "json-bool" }, String(value));
+  return h("span", {}, String(value));
+}
+
+// The "key:" prefix on a line — a quoted string for object members, a dim
+// index for array elements, nothing for the root.
+function jsonKey(key) {
+  if (key === null) return [];
+  const label = typeof key === "number"
+    ? h("span", { class: "json-index" }, String(key))
+    : h("span", { class: "json-key" }, `"${key}"`);
+  return [label, h("span", { class: "json-punct" }, ": ")];
+}
+
+function jsonNode(key, value, depth, ctx) {
+  if (!isContainer(value)) return h("div", { class: "json-line" }, ...jsonKey(key), jsonPrimitive(value));
+
+  const isArray = Array.isArray(value);
+  const entries = isArray ? value.map((v, i) => [i, v]) : Object.entries(value);
+  const open = isArray ? "[" : "{";
+  const close = isArray ? "]" : "}";
+  const wrap = h("div", { class: "json-node" });
+
+  if (entries.length === 0) {
+    wrap.append(h("div", { class: "json-line" }, ...jsonKey(key), h("span", { class: "json-punct" }, open + close)));
+    return wrap;
+  }
+
+  const caret = h("span", { class: "json-caret" });
+  const noun = isArray ? "item" : "key";
+  const count = h("span", { class: "json-count" }, `${entries.length} ${noun}${entries.length === 1 ? "" : "s"}`);
+  const header = h("div", { class: "json-line json-branch" },
+    caret, ...jsonKey(key), h("span", { class: "json-punct" }, open),
+    h("span", { class: "json-ellipsis" }, "…"), h("span", { class: "json-punct json-inline-close" }, close), count);
+  const children = h("div", { class: "json-children" });
+  const closeRow = h("div", { class: "json-line json-close-row" }, h("span", { class: "json-punct" }, close));
+  wrap.append(header, children, closeRow);
+
+  // A single .is-open class on the node is the source of truth: CSS drives
+  // which parts show (children + closing row vs. the "… } 5 keys" preview).
+  let isOpen = false;
+  let built = false;
+  const set = (openState) => {
+    isOpen = openState;
+    if (isOpen && !built) {
+      for (const [k, v] of entries) children.append(jsonNode(k, v, depth + 1, ctx));
+      built = true;
+    }
+    caret.textContent = isOpen ? "▾" : "▸";
+    wrap.classList.toggle("is-open", isOpen);
+  };
+  header.addEventListener("click", () => set(!isOpen));
+  ctx.nodes.push(set);
+  set(depth < ctx.autoDepth); // shallow levels start expanded for an at-a-glance overview
+  return wrap;
+}
+
+function jsonTree(value) {
+  const ctx = { nodes: [], autoDepth: 2 };
+  const el = h("div", { class: "json-viewer text-xs font-mono" }, jsonNode(null, value, 0, ctx));
+  return {
+    el,
+    // Loop by growing index: opening a node lazy-appends its children's
+    // setters to ctx.nodes, and this keeps expanding them too.
+    expandAll: () => { for (let i = 0; i < ctx.nodes.length; i++) ctx.nodes[i](true); },
+    collapseAll: () => { for (let i = ctx.nodes.length - 1; i >= 0; i--) ctx.nodes[i](i === 0); }, // keep the root open
+  };
+}
+
 async function openRequestModal(request) {
   if (!state.activeThread) return; // chip clicked after the thread was cleared
   const entry = await api.get(`/requests/${state.activeThread.id}/${request.id}`).catch((e) => (toast(e.message, true), null));
   if (!entry) return;
   const json = JSON.stringify(entry.payload, null, 2);
   document.getElementById("request-modal")?.remove();
+
+  const tree = jsonTree(entry.payload);
+  const raw = h("pre", { class: "json-raw text-xs", hidden: true }, json);
+  const panel = h("div", { class: "bg-base-100 rounded-box p-4 overflow-auto font-mono", style: "max-height: 70vh" }, tree.el, raw);
+
+  let showRaw = false;
+  const rawBtn = h("button", { class: "btn btn-xs" }, "raw");
+  rawBtn.addEventListener("click", () => {
+    showRaw = !showRaw;
+    raw.hidden = !showRaw;
+    tree.el.hidden = showRaw;
+    rawBtn.textContent = showRaw ? "tree" : "raw";
+  });
+
   const dialog = h("dialog", { class: "modal", id: "request-modal" },
     h("div", { class: "modal-box" },
       h("div", { class: "flex items-center gap-3 mb-3 wrap-mobile" },
         h("span", { class: "section-label" }, "Provider request"),
         h("span", { class: "font-mono text-xs opacity-60" }, `${entry.model} · ${fmtTime(entry.at)} · ${fmtBytes(json.length)}`),
-        h("button", { class: "btn btn-xs ml-auto", onclick: () => navigator.clipboard.writeText(json).then(() => toast("Copied.")) }, "copy"),
+        h("div", { class: "flex items-center gap-1 ml-auto" },
+          h("button", { class: "btn btn-xs btn-ghost", title: "expand every node", onclick: () => tree.expandAll() }, "expand"),
+          h("button", { class: "btn btn-xs btn-ghost", title: "collapse to the top level", onclick: () => tree.collapseAll() }, "collapse"),
+          rawBtn,
+          h("button", { class: "btn btn-xs", onclick: () => navigator.clipboard.writeText(json).then(() => toast("Copied.")) }, "copy"),
+        ),
         h("form", { method: "dialog" }, h("button", { class: "btn btn-xs btn-ghost" }, "✕")),
       ),
-      h("pre", { class: "bg-base-100 rounded-box p-4 overflow-auto text-xs font-mono", style: "max-height: 70vh" }, json),
+      panel,
     ),
     h("form", { method: "dialog", class: "modal-backdrop" }, h("button", {}, "close")),
   );

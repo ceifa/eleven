@@ -26,10 +26,15 @@ type CopilotQuota = {
   percent_remaining?: unknown;
   unlimited?: unknown;
   quota_reset_at?: unknown;
+  credits_used?: unknown;
+  entitlement?: unknown;
+  remaining?: unknown;
 };
 
 type CopilotUsageResponse = {
   copilot_plan?: unknown;
+  token_based_billing?: unknown;
+  quota_reset_date_utc?: unknown;
   quota_snapshots?: {
     premium_interactions?: CopilotQuota | null;
     chat?: CopilotQuota | null;
@@ -48,6 +53,7 @@ export interface ProviderUsage {
   plan?: string;
   windows: UsageWindow[];
   credits?: number;
+  facts?: { label: string; value: string }[];
 }
 
 /** Fetch the subscription quota for the provider behind a model reference. */
@@ -158,15 +164,29 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   } catch {
     throw new Error("GitHub returned an invalid Copilot usage response");
   }
-  const windows = [
-    parseCopilotWindow("Premium", data.quota_snapshots?.premium_interactions),
-    parseCopilotWindow("Chat", data.quota_snapshots?.chat),
-  ].flatMap((window) => window ? [window] : []);
-  if (!windows.length) throw new Error("GitHub did not report any Copilot subscription limits");
+  const quota = data.quota_snapshots?.premium_interactions;
+  const tokenBased = data.token_based_billing === true;
+  const windows = tokenBased
+    ? parseCopilotCreditWindow(quota)
+    : [parseCopilotWindow("Premium", quota)].flatMap((window) => window ? [window] : []);
+  const facts: { label: string; value: string }[] = [];
+  if (tokenBased && !windows.length) {
+    const used = finiteNumber(quota?.credits_used);
+    if (used !== undefined) facts.push({ label: "AI credits used", value: formatNumber(used) });
+    // Business/Enterprise credits are pooled across the organization. This
+    // account endpoint exposes consumption but not pool size, so `unlimited`
+    // means base completions — it must not be presented as unlimited AI usage.
+    facts.push({ label: "AI credits left", value: "Unavailable (shared organization pool)" });
+  }
+  const reset = typeof data.quota_reset_date_utc === "string"
+    ? Date.parse(data.quota_reset_date_utc)
+    : Number.NaN;
+  if (Number.isFinite(reset)) facts.push({ label: "Resets", value: formatDate(reset) });
+  if (!windows.length && !facts.length) throw new Error("GitHub did not report any Copilot subscription limits");
   const plan = typeof data.copilot_plan === "string" && data.copilot_plan.trim()
     ? titleCase(data.copilot_plan)
     : undefined;
-  return { provider: "GitHub Copilot", plan, windows };
+  return { provider: "GitHub Copilot", plan, windows, facts };
 }
 
 export function formatProviderUsage(usage: ProviderUsage, now = Date.now()): string {
@@ -178,7 +198,19 @@ export function formatProviderUsage(usage: ProviderUsage, now = Date.now()): str
     return `- **${window.label}:** ${formatNumber(left)}% left${reset}`;
   });
   if (usage.credits !== undefined) lines.push(`- **Credits:** ${formatNumber(usage.credits)} left`);
+  for (const fact of usage.facts ?? []) lines.push(`- **${fact.label}:** ${fact.value}`);
   return [title, ...lines].join("\n");
+}
+
+function parseCopilotCreditWindow(raw: CopilotQuota | null | undefined): UsageWindow[] {
+  if (!raw) return [];
+  const entitlement = finiteNumber(raw.entitlement);
+  const remaining = finiteNumber(raw.remaining);
+  if (entitlement === undefined || entitlement <= 0 || remaining === undefined) return [];
+  return [{
+    label: "AI credits",
+    usedPercent: Math.min(100, Math.max(0, 100 - remaining / entitlement * 100)),
+  }];
 }
 
 function parseCopilotWindow(label: string, raw: CopilotQuota | null | undefined): UsageWindow | undefined {
@@ -227,6 +259,14 @@ function windowLabel(seconds: number | undefined): string {
   return `${hours}h`;
 }
 
+function formatDate(timestamp: number): string {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(timestamp);
+}
+
 function formatRelativeTime(target: number, now: number): string {
   let minutes = Math.max(0, Math.ceil((target - now) / 60_000));
   const days = Math.floor(minutes / (24 * 60));
@@ -248,7 +288,7 @@ function finiteNumber(value: unknown): number | undefined {
 }
 
 function formatNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
+  return value.toLocaleString("en-US", { maximumFractionDigits: 1 });
 }
 
 function titleCase(value: string): string {

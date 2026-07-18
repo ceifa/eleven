@@ -164,6 +164,8 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   } catch {
     throw new Error("GitHub returned an invalid Copilot usage response");
   }
+  const planId = typeof data.copilot_plan === "string" ? data.copilot_plan.trim().toLowerCase() : "";
+  const organizationPool = planId === "business" || planId === "enterprise";
   const quota = data.quota_snapshots?.premium_interactions;
   const tokenBased = data.token_based_billing === true;
   const windows = tokenBased
@@ -172,11 +174,16 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   const facts: { label: string; value: string }[] = [];
   if (tokenBased && !windows.length) {
     const used = finiteNumber(quota?.credits_used);
-    if (used !== undefined) facts.push({ label: "AI credits used", value: formatNumber(used) });
+    if (used !== undefined) {
+      facts.push({ label: organizationPool ? "Organization pool used" : "AI credits used", value: formatNumber(used) });
+    }
     // Business/Enterprise credits are pooled across the organization. This
     // account endpoint exposes consumption but not pool size, so `unlimited`
     // means base completions — it must not be presented as unlimited AI usage.
-    facts.push({ label: "AI credits left", value: "Unavailable (shared organization pool)" });
+    facts.push({
+      label: organizationPool ? "Organization pool left" : "AI credits left",
+      value: organizationPool ? "Unavailable from Copilot account endpoint" : "Unavailable",
+    });
   }
   const reset = typeof data.quota_reset_date_utc === "string"
     ? Date.parse(data.quota_reset_date_utc)

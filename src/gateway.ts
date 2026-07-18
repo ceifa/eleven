@@ -13,6 +13,7 @@ import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
+import { fetchProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 
 const log = logger("gateway");
 const DEFAULT_IDLE_DAYS = 7;
@@ -182,6 +183,24 @@ export class Gateway extends EventEmitter {
   async listSkills(sessionKey: string, workspaceHint?: string) {
     const workspace = this.workspaceFor(sessionKey, workspaceHint);
     return { workspace: workspace.name, skills: await listWorkspaceSkills(workspace.config.path) };
+  }
+
+  /** Live subscription quotas for every provider configured in eleven. */
+  async providerUsage(): Promise<string> {
+    const models = this.config.configuredModelRefs().filter((ref, index, refs) => {
+      const provider = ref.split("/", 1)[0];
+      return refs.findIndex((candidate) => candidate.split("/", 1)[0] === provider) === index;
+    });
+    if (!models.length) throw new Error("no providers configured");
+    const reports = await Promise.all(models.map(async (model) => {
+      try {
+        return formatProviderUsage(await fetchProviderUsage(model));
+      } catch (error) {
+        const provider = model.split("/", 1)[0];
+        return `**${provider}**\n- ⚠️ ${error instanceof Error ? error.message : error}`;
+      }
+    }));
+    return reports.join("\n\n");
   }
 
   private idleMs(): number {

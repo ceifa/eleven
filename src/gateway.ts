@@ -4,6 +4,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ConfigStore, WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult } from "./agent/runner.ts";
+import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
 import { ThreadStore, type ThreadEntry } from "./threads/store.ts";
 import { RequestLog } from "./threads/request-log.ts";
@@ -177,6 +178,57 @@ export class Gateway extends EventEmitter {
   async interrupt(sessionKey: string): Promise<boolean> {
     const thread = this.threads.current(sessionKey);
     return thread ? this.runner.interrupt(thread.id) : false;
+  }
+
+  isThreadRunning(id: string): boolean {
+    return this.runner.isRunning(id);
+  }
+
+  /**
+   * Serialize literal channel delivery with model turns, then persist it into
+   * the same transcript. All failure-prone prerequisites are validated before
+   * the external send; a post-send persistence failure is returned as a warning
+   * so operators do not retry and duplicate a message the user already got.
+   */
+  async deliverOutbound<T>(id: string, text: string, deliver: () => Promise<T>): Promise<{ target: T; recorded: boolean; warning?: string }> {
+    const thread = this.threads.get(id);
+    if (!thread) throw new Error("thread not found");
+    if (!this.threads.isCurrent(id)) {
+      const current = this.threads.current(thread.sessionKey);
+      throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
+    }
+    if (!thread.sessionFile) throw new Error("thread has no session file");
+    const workspace = this.config.resolved.workspaces[thread.workspace];
+    if (!workspace) throw new Error(`workspace ${thread.workspace} is not configured`);
+    const candidates = this.config.modelCandidates(thread.model, workspace.model);
+    const model = candidates.find((candidate) => findModel(candidate));
+    if (!model) throw new Error(`no known model among: ${candidates.join(", ") || "none"}`);
+
+    return this.runner.runWhenIdle(thread.id, async () => {
+      // Re-check after entering the lane: /new may have rotated the conversation
+      // between the initial validation and this operation acquiring its slot.
+      if (!this.threads.isCurrent(id)) {
+        const current = this.threads.current(thread.sessionKey);
+        throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
+      }
+      const target = await deliver();
+      if (!this.threads.isCurrent(id)) {
+        const current = this.threads.current(thread.sessionKey);
+        const warning = `message was delivered after the conversation rotated; transcript was not changed${current ? ` (current thread ${current.id.slice(0, 8)})` : ""}`;
+        log.warn(warning);
+        return { target, recorded: false, warning };
+      }
+      try {
+        this.runner.appendOutbound(thread.id, thread.sessionFile!, model, text);
+        this.threads.update(thread.id, { lastActivityAt: Date.now() });
+        this.emit("thread-activity", { thread, direction: "out", text });
+        return { target, recorded: true };
+      } catch (error) {
+        const warning = `message was delivered but transcript recording failed: ${error instanceof Error ? error.message : error}`;
+        log.error(warning);
+        return { target, recorded: false, warning };
+      }
+    });
   }
 
   /** Skills a turn in this conversation's workspace would load. */

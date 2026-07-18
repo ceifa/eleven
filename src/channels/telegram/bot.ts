@@ -430,7 +430,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       }
       case "/usage": {
         try {
-          return reply(await deps.gateway.modelUsage(sessionKey, deps.workspace()));
+          return reply(await deps.gateway.providerUsage());
         } catch (error) {
           log.warn(`usage lookup failed: ${error}`);
           return reply(`⚠️ ${error instanceof Error ? error.message : error}`);

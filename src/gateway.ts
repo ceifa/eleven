@@ -185,13 +185,22 @@ export class Gateway extends EventEmitter {
     return { workspace: workspace.name, skills: await listWorkspaceSkills(workspace.config.path) };
   }
 
-  /** Live subscription quota for the model this conversation would use. */
-  async modelUsage(sessionKey: string, workspaceHint?: string): Promise<string> {
-    const workspace = this.workspaceFor(sessionKey, workspaceHint);
-    const thread = this.threads.current(sessionKey);
-    const model = this.config.modelCandidates(thread?.model, workspace.config.model)[0];
-    if (!model) throw new Error("no model configured");
-    return formatProviderUsage(await fetchProviderUsage(model));
+  /** Live subscription quotas for every provider configured in eleven. */
+  async providerUsage(): Promise<string> {
+    const models = this.config.configuredModelRefs().filter((ref, index, refs) => {
+      const provider = ref.split("/", 1)[0];
+      return refs.findIndex((candidate) => candidate.split("/", 1)[0] === provider) === index;
+    });
+    if (!models.length) throw new Error("no providers configured");
+    const reports = await Promise.all(models.map(async (model) => {
+      try {
+        return formatProviderUsage(await fetchProviderUsage(model));
+      } catch (error) {
+        const provider = model.split("/", 1)[0];
+        return `**${provider}**\n- ⚠️ ${error instanceof Error ? error.message : error}`;
+      }
+    }));
+    return reports.join("\n\n");
   }
 
   private idleMs(): number {

@@ -13,6 +13,7 @@ import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
+import { fetchProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 
 const log = logger("gateway");
 const DEFAULT_IDLE_DAYS = 7;
@@ -182,6 +183,15 @@ export class Gateway extends EventEmitter {
   async listSkills(sessionKey: string, workspaceHint?: string) {
     const workspace = this.workspaceFor(sessionKey, workspaceHint);
     return { workspace: workspace.name, skills: await listWorkspaceSkills(workspace.config.path) };
+  }
+
+  /** Live subscription quota for the model this conversation would use. */
+  async modelUsage(sessionKey: string, workspaceHint?: string): Promise<string> {
+    const workspace = this.workspaceFor(sessionKey, workspaceHint);
+    const thread = this.threads.current(sessionKey);
+    const model = this.config.modelCandidates(thread?.model, workspace.config.model)[0];
+    if (!model) throw new Error("no model configured");
+    return formatProviderUsage(await fetchProviderUsage(model));
   }
 
   private idleMs(): number {

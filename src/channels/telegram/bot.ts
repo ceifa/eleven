@@ -51,6 +51,7 @@ interface Target {
 const COMMANDS = [
   { command: "new", description: "Start a fresh thread" },
   { command: "skills", description: "List the skills the agent can use here" },
+  { command: "usage", description: "Show model subscription usage" },
   { command: "stop", description: "Abort the running turn" },
 ] as const;
 
@@ -426,6 +427,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         if (!skills.length) return reply(`No skills loaded for **${workspace}**.`);
         const lines = skills.map((s) => `- \`${s.name}\` — ${s.description.length > 90 ? `${s.description.slice(0, 90)}…` : s.description}`);
         return reply(`**${skills.length} skills** loaded for **${workspace}**:\n${lines.join("\n")}`);
+      }
+      case "/usage": {
+        try {
+          return reply(await deps.gateway.modelUsage(sessionKey, deps.workspace()));
+        } catch (error) {
+          log.warn(`usage lookup failed: ${error}`);
+          return reply(`⚠️ ${error instanceof Error ? error.message : error}`);
+        }
       }
       case "/stop": {
         const dropped = discardBurst(sessionKey);

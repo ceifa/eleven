@@ -1,6 +1,7 @@
 import { authStorage } from "./agent/pi.ts";
 
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 type RawUsageWindow = {
@@ -21,10 +22,25 @@ type CodexUsageResponse = {
   };
 };
 
+type CopilotQuota = {
+  percent_remaining?: unknown;
+  unlimited?: unknown;
+  quota_reset_at?: unknown;
+};
+
+type CopilotUsageResponse = {
+  copilot_plan?: unknown;
+  quota_snapshots?: {
+    premium_interactions?: CopilotQuota | null;
+    chat?: CopilotQuota | null;
+  };
+};
+
 interface UsageWindow {
   label: string;
   usedPercent: number;
   resetAt?: number;
+  unlimited?: boolean;
 }
 
 export interface ProviderUsage {
@@ -37,10 +53,12 @@ export interface ProviderUsage {
 /** Fetch the subscription quota for the provider behind a model reference. */
 export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsage> {
   const provider = modelRef.split("/", 1)[0];
-  if (provider !== "openai-codex") {
-    throw new Error(`subscription usage is not available for ${provider}`);
-  }
+  if (provider === "openai-codex") return fetchCodexUsage(provider);
+  if (provider === "github-copilot") return fetchCopilotUsage(provider);
+  throw new Error(`subscription usage is not available for ${provider}`);
+}
 
+async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
   const token = await authStorage.getApiKey(provider);
   if (!token) throw new Error(`${provider} is not authenticated`);
 
@@ -100,15 +118,80 @@ export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsag
   };
 }
 
+async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
+  // Pi stores both the short-lived Copilot API token (`access`) and the GitHub
+  // OAuth token (`refresh`). The account endpoint expects the latter. Calling
+  // getApiKey first validates/refreshes the credential under Pi's file lock.
+  if (!await authStorage.getApiKey(provider)) throw new Error(`${provider} is not authenticated`);
+  const credential = authStorage.get(provider);
+  const token = credential?.type === "oauth" && typeof credential.refresh === "string"
+    ? credential.refresh
+    : undefined;
+  if (!token) throw new Error("GitHub Copilot OAuth credentials are unavailable");
+
+  let response: Response;
+  try {
+    response = await fetch(COPILOT_USAGE_URL, {
+      headers: {
+        Authorization: `token ${token}`,
+        "Accept-Encoding": "identity",
+        "Editor-Version": "vscode/1.107.0",
+        "Editor-Plugin-Version": "copilot-chat/0.35.0",
+        "User-Agent": "GitHubCopilotChat/0.35.0",
+        "X-Github-Api-Version": "2025-04-01",
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new Error(`GitHub Copilot usage request failed: ${error instanceof Error ? error.message : error}`);
+  }
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("GitHub Copilot login expired — run `pi` and `/login`");
+    }
+    throw new Error(`GitHub Copilot usage request returned HTTP ${response.status}`);
+  }
+
+  let data: CopilotUsageResponse;
+  try {
+    data = await response.json() as CopilotUsageResponse;
+  } catch {
+    throw new Error("GitHub returned an invalid Copilot usage response");
+  }
+  const windows = [
+    parseCopilotWindow("Premium", data.quota_snapshots?.premium_interactions),
+    parseCopilotWindow("Chat", data.quota_snapshots?.chat),
+  ].flatMap((window) => window ? [window] : []);
+  if (!windows.length) throw new Error("GitHub did not report any Copilot subscription limits");
+  const plan = typeof data.copilot_plan === "string" && data.copilot_plan.trim()
+    ? titleCase(data.copilot_plan)
+    : undefined;
+  return { provider: "GitHub Copilot", plan, windows };
+}
+
 export function formatProviderUsage(usage: ProviderUsage, now = Date.now()): string {
   const title = `**${usage.provider}${usage.plan ? ` · ${usage.plan}` : ""}**`;
   const lines = usage.windows.map((window) => {
+    if (window.unlimited) return `- **${window.label}:** Unlimited`;
     const left = Math.max(0, 100 - window.usedPercent);
     const reset = window.resetAt ? ` · resets ${formatRelativeTime(window.resetAt, now)}` : "";
     return `- **${window.label}:** ${formatNumber(left)}% left${reset}`;
   });
   if (usage.credits !== undefined) lines.push(`- **Credits:** ${formatNumber(usage.credits)} left`);
   return [title, ...lines].join("\n");
+}
+
+function parseCopilotWindow(label: string, raw: CopilotQuota | null | undefined): UsageWindow | undefined {
+  if (!raw) return undefined;
+  const remaining = finiteNumber(raw.percent_remaining);
+  if (remaining === undefined && raw.unlimited !== true) return undefined;
+  const resetAtSeconds = finiteNumber(raw.quota_reset_at);
+  return {
+    label,
+    usedPercent: Math.min(100, Math.max(0, 100 - (remaining ?? 100))),
+    ...(raw.unlimited === true ? { unlimited: true } : {}),
+    ...(resetAtSeconds !== undefined && resetAtSeconds > 0 ? { resetAt: resetAtSeconds * 1000 } : {}),
+  };
 }
 
 function parseWindow(raw: RawUsageWindow | null | undefined): UsageWindow[] {

@@ -281,8 +281,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (text.trim().startsWith("/") && (await handleCommand(ctx, text.trim()))) return;
 
     const media = await collectInboundMedia(ctx, token, deps.transcribeCommand());
-    const prompt = formatInboundBody(textWithSender(ctx, text), media);
-    if (!prompt.trim() && !media.images.length) return;
+    const body = formatInboundBody(text, media);
+    if (!body.trim() && !media.images.length) return;
+    // Attribute the complete body, not just text/captions: voice transcripts and
+    // media-only messages need the same sender context as ordinary text.
+    const prompt = formatTelegramInboundPrompt(ctx, body);
 
     const target = targetFromContext(ctx);
     // Ack now — the burst window delays the turn, not the receipt.
@@ -645,9 +648,72 @@ function topicOf(message: { message_thread_id?: number; is_topic_message?: boole
   return message?.is_topic_message ? message.message_thread_id : undefined;
 }
 
-function textWithSender(ctx: Context, text: string): string {
-  if (ctx.chat?.type === "private") return text;
-  const from = ctx.message?.from;
-  const sender = fullName(from) || from?.username || "unknown";
-  return text ? `${sender}: ${text}` : "";
+const REPLY_QUOTE_LIMIT = 200;
+const REPLY_QUOTE_HEAD = 120;
+const REPLY_QUOTE_TAIL = 70;
+
+/** Compact per-message attribution for shared conversations. Message ids stay
+ * in the transport layer: the gateway already replies to the triggering id,
+ * and exposing them to the model would spend tokens without improving prose. */
+export function formatTelegramInboundPrompt(ctx: Context, body: string): string {
+  if (ctx.chat?.type === "private") return body;
+  const message = ctx.message;
+  const lines = [`[${senderLabel(message?.from)}]`];
+  const replied = message?.reply_to_message;
+  if (replied) {
+    const toSelf = replied.from?.id === ctx.me?.id;
+    const repliedSender = toSelf ? "you" : senderLabel(replied.from);
+    const quoted = message.quote?.text ?? replied.text ?? replied.caption;
+    if (quoted?.trim()) {
+      lines.push(`[Replying to ${repliedSender}: ${JSON.stringify(compactReplyQuote(quoted))}]`);
+    } else {
+      const kind = replyMediaKind(replied);
+      lines.push(
+        toSelf
+          ? `[Replying to your ${kind ?? "message"}]`
+          : `[Replying to ${kind ? `${kind} from` : "a message from"} ${repliedSender}]`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n${body}`;
+}
+
+function senderLabel(user?: { id?: number; first_name?: string; last_name?: string; username?: string }): string {
+  const name = sanitizeContextLabel(fullName(user));
+  const username = sanitizeContextLabel(user?.username ?? "");
+  if (name && username) return `${name} @${username}`;
+  if (name) return name;
+  if (username) return `@${username}`;
+  return user?.id !== undefined ? `Telegram user ${user.id}` : "Unknown sender";
+}
+
+function sanitizeContextLabel(value: string): string {
+  return value.replaceAll("[", "(").replaceAll("]", ")").replaceAll(/\s+/g, " ").trim();
+}
+
+function compactReplyQuote(text: string): string {
+  const chars = [...text.replaceAll(/\s+/g, " ").trim()];
+  if (chars.length <= REPLY_QUOTE_LIMIT) return chars.join("");
+  return `${chars.slice(0, REPLY_QUOTE_HEAD).join("")}…${chars.slice(-REPLY_QUOTE_TAIL).join("")}`;
+}
+
+function replyMediaKind(message: {
+  photo?: unknown;
+  video?: unknown;
+  video_note?: unknown;
+  voice?: unknown;
+  audio?: unknown;
+  document?: unknown;
+  sticker?: unknown;
+  animation?: unknown;
+}): string | undefined {
+  if (message.photo) return "photo";
+  if (message.video) return "video";
+  if (message.video_note) return "video message";
+  if (message.voice) return "voice message";
+  if (message.audio) return "audio";
+  if (message.document) return "document";
+  if (message.sticker) return "sticker";
+  if (message.animation) return "animation";
+  return undefined;
 }

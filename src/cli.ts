@@ -3,6 +3,7 @@ import { startDaemon } from "./daemon.ts";
 import { runDoctor } from "./doctor.ts";
 import { controlService, installService, serviceInstalled } from "./service.ts";
 import { importOpenclaw } from "./import-openclaw.ts";
+import { runClientCommand } from "./cli-client.ts";
 
 const [, , command, ...args] = process.argv;
 
@@ -12,7 +13,16 @@ const [, , command, ...args] = process.argv;
 // exec would deadlock.
 const supervised = Boolean(process.env.ELEVEN_SUPERVISED || process.env.INVOCATION_ID);
 
-switch (command) {
+let clientHandled = false;
+try {
+  clientHandled = await runClientCommand(command, args);
+} catch (error) {
+  console.error(`error: ${error instanceof Error ? error.message : error}`);
+  process.exitCode = 1;
+  clientHandled = true;
+}
+
+if (!clientHandled) switch (command) {
   case "start":
   case "restart":
     if (!supervised && !args.includes("--foreground") && serviceInstalled()) {
@@ -39,15 +49,26 @@ switch (command) {
     console.log(`eleven — a featherweight personal AI gateway
 
 usage:
-  eleven start             start the daemon (via the service when installed, else foreground)
-  eleven restart           restart the daemon
-  eleven init              install, enable and start the background service
-                           (systemd on Linux, launchd on macOS)
-  eleven doctor            check config, providers, telegram and workspaces
-  eleven import openclaw   bring config over from an OpenClaw install
+  eleven start                         start the daemon (service or foreground)
+  eleven restart                       restart the daemon
+  eleven init                          install and start the background service
+  eleven doctor                        check config, providers, channels and workspaces
+  eleven import openclaw               import an OpenClaw install
+
+  eleven status [--json]               show live gateway health
+  eleven workspaces [name] [--json]    list workspaces or show resolved detail
+  eleven threads [filters]             list current threads
+  eleven threads <id> [--json]         show thread detail (unique prefix accepted)
+  eleven threads invoke --workspace <name> [--detach] [--json] <message>
+  eleven threads send <id> [--json] <message>
+
+thread filters:
+  --workspace <name>  --running  --channel <type>  --since <24h|7d|ISO>
+  --limit <n>         --all
 
 flags:
   --foreground             with start/restart: run in this terminal even if the
-                           background service is installed`);
+                           background service is installed
+  --json                   machine-readable output on inspection/client commands`);
     if (command) process.exitCode = 1;
 }

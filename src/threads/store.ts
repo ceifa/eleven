@@ -94,6 +94,12 @@ export class ThreadStore {
     return id ? this.data.threads[id] : undefined;
   }
 
+  /** Whether this is the generation currently attached to its conversation. */
+  isCurrent(id: string): boolean {
+    const thread = this.data.threads[id];
+    return !!thread && this.data.current[thread.sessionKey] === id;
+  }
+
   update(id: string, patch: Partial<ThreadEntry>) {
     const thread = this.data.threads[id];
     if (!thread) return;

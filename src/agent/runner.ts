@@ -8,7 +8,7 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -159,6 +159,58 @@ export class Runner {
     }
     log.info(`steer missed the turn of ${threadId}, running as its own turn`);
     return false;
+  }
+
+  /** Whether this process is currently running a turn for the thread. */
+  isRunning(threadId: string): boolean {
+    return this.active.has(threadId);
+  }
+
+  /**
+   * Reserve the same per-thread lane used by model turns. A turn already in
+   * progress is rejected; one arriving after this call queues behind the
+   * operation instead of racing it.
+   */
+  async runWhenIdle<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    if (this.active.has(threadId)) throw new Error("thread has a running turn");
+    return keyedLane(this.lanes, threadId, async () => {
+      if (this.active.has(threadId)) throw new Error("thread has a running turn");
+      return operation();
+    });
+  }
+
+  /**
+   * Persist prose delivered directly by an operator/channel without invoking a
+   * model. Reuse the warm manager when present so its in-memory branch stays in
+   * sync with the append-only session file.
+   */
+  appendOutbound(threadId: string, sessionFile: string, modelReference: string, text: string): void {
+    if (this.active.has(threadId)) throw new Error("thread has a running turn");
+    const model = findModel(modelReference);
+    if (!model) throw new Error(`unknown model ${modelReference}`);
+    const warm = this.warm.get(threadId);
+    const sessionManager = warm?.sessionManager ?? SessionManager.open(sessionFile);
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    };
+    sessionManager.appendMessage(message);
+    // AgentSession keeps its own context snapshot. Rebuild it next turn so the
+    // operator-authored message appended above is actually visible to the model.
+    if (warm) this.dropSession(threadId);
   }
 
   /** Abort the in-flight turn of a thread, if any. */

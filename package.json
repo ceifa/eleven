@@ -4,9 +4,10 @@
   "description": "A featherweight personal AI gateway: channels, providers, workspaces, threads — on the pi SDK",
   "scripts": {
     "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
     "start": "node src/cli.ts start",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/dashboard/public dist/dashboard/public",
-    "prepublishOnly": "npm run check && npm run build"
+    "prepublishOnly": "npm run check && npm test && npm run build"
   },
   "keywords": [
     "ai",

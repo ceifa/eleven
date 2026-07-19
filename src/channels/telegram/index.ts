@@ -112,6 +112,19 @@ export class TelegramChannel {
     return request;
   }
 
+  /** Deliver literal operator-authored prose to the Telegram conversation. */
+  async sendToSession(sessionKey: string, text: string): Promise<{ bot: string; chatId: number; topic?: number }> {
+    const match = sessionKey.match(/^telegram:([^:]+):(-?\d+)(?::topic:(\d+))?$/);
+    if (!match) throw new Error("thread has no Telegram delivery target");
+    const [, name, chat, rawTopic] = match;
+    const handle = this.bots.get(name)?.handle;
+    if (!handle) throw new Error(`Telegram channel ${name} is not running`);
+    const chatId = Number(chat);
+    const topic = rawTopic === undefined ? undefined : Number(rawTopic);
+    await sendRich(handle.bot.api, chatId, text, { messageThreadId: topic });
+    return { bot: name, chatId, topic };
+  }
+
   /** Re-prompt conversations whose turn was interrupted by a restart, routing
    * each to the bot that owns its session key. Unknown/removed bots are skipped. */
   wakeInterrupted(turns: { sessionKey: string }[]) {

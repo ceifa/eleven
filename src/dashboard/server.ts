@@ -1,25 +1,38 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { text } from "node:stream/consumers";
 import { join, extname, normalize, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, isUnresolved, type ConfigStore, type ElevenConfig } from "../config.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
+import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
 import { readThreadMessages, readToolResult } from "../threads/reader.ts";
-import { modelRegistry } from "../agent/pi.ts";
+import { findModel, modelRegistry } from "../agent/pi.ts";
 import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
+// One Telegram rich-message request: avoids ambiguous partial delivery and
+// duplicate prefixes when a multi-chunk send fails midway.
+const MAX_OUTBOUND_MESSAGE_CHARS = 32_000;
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
 };
+
+class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 export interface Dashboard {
   close(): Promise<void>;
@@ -28,6 +41,7 @@ export interface Dashboard {
 export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: TelegramChannel): Dashboard {
   const server = createServer((req, res) => void route(req, res).catch((error) => fail(res, 500, error)));
   const wss = new WebSocketServer({ server, path: "/ws" });
+  const cliRuns = new Map<string, { status: "running" | "done" | "error"; result?: unknown; error?: string }>();
 
   const send = (message: string) => {
     for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(message);
@@ -87,6 +101,110 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   // let open dashboards refresh instead of showing stale state.
   config.on("change", () => broadcast({ type: "config-changed" }));
 
+  function resolveThreadRef(ref: string) {
+    const exact = gateway.threads.get(ref);
+    if (exact) return exact;
+    const matches = gateway.threads.list().filter((thread) => thread.id.startsWith(ref));
+    if (matches.length === 0) throw new ApiError(404, `thread ${ref} not found`);
+    if (matches.length > 1) throw new ApiError(409, `thread prefix ${ref} is ambiguous`);
+    return matches[0];
+  }
+
+  function conversationLabel(sessionKey: string): string {
+    const telegramMatch = sessionKey.match(/^telegram:([^:]+):(-?\d+)(?::topic:(\d+))?$/);
+    if (!telegramMatch) {
+      const source = sessionKey.split(":", 1)[0];
+      return source === "dashboard" ? "Dashboard" : source === "cli" ? "CLI" : source;
+    }
+    const [, channelName, rawChatId, rawTopic] = telegramMatch;
+    const route = config.channels().find(({ channel }) => channel.name === channelName);
+    const chatId = Number(rawChatId);
+    if (chatId > 0) {
+      const user = route?.channel.users?.[rawChatId];
+      const identity = user?.name || (user?.username ? `@${user.username}` : rawChatId);
+      return `Telegram DM · ${identity}`;
+    }
+    const group = route?.channel.groups?.[rawChatId];
+    const groupName = group?.title || rawChatId;
+    const topic = rawTopic ? group?.topics?.[rawTopic]?.title || `topic ${rawTopic}` : undefined;
+    return `Telegram · ${groupName}${topic ? ` · ${topic}` : ""}`;
+  }
+
+  function threadView(thread: ReturnType<typeof gateway.threads.list>[number]) {
+    const current = gateway.threads.isCurrent(thread.id);
+    const running = gateway.isThreadRunning(thread.id);
+    return {
+      ...thread,
+      current,
+      running,
+      state: running ? "running" : current ? "current" : "old",
+      source: thread.sessionKey.split(":", 1)[0],
+      conversation: conversationLabel(thread.sessionKey),
+    };
+  }
+
+  function listThreadViews(url: URL) {
+    const workspace = url.searchParams.get("workspace") ?? undefined;
+    const channel = url.searchParams.get("channel");
+    const currentOnly = url.searchParams.get("current") === "1";
+    const runningOnly = url.searchParams.get("running") === "1";
+    const sinceValue = url.searchParams.get("since");
+    const since = sinceValue === null ? undefined : Number(sinceValue);
+    if (since !== undefined && (!Number.isFinite(since) || since <= 0)) throw new ApiError(400, "invalid since value");
+    const limitValue = url.searchParams.get("limit");
+    const rawLimit = limitValue === null ? undefined : Number(limitValue);
+    if (rawLimit !== undefined && (!Number.isInteger(rawLimit) || rawLimit <= 0)) throw new ApiError(400, "limit must be a positive integer");
+    const limit = rawLimit;
+    let threads = gateway.threads.list(workspace).map(threadView);
+    if (channel) threads = threads.filter((thread) => thread.source === channel);
+    if (currentOnly) threads = threads.filter((thread) => thread.current);
+    if (runningOnly) threads = threads.filter((thread) => thread.running);
+    if (since !== undefined) threads = threads.filter((thread) => thread.lastActivityAt >= since);
+    return limit ? threads.slice(0, limit) : threads;
+  }
+
+  async function workspaceView(name: string, includeSkills: boolean) {
+    const workspace = config.resolved.workspaces[name];
+    if (!workspace) throw new Error(`workspace ${name} not found`);
+    const bots = new Map(telegram.status().map((bot) => [bot.name, bot]));
+    const threads = gateway.threads.list(name);
+    const channels = (workspace.channels ?? []).map((channel) => {
+      const bot = bots.get(channel.name);
+      return {
+        type: channel.type,
+        name: channel.name,
+        username: bot?.username,
+        connected: bot?.connected ?? false,
+        users: Object.keys(channel.users ?? {}).length,
+        groups: Object.keys(channel.groups ?? {}).length,
+      };
+    });
+    const result = {
+      name,
+      path: workspace.path,
+      pathExists: existsSync(workspace.path),
+      model: workspace.model ?? config.resolved.providers.defaultModel,
+      modelSource: workspace.model ? "workspace" : "inherited",
+      fallbacks: config.resolved.providers.fallbackModels,
+      thinking: config.resolved.providers.thinkingLevel ?? "high",
+      tools: workspace.tools ?? [...BUILTIN_TOOLS],
+      customPrompt: workspace.systemPrompt !== undefined,
+      channels,
+      threads: {
+        total: threads.length,
+        current: threads.filter((thread) => gateway.threads.isCurrent(thread.id)).length,
+        running: threads.filter((thread) => gateway.isThreadRunning(thread.id)).length,
+      },
+      session: {
+        idleDays: config.resolved.session?.idleDays ?? 7,
+        retentionDays: config.resolved.session?.retentionDays ?? 30,
+      },
+    };
+    if (!includeSkills) return result;
+    const skills = existsSync(workspace.path) ? await listWorkspaceSkills(workspace.path) : [];
+    return { ...result, skills: skills.map(({ name, description }) => ({ name, description })) };
+  }
+
   async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
@@ -133,6 +251,34 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     }
 
     try {
+      if (method === "GET" && path === "/status") {
+        const bots = telegram.status();
+        const configuredChannels = config.channels();
+        const healthyNames = new Set(bots.filter((bot) => bot.connected).map((bot) => bot.name));
+        const threads = gateway.threads.list();
+        return send(200, {
+          service: "running",
+          pid: process.pid,
+          uptimeSeconds: Math.floor(process.uptime()),
+          dashboard: config.resolved.dashboard,
+          workspaces: Object.keys(config.resolved.workspaces).length,
+          channels: {
+            total: configuredChannels.length,
+            healthy: configuredChannels.filter(({ channel }) => healthyNames.has(channel.name)).length,
+          },
+          threads: {
+            total: threads.length,
+            current: threads.filter((thread) => gateway.threads.isCurrent(thread.id)).length,
+            running: threads.filter((thread) => gateway.isThreadRunning(thread.id)).length,
+          },
+        });
+      }
+      if (method === "GET" && path === "/workspaces") {
+        return send(200, await Promise.all(Object.keys(config.resolved.workspaces).map((name) => workspaceView(name, false))));
+      }
+      if (method === "GET" && path.match(/^\/workspaces\/[^/]+$/)) {
+        return send(200, await workspaceView(decodeURIComponent(path.split("/")[2]), true));
+      }
       if (method === "GET" && path === "/overview") {
         return send(200, {
           bots: telegram.status(),
@@ -152,17 +298,35 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, redactTokens(config.raw));
       }
       if (method === "GET" && path === "/threads") {
-        const workspace = url.searchParams.get("workspace") ?? undefined;
-        return send(200, gateway.threads.list(workspace));
+        return send(200, listThreadViews(url));
+      }
+      if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        const run = cliRuns.get(thread.id);
+        if (!run) throw new ApiError(404, "no CLI run is tracked for this thread");
+        return send(200, run);
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+$/)) {
-        const thread = gateway.threads.get(path.split("/")[2]);
-        if (!thread) return send(404, { error: "thread not found" });
+        const thread = resolveThreadRef(path.split("/")[2]);
         const [messages, requests] = await Promise.all([
           thread.sessionFile ? readThreadMessages(thread.sessionFile) : [],
           gateway.requests.list(thread.id),
         ]);
-        return send(200, { thread, messages, requests });
+        const workspace = config.resolved.workspaces[thread.workspace];
+        const effectiveModel = workspace
+          ? config.modelCandidates(thread.model, workspace.model).find((candidate) => findModel(candidate))
+          : undefined;
+        return send(200, {
+          thread: {
+            ...threadView(thread),
+            effectiveModel,
+            lastModel: requests.at(-1)?.model,
+            messages: messages.length,
+            turns: messages.filter((message) => message.role === "user").length,
+          },
+          messages,
+          requests,
+        });
       }
       if (method === "GET" && path.match(/^\/requests\/[^/]+\/[^/]+$/)) {
         const [, , threadId, requestId] = path.split("/");
@@ -189,18 +353,46 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, { ok: true });
       }
       if (method === "POST" && path === "/threads") {
-        const { workspace, text } = (await body(req)) as { workspace: string; text: string };
-        const sessionKey = `dashboard:${workspace}:${randomUUID()}`;
+        const request = (await body(req)) as { workspace: string; text: string; source?: string };
+        const { workspace, text } = request;
+        if (!config.resolved.workspaces[workspace]) throw new Error(`workspace ${workspace} not found`);
+        if (!text?.trim()) throw new Error("message is required");
+        const source = request.source === "cli" ? "cli" : "dashboard";
+        const sessionKey = `${source}:${workspace}:${randomUUID()}`;
         const thread = gateway.newThread(sessionKey, workspace);
-        void runDashboardTurn(sessionKey, text);
+        if (source === "cli") {
+          cliRuns.set(thread.id, { status: "running" });
+          while (cliRuns.size > 100) {
+            const evictable = [...cliRuns].find(([, run]) => run.status !== "running")?.[0];
+            if (!evictable) break;
+            cliRuns.delete(evictable);
+          }
+          void runLocalTurn(sessionKey, text, source).then(
+            (result) => cliRuns.set(thread.id, { status: "done", result }),
+            (error) => cliRuns.set(thread.id, { status: "error", error: error instanceof Error ? error.message : String(error) }),
+          );
+          return send(201, threadView(thread));
+        }
+        void runLocalTurn(sessionKey, text, source).catch(() => {});
         return send(201, thread);
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
-        const thread = gateway.threads.get(path.split("/")[2]);
-        if (!thread) return send(404, { error: "thread not found" });
+        const thread = resolveThreadRef(path.split("/")[2]);
         const { text } = (await body(req)) as { text: string };
-        void runDashboardTurn(thread.sessionKey, text);
+        void runLocalTurn(thread.sessionKey, text, "dashboard").catch(() => {});
         return send(202, { ok: true });
+      }
+      if (method === "POST" && path.match(/^\/threads\/[^/]+\/send$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        const { text } = (await body(req)) as { text: string };
+        if (!text?.trim()) throw new Error("message is required");
+        if (text.length > MAX_OUTBOUND_MESSAGE_CHARS) throw new ApiError(413, "message is too large");
+        if (!gateway.threads.isCurrent(thread.id)) {
+          const current = gateway.threads.current(thread.sessionKey);
+          throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
+        }
+        const delivery = await gateway.deliverOutbound(thread.id, text, () => telegram.sendToSession(thread.sessionKey, text));
+        return send(200, { ok: true, threadId: thread.id, ...delivery });
       }
       if (method === "POST" && path.match(/^\/pairing\/[^/]+\/(approve|deny)$/)) {
         const [, , requestId, action] = path.split("/");
@@ -225,20 +417,28 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       return send(404, { error: "not found" });
     } catch (error) {
       log.warn(`api ${method} ${path}: ${error}`);
-      return send(400, { error: error instanceof Error ? error.message : String(error) });
+      const status = error instanceof ApiError ? error.status : 400;
+      return send(status, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  async function runDashboardTurn(sessionKey: string, message: string) {
+  async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli") {
     // turn-done/turn-error reach the UI via the gateway's own events.
-    await gateway
-      .handle({
+    try {
+      return await gateway.handle({
         sessionKey,
         text: message,
-        runtime: { channel: "dashboard", conversation: "eleven web dashboard", capabilities: ["rich markdown"] },
+        runtime: {
+          channel: source,
+          conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
+          capabilities: ["rich markdown"],
+        },
         workspaceHint: gateway.threads.current(sessionKey)?.workspace,
-      })
-      .catch((error) => log.warn(`dashboard turn failed: ${error}`));
+      });
+    } catch (error) {
+      log.warn(`${source} turn failed: ${error}`);
+      throw error;
+    }
   }
 
   function authStatus(provider: string) {
@@ -264,8 +464,20 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   };
 }
 
+const MAX_API_BODY_BYTES = 1024 * 1024;
+
 async function body(req: IncomingMessage): Promise<unknown> {
-  const raw = await text(req);
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_API_BODY_BYTES) throw new ApiError(413, "request body too large");
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > MAX_API_BODY_BYTES) throw new ApiError(413, "request body too large");
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
 }
 

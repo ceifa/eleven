@@ -55,6 +55,16 @@ const COMMANDS = [
   { command: "stop", description: "Abort the running turn" },
 ] as const;
 
+/** Keep one canonical command list. Telegram gives group-specific scopes
+ * precedence over the default scope, and gateways such as OpenClaw leave an
+ * all_group_chats list behind when a bot token is migrated. */
+export async function syncTelegramCommands(
+  api: Pick<Bot["api"], "setMyCommands" | "deleteMyCommands">,
+): Promise<void> {
+  await api.setMyCommands([...COMMANDS]);
+  await api.deleteMyCommands({ scope: { type: "all_group_chats" } });
+}
+
 export interface BotDeps {
   gateway: Gateway;
   pairing: PairingStore;
@@ -565,8 +575,8 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         const me = await bot.api.getMe();
         handle.username = me.username;
         await bot.api.deleteWebhook({ drop_pending_updates: false });
-        // Replace whatever a previous gateway registered in the "/" menu.
-        await bot.api.setMyCommands([...COMMANDS]).catch((error) => log.warn(`setMyCommands failed: ${error}`));
+        // Replace the default list and remove stale group-specific overrides.
+        await syncTelegramCommands(bot.api).catch((error) => log.warn(`command sync failed: ${error}`));
         handle.lastPollAt = Date.now();
         // stop() may have fired during the awaits above, before `runner` existed
         // to be stopped — don't start a poller that nothing can shut down.

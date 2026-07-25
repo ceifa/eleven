@@ -12,7 +12,7 @@ import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { agentDir, authStorage, findModel, modelRef, modelRegistry } from "./pi.ts";
+import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
 import { BUILTIN_TOOLS } from "../config.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
@@ -420,8 +420,7 @@ export class Runner {
     const { session } = await createAgentSession({
       cwd: request.workspacePath,
       agentDir,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       model: initialModel,
       thinkingLevel: request.thinkingLevel,
       tools: request.tools?.filter((t) => (BUILTIN_TOOLS as readonly string[]).includes(t)),

@@ -10,7 +10,7 @@ import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
 import { readThreadMessages, readToolResult } from "../threads/reader.ts";
-import { findModel, modelRegistry } from "../agent/pi.ts";
+import { findModel, modelRuntime } from "../agent/pi.ts";
 import { logger } from "../log.ts";
 
 const log = logger("dashboard");
@@ -400,7 +400,8 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, request);
       }
       if (method === "GET" && path === "/models") {
-        return send(200, modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`).sort());
+        const available = await modelRuntime.getAvailable();
+        return send(200, available.map((m) => `${m.provider}/${m.id}`).sort());
       }
       if (method === "GET" && path === "/providers") {
         const configured = new Set(
@@ -408,7 +409,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
             .map((ref) => ref.split("/")[0])
             .filter(Boolean),
         );
-        for (const model of modelRegistry.getAvailable()) configured.add(model.provider);
+        for (const model of await modelRuntime.getAvailable()) configured.add(model.provider);
         return send(
           200,
           [...configured].sort().map((provider) => ({ provider, ...authStatus(provider) })),
@@ -443,7 +444,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
 
   function authStatus(provider: string) {
     try {
-      const status = modelRegistry.getProviderAuthStatus(provider);
+      const status = modelRuntime.getProviderAuthStatus(provider);
       return { configured: status.configured, source: status.source, label: status.label };
     } catch {
       return { configured: false };

@@ -4,7 +4,7 @@ import { ConfigStore } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { TelegramChannel } from "./channels/telegram/index.ts";
 import { startDashboard } from "./dashboard/server.ts";
-import { trustWorkspaces } from "./agent/pi.ts";
+import { refreshModelCatalogs, trustWorkspaces } from "./agent/pi.ts";
 import { PID_FILE } from "./paths.ts";
 import { readJsonFile, writeJsonFile } from "./util.ts";
 import { logger } from "./log.ts";
@@ -89,6 +89,9 @@ export async function startDaemon() {
   const gateway = new Gateway(config);
   const telegram = new TelegramChannel(config, gateway);
   const dashboard = startDashboard(config, gateway, telegram);
+  // Off the startup path on purpose: pi resolves models from the bundled
+  // catalog immediately, and this only widens it to what the providers list now.
+  const stopCatalogRefresh = refreshModelCatalogs();
 
   log.info("eleven is up");
 
@@ -103,6 +106,7 @@ export async function startDaemon() {
 
   const shutdown = async (signal: string) => {
     log.info(`${signal} received, shutting down`);
+    stopCatalogRefresh();
     await Promise.allSettled([telegram.stop(), dashboard.close()]);
     rmSync(PID_FILE, { force: true });
     process.exit(0);

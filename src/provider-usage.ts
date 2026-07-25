@@ -1,4 +1,8 @@
-import { authStorage } from "./agent/pi.ts";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
+import { modelRuntime } from "./agent/pi.ts";
+import { logger } from "./log.ts";
+
+const log = logger("usage");
 
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
@@ -64,14 +68,30 @@ export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsag
   throw new Error(`subscription usage is not available for ${provider}`);
 }
 
-async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
-  const token = await authStorage.getApiKey(provider);
+/**
+ * Resolve a provider's token, refreshing OAuth under pi's file lock. pi rejects
+ * when that refresh fails (expired or revoked login) and carries the raw
+ * provider response — worth logging, far too noisy for a chat reply.
+ */
+async function providerToken(provider: string, label: string): Promise<string> {
+  let token: string | undefined;
+  try {
+    token = (await modelRuntime.getAuth(provider))?.auth.apiKey;
+  } catch (error) {
+    log.warn(`${provider} auth failed: ${error instanceof Error ? error.message : error}`);
+    throw new Error(`${label} login is not usable — run \`pi\` and \`/login\``);
+  }
   if (!token) throw new Error(`${provider} is not authenticated`);
+  return token;
+}
 
-  // getApiKey may refresh OAuth and update the stored credential, so read the
+async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
+  const token = await providerToken(provider, "OpenAI");
+
+  // getAuth may refresh OAuth and update the stored credential, so read the
   // account id afterwards. ChatGPT team accounts need this header for the
   // correct subscription quota.
-  const credential = authStorage.get(provider);
+  const credential = readStoredCredential(provider);
   const accountId = credential?.type === "oauth" && typeof credential.accountId === "string"
     ? credential.accountId
     : undefined;
@@ -127,9 +147,9 @@ async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
 async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   // Pi stores both the short-lived Copilot API token (`access`) and the GitHub
   // OAuth token (`refresh`). The account endpoint expects the latter. Calling
-  // getApiKey first validates/refreshes the credential under Pi's file lock.
-  if (!await authStorage.getApiKey(provider)) throw new Error(`${provider} is not authenticated`);
-  const credential = authStorage.get(provider);
+  // getAuth first validates/refreshes the credential under Pi's file lock.
+  await providerToken(provider, "GitHub Copilot");
+  const credential = readStoredCredential(provider);
   const token = credential?.type === "oauth" && typeof credential.refresh === "string"
     ? credential.refresh
     : undefined;

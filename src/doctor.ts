@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { Api } from "grammy";
 import { ConfigStore, isUnresolved } from "./config.ts";
-import { findModel, modelRegistry } from "./agent/pi.ts";
+import { findModel, modelRuntime } from "./agent/pi.ts";
 import { CONFIG_FILE } from "./paths.ts";
 
 export async function runDoctor(): Promise<boolean> {
@@ -32,7 +32,7 @@ export async function runDoctor(): Promise<boolean> {
       check(false, `model ${ref}`, "not in pi's registry");
       continue;
     }
-    const authed = modelRegistry.hasConfiguredAuth(model);
+    const authed = modelRuntime.hasConfiguredAuth(model.provider);
     check(authed, `model ${ref}`, authed ? undefined : "no auth — run `pi /login` or set the provider API key");
   }
 

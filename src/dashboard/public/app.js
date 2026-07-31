@@ -336,13 +336,23 @@ function renderThreadList() {
           h("div", { class: "flex items-center gap-2 text-xs thread-meta font-mono" },
             h("span", { class: "text-warning" }, thread.workspace),
             channelSource(thread.sessionKey),
-            h("span", { class: "ml-auto" }, timeAgo(thread.lastActivityAt)),
+            h("span", { class: "ml-auto", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
           ),
         ),
       ),
     ),
   );
 }
+
+// The list is server-ordered by last activity and only refetched on events, so
+// on a quiet daemon the "5m" labels silently drift and make that order look
+// wrong. Retick just the label text — rebuilding the cards would restart the
+// live-halo animations.
+setInterval(() => {
+  for (const label of document.querySelectorAll("#thread-list [data-since]")) {
+    label.textContent = timeAgo(Number(label.dataset.since));
+  }
+}, 30_000);
 
 async function openThread(id) {
   const data = await api.get(`/threads/${id}`).catch(() => null);

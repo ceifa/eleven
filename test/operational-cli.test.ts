@@ -21,6 +21,33 @@ test("rotated threads are derived as old, not stored as a separate state", () =>
   }
 });
 
+test("threads list most recently active first, with a stable order on ties", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-thread-order-"));
+  try {
+    const store = new ThreadStore(join(dir, "threads.json"));
+    const a = store.rotate("telegram:main:1", "agent");
+    const b = store.rotate("telegram:main:2", "agent");
+    const c = store.rotate("telegram:main:3", "agent");
+
+    store.update(a.id, { lastActivityAt: 3_000 });
+    store.update(b.id, { lastActivityAt: 1_000 });
+    store.update(c.id, { lastActivityAt: 2_000 });
+    assert.deepEqual(store.list().map((t) => t.id), [a.id, c.id, b.id]);
+
+    // A bump reorders — this is what an arriving message does mid-turn.
+    store.update(b.id, { lastActivityAt: 4_000 });
+    assert.equal(store.list()[0].id, b.id);
+
+    // Same-millisecond writes must not fall back to insertion order.
+    store.update(a.id, { lastActivityAt: 4_000, createdAt: 20 });
+    store.update(c.id, { lastActivityAt: 4_000, createdAt: 10 });
+    store.update(b.id, { lastActivityAt: 4_000, createdAt: 30 });
+    assert.deepEqual(store.list().map((t) => t.id), [b.id, a.id, c.id]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("literal outbound messages are appended to the pi transcript", () => {
   const dir = mkdtempSync(join(tmpdir(), "eleven-outbound-"));
   try {

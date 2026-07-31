@@ -83,9 +83,13 @@ export class Gateway extends EventEmitter {
   async handle(incoming: IncomingMessage): Promise<TurnResult | undefined> {
     const { thread, workspace } = this.resolveThread(incoming.sessionKey, incoming.workspaceHint);
     log.info(`turn start: ${incoming.sessionKey} → ${thread.workspace}/${thread.id.slice(0, 8)}`);
-    if (!thread.title) {
-      this.threads.update(thread.id, { title: incoming.text.slice(0, 80) });
-    }
+    // Bump on arrival, not just on completion: listings are ordered by last
+    // activity, so a thread whose turn is still running (they can take minutes)
+    // must already sort above idle ones. One update → one persist.
+    this.threads.update(thread.id, {
+      lastActivityAt: Date.now(),
+      ...(thread.title ? undefined : { title: incoming.text.slice(0, 80) }),
+    });
     this.emit("thread-activity", { thread, direction: "in", text: incoming.text });
 
     const events: TurnEvents = {

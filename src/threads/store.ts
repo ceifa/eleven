@@ -107,10 +107,13 @@ export class ThreadStore {
     this.persist();
   }
 
+  /** Most recently active first. Ties (same-millisecond writes, or threads
+   * restored from one store load) break by newest created, then by id, so the
+   * order is stable across calls instead of following object-key insertion. */
   list(workspace?: string): ThreadEntry[] {
     return Object.values(this.data.threads)
       .filter((t) => !workspace || t.workspace === workspace)
-      .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      .sort((a, b) => b.lastActivityAt - a.lastActivityAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
   }
 
   // update() runs twice per turn — debounced so a turn costs one write, not two.

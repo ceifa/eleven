@@ -2,11 +2,13 @@ import { stat } from "node:fs/promises";
 import { parseSessionEntries, type CustomEntry, type SessionEntry, type SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { contentText, keyedLane, lruTouch, readFileSlice, summarizeToolArgs } from "../util.ts";
 
-/** Custom session entry recording the tool calls of one nested-runtime turn
- *  (Claude Code runs its own tool loop, so Pi's transcript never sees them as
- *  toolCall blocks). Display-only: pi ignores plain custom entries when it
- *  builds LLM context, which is exactly why the agent loop won't re-execute
- *  these. Written by the Runner, rendered here. */
+/** Custom session entry recording nested-runtime tool calls (Claude Code runs
+ *  its own tool loop, so Pi's transcript never sees them as toolCall blocks).
+ *  The Runner appends one entry per call, the moment it happens — that's what
+ *  makes the record survive a daemon restart mid-turn, exactly like Pi's own
+ *  incremental toolCall persistence. Display-only: pi ignores plain custom
+ *  entries when it builds LLM context, which is exactly why the agent loop
+ *  won't re-execute these. */
 export const TOOL_CALLS_ENTRY_TYPE = "eleven:tool-calls";
 
 export interface RecordedToolCall {
@@ -37,12 +39,14 @@ export interface ToolResult {
 }
 
 /** A session entry slimmed to its tree link plus what's displayable: the
- *  rendered message, or — for toolResult entries — the recorded output. */
+ *  rendered message, for toolResult entries the recorded output, or — for
+ *  nested-runtime records — the tool calls to fold into their turn's message. */
 interface Node {
   id: string;
   parentId: string | null;
   message?: ThreadMessage;
   result?: ToolResult & { toolCallId: string };
+  record?: { calls: NonNullable<ThreadMessage["toolCalls"]>; timestamp?: string };
 }
 
 // Session files are append-only and re-read on every dashboard view — cache the
@@ -97,22 +101,14 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
 
     for (const entry of parseSessionEntries(complete)) {
       if (entry.type === "session") continue; // header — not part of the tree
-      const node: Node = { id: entry.id, parentId: entry.parentId, message: renderMessage(entry), result: renderResult(entry) };
-      // Nested-runtime tool calls arrive as a custom entry appended right after
-      // the turn's assistant message — fold them into that message so the
-      // dashboard renders them like any provider's tool calls. Attach at parse
-      // time: each entry is parsed exactly once, so calls never double up.
       const recorded = renderRecordedToolCalls(entry);
-      if (recorded) {
-        const parent = node.parentId ? byId.get(node.parentId) : undefined;
-        if (parent?.message?.role === "assistant") {
-          parent.message.toolCalls = [...recorded, ...(parent.message.toolCalls ?? [])];
-        } else {
-          // No assistant message to attach to (e.g. the turn was aborted
-          // mid-tool) — show the calls as their own transcript row.
-          node.message = { role: "assistant", text: "", timestamp: entry.timestamp, toolCalls: recorded };
-        }
-      }
+      const node: Node = {
+        id: entry.id,
+        parentId: entry.parentId,
+        message: renderMessage(entry),
+        result: renderResult(entry),
+        ...(recorded ? { record: { calls: recorded, timestamp: entry.timestamp } } : {}),
+      };
       nodes.push(node);
       byId.set(node.id, node);
     }
@@ -129,12 +125,58 @@ async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
 
   // Appending always advances the leaf, so the last entry is the tip of the
   // active branch. The hop cap guards against a malformed parent cycle.
-  const messages: ThreadMessage[] = [];
+  const branch: Node[] = [];
   let hops = nodes.length;
   for (let node = nodes.at(-1); node && hops-- > 0; node = node.parentId ? byId.get(node.parentId) : undefined) {
-    if (node.message) messages.push(node.message);
+    if (node.message || node.record) branch.push(node);
   }
-  return messages.reverse();
+  branch.reverse();
+
+  // Fold recorded tool calls into their turn's message. Records are written as
+  // the calls happen, so they precede their turn's assistant message; older
+  // files carry one record right after it (parent = the assistant). Everything
+  // is emitted as copies — the cache is shared and reused across reads.
+  const messages: ThreadMessage[] = [];
+  const emittedAt = new Map<string, number>(); // node id → index in `messages`
+  let pending: NonNullable<ThreadMessage["toolCalls"]> = [];
+  let pendingTimestamp: string | undefined;
+  const flushPending = () => {
+    if (!pending.length) return;
+    // The turn never produced an assistant message (aborted mid-tool, still
+    // running, or the daemon died) — the calls get their own transcript row.
+    messages.push({ role: "assistant", text: "", timestamp: pendingTimestamp, toolCalls: pending });
+    pending = [];
+    pendingTimestamp = undefined;
+  };
+  for (const node of branch) {
+    if (node.record) {
+      const parentIndex = node.parentId !== null ? emittedAt.get(node.parentId) : undefined;
+      const parent = parentIndex !== undefined ? messages[parentIndex] : undefined;
+      if (parent?.role === "assistant") {
+        parent.toolCalls = [...node.record.calls, ...(parent.toolCalls ?? [])];
+      } else {
+        pendingTimestamp ??= node.record.timestamp;
+        pending.push(...node.record.calls);
+      }
+      continue;
+    }
+    const message = node.message!;
+    if (message.role === "assistant") {
+      const copy: ThreadMessage = pending.length
+        ? { ...message, toolCalls: [...pending, ...(message.toolCalls ?? [])] }
+        : { ...message, ...(message.toolCalls ? { toolCalls: [...message.toolCalls] } : {}) };
+      pending = [];
+      pendingTimestamp = undefined;
+      emittedAt.set(node.id, messages.length);
+      messages.push(copy);
+    } else {
+      flushPending();
+      emittedAt.set(node.id, messages.length);
+      messages.push(message);
+    }
+  }
+  flushPending();
+  return messages;
 }
 
 function renderMessage(entry: SessionEntry): ThreadMessage | undefined {

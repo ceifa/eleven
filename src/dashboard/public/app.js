@@ -364,9 +364,10 @@ async function openThread(id) {
   state.activeThread = data.thread;
   state.messages = data.messages;
   state.requests = data.requests ?? [];
-  // A turn already in flight: catch up on its activity so far — from here on
-  // the WS tool-call/delta events keep the pane current.
-  state.liveToolCalls = data.live?.toolCalls ?? [];
+  // A turn already in flight: its tool calls are already in `messages` (they
+  // persist as they happen); catch up on the streamed prose here — from there
+  // on the WS tool-call/delta events keep the pane current.
+  state.liveToolCalls = [];
   state.streaming = data.live?.text ?? "";
   renderThreadPane();
   renderThreadList();

@@ -31,14 +31,12 @@ const WAKE_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_HEARTBEAT_MS = 60 * 1000;
 // In-memory activity of a running turn, so a dashboard opened mid-turn can
 // catch up on what already happened (WS events only reach pages already open).
-const LIVE_TOOL_CALLS_MAX = 200;
+// Tool calls need no equivalent: they're persisted to the session file as they
+// happen and arrive with the thread's regular messages.
 const LIVE_TEXT_MAX_CHARS = 64_000;
 
 export interface LiveTurn {
   startedAt: number;
-  /** Tool calls so far, oldest first; capped — `dropped` counts evictions. */
-  toolCalls: { name: string; summary: string; at: number }[];
-  dropped: number;
   /** Streamed prose so far (nested runtimes only deliver it at the end). */
   text: string;
 }
@@ -85,7 +83,7 @@ export class Gateway extends EventEmitter {
       // the same pi session (not just after a successful turn reports it back).
       if (sessionFile) this.threads.update(threadId, { sessionFile });
       this.pending.begin(threadId);
-      this.liveTurns.set(threadId, { startedAt: Date.now(), toolCalls: [], dropped: 0, text: "" });
+      this.liveTurns.set(threadId, { startedAt: Date.now(), text: "" });
     },
     // Fired inside the turn lane, after channel delivery — so the ledger
     // covers the send, and the next turn's begin cannot overlap this end.
@@ -135,16 +133,7 @@ export class Gateway extends EventEmitter {
       // names are normalized by its adapter before they reach the dashboard.
       onToolCall: (name, args) => {
         incoming.events?.onToolCall?.(name, args);
-        const summary = summarizeToolArgs(args);
-        const live = this.liveTurns.get(thread.id);
-        if (live) {
-          live.toolCalls.push({ name, summary, at: Date.now() });
-          if (live.toolCalls.length > LIVE_TOOL_CALLS_MAX) {
-            live.toolCalls.shift();
-            live.dropped++;
-          }
-        }
-        this.emit("tool-call", { threadId: thread.id, name, summary });
+        this.emit("tool-call", { threadId: thread.id, name, summary: summarizeToolArgs(args) });
       },
       onTaskActivity: (activity) => {
         incoming.events?.onTaskActivity?.(activity);

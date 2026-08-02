@@ -307,24 +307,22 @@ export class Runner {
     let lastErrorMessage: string | undefined;
     let attemptHadToolActivity = false;
     // Claude Code runs its own tool loop, so these calls never appear as
-    // toolCall blocks in Pi's transcript. Collect them here and persist a
-    // display-only custom entry once the attempt is accepted — that's what the
-    // dashboard renders for nested-runtime turns.
-    const claudeToolCalls: RecordedToolCall[] = [];
+    // toolCall blocks in Pi's transcript. Persist each one the moment it
+    // happens — like Pi's own incremental toolCall writes — so a mid-turn F5
+    // or a daemon restart never loses the record. Custom entries stay out of
+    // LLM context; a failover rewind drops the failed attempt's entries with
+    // the rest of its branch.
+    let claudeToolCallCount = 0;
     setClaudeToolListener(session.sessionId, (name, args) => {
       attemptHadToolActivity = true;
-      claudeToolCalls.push({ id: `claude:${claudeToolCalls.length}:${Date.now()}`, name, args });
+      const call: RecordedToolCall = { id: `claude:${claudeToolCallCount++}:${Date.now()}`, name, args };
+      try {
+        sessionManager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [call] } satisfies ToolCallsEntryData);
+      } catch (error) {
+        log.warn(`failed to record tool call ${name} for ${threadId}: ${error}`);
+      }
       events.onToolCall?.(name, args);
     });
-    const recordClaudeToolCalls = () => {
-      if (!claudeToolCalls.length) return;
-      const data: ToolCallsEntryData = { calls: claudeToolCalls.splice(0) };
-      try {
-        sessionManager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, data);
-      } catch (error) {
-        log.warn(`failed to record ${data.calls.length} tool call(s) for ${threadId}: ${error}`);
-      }
-    };
     setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
@@ -362,7 +360,6 @@ export class Runner {
       const turnStart = sessionManager.getLeafId();
       for (const [index, { entry, model }] of models.entries()) {
         attemptHadToolActivity = false;
-        claudeToolCalls.length = 0; // an abandoned attempt's calls are off the surviving branch
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
           await rewindFailedAttempt(session, sessionManager, turnStart);
@@ -405,7 +402,6 @@ export class Runner {
         // returning an empty message) still counts as a failure worth failing over.
         if (collected.length || attemptHadToolActivity) {
           if (model.provider === CLAUDE_CODE_PROVIDER) await commitClaudeSession(session.sessionId);
-          recordClaudeToolCalls();
           warm.lastUsedAt = Date.now();
           return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model), status: "completed" };
         }
@@ -416,7 +412,6 @@ export class Runner {
       if (active.aborted) {
         // Stopped by the user — hand back whatever prose arrived before the stop
         // (often nothing). The session may sit mid-tool, so rebuild it next turn.
-        recordClaudeToolCalls();
         this.dropSession(threadId);
         return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: activeModel.current, status: "stopped" };
       }

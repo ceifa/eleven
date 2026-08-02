@@ -580,8 +580,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       const name = user?.name || "user";
       return `DM with ${name}${user?.username ? ` (@${user.username})` : ""}`;
     }
-    const title = config?.groups?.[String(target.chatId)]?.title ?? String(target.chatId);
-    return `group "${title}"${target.topic !== undefined ? `, topic ${target.topic}` : ""}`;
+    const group = config?.groups?.[String(target.chatId)];
+    const title = group?.title ?? String(target.chatId);
+    if (target.topic === undefined) return `group "${title}"`;
+    const topicTitle = group?.topics?.[String(target.topic)]?.title;
+    return `group "${title}", topic ${topicTitle ? `"${topicTitle}"` : target.topic}`;
   }
 
   // --- polling lifecycle: runner + stall watchdog + exponential restart backoff ---

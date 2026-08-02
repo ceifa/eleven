@@ -24,9 +24,9 @@ export async function runDoctor(): Promise<boolean> {
     return false;
   }
 
-  const { workspaces, providers } = config.resolved;
+  const { workspaces, models } = config.resolved;
 
-  if (!providers.defaultModel) check(false, "model", "providers.defaultModel is empty");
+  if (!models.length) check(false, "model", "the models sequence is empty");
   let claudeAuth: Awaited<ReturnType<typeof probeClaudeCodeAuth>> | undefined;
   for (const ref of config.configuredModelRefs()) {
     const model = findModel(ref);

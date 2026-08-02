@@ -461,6 +461,55 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .toast-end { right: 0; bottom: 0; }
 .toast .alert { box-shadow: 0 8px 24px oklch(0% 0 0 / 0.5); }
 
+/* ---------- the model sequence (Models page) ---------- */
+
+/* The sequence rendered as a daisy-chain on a wire — the same vocabulary as
+   the sidebar string lights. Each card hangs off a numbered node; the head of
+   the chain glows amber (it leads every turn), fallbacks idle dim until a turn
+   actually falls down the wire to them. */
+.chain { position: relative; display: flex; flex-direction: column; gap: 1.25rem; padding-left: 2.4rem; }
+.chain::before {
+  content: ""; position: absolute; left: 0.8rem; top: 1.4rem; bottom: 1.4rem; width: 2px;
+  background: oklch(32% 0.02 25); /* the wire — same stroke as .string-lights .wire */
+}
+.chain-step { position: relative; }
+.chain-node {
+  position: absolute; left: -2.4rem; top: 0.65rem;
+  width: 1.7rem; height: 1.7rem;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  background: var(--color-base-100);
+  border: 1px solid var(--color-base-300);
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+}
+.chain-node.is-lead {
+  border-color: color-mix(in oklab, var(--color-warning) 65%, transparent);
+  color: var(--color-warning);
+  box-shadow:
+    0 0 8px color-mix(in oklab, var(--color-warning) 45%, transparent),
+    inset 0 0 6px color-mix(in oklab, var(--color-warning) 25%, transparent);
+}
+.chain-role {
+  font-family: "Grenze", serif;
+  font-size: 0.85rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+}
+.chain-step:first-child .chain-role { color: var(--color-warning); }
+
+/* subscription usage meters: how much of a quota window is already burned */
+.usage-label { min-width: 5.5rem; color: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
+.meter {
+  flex: 1 1 auto; min-width: 4rem; max-width: 16rem; height: 5px;
+  border-radius: 999px; overflow: hidden;
+  background: color-mix(in oklab, var(--color-base-content) 12%, transparent);
+}
+.meter > i { display: block; height: 100%; border-radius: 999px; background: var(--color-success); }
+.meter.warn > i { background: var(--color-warning); }
+.meter.crit > i { background: var(--color-error); }
+
 /* ---------- misc components ---------- */
 
 .divider { height: 1px; background: var(--color-base-300); margin: 1rem 0; }

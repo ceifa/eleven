@@ -9,7 +9,6 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
@@ -21,10 +20,11 @@ import {
   runWithClaudeSession,
   setClaudeTaskListener,
   setClaudeToolListener,
+  setClaudeWorkspaceTools,
   unregisterClaudeSession,
 } from "./claude-code.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
-import { PI_BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
+import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 import type { TaskActivityEvent } from "./task-activity.ts";
@@ -44,9 +44,9 @@ export interface TurnRequest {
   sessionDir: string;
   workspacePath: string;
   runtime: RuntimeContext;
-  /** Ordered candidates: primary first, then fallbacks. */
-  models: string[];
-  thinkingLevel: ThinkingLevel;
+  /** Ordered candidates: primary first, then fallbacks — each with its own
+   * reasoning level and tool allowlist. */
+  models: ModelEntry[];
   /** Provider-neutral workspace capability allowlist; undefined enables the curated default. */
   tools?: WorkspaceTool[];
   customTools?: ToolDefinition[];
@@ -90,13 +90,23 @@ interface ActiveTurn {
 interface WarmSession {
   session: AgentSession;
   sessionManager: SessionManager;
-  /** Everything that must match for reuse (models, tools, prompt, paths). */
+  /** Everything that must match for reuse (tools, prompt, paths). */
   signature: string;
   /** Custom tools compare by identity — channels keep them stable per chat. */
   customTools?: ToolDefinition[];
   /** Read by the request-log extension at call time, so it survives failover. */
   activeModel: { current: string };
+  /** Narrow the live session to one candidate's tool allowlist. */
+  applyToolPolicy: (entryTools?: WorkspaceTool[]) => void;
   lastUsedAt: number;
+}
+
+/** A candidate's effective policy: its allowlist ∩ the workspace's; undefined
+ * on either side means "everything that side allows". */
+function intersectTools(workspace?: WorkspaceTool[], entry?: WorkspaceTool[]): WorkspaceTool[] | undefined {
+  if (!workspace) return entry;
+  if (!entry) return workspace;
+  return workspace.filter((tool) => entry.includes(tool));
 }
 
 /** Reuse demands the same tool objects — a rebuilt tool may capture stale state. */
@@ -256,11 +266,11 @@ export class Runner {
     // resolved before that turn created the session file — adopt the warm
     // session's file instead of forking a second fresh session.
     request.sessionFile ??= this.warm.get(threadId)?.sessionManager.getSessionFile() ?? undefined;
-    const candidates = request.models.map((ref) => ({ ref, model: findModel(ref) }));
-    const missing = candidates.filter((c) => !c.model).map((c) => c.ref);
-    const models = candidates.flatMap((c) => (c.model ? [c.model] : []));
+    const candidates = request.models.map((entry) => ({ entry, model: findModel(entry.model) }));
+    const missing = candidates.filter((c) => !c.model).map((c) => c.entry.model);
+    const models = candidates.flatMap((c) => (c.model ? [{ entry: c.entry, model: c.model }] : []));
     if (missing.length) log.warn(`unknown models skipped: ${missing.join(", ")}`);
-    if (!models.length) throw new Error(`no usable model among: ${request.models.join(", ")}`);
+    if (!models.length) throw new Error(`no usable model among: ${request.models.map((entry) => entry.model).join(", ")}`);
 
     const warm = await this.acquireSession(threadId, request, models[0]);
     const { session, sessionManager, activeModel } = warm;
@@ -319,7 +329,7 @@ export class Runner {
       // Failover branches back to this entry instead, abandoning the failed
       // attempt (session files stay append-only; only the leaf pointer moves).
       const turnStart = sessionManager.getLeafId();
-      for (const [index, model] of models.entries()) {
+      for (const [index, { entry, model }] of models.entries()) {
         attemptHadToolActivity = false;
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
@@ -329,6 +339,9 @@ export class Runner {
           collected.length = 0;
           events.onFailover?.();
           await session.setModel(model);
+          // Each candidate runs with its own reasoning level and tool allowlist.
+          session.setThinkingLevel(entry.reasoning ?? DEFAULT_REASONING);
+          warm.applyToolPolicy(entry.tools);
           activeModel.current = modelRef(model);
         }
         lastStopReason = undefined;
@@ -389,14 +402,18 @@ export class Runner {
   }
 
   /** The thread's warm session when everything about it still matches; a fresh one otherwise. */
-  private async acquireSession(threadId: string, request: TurnRequest, initialModel: Model<Api>): Promise<WarmSession> {
+  private async acquireSession(
+    threadId: string,
+    request: TurnRequest,
+    initial: { entry: ModelEntry; model: Model<Api> },
+  ): Promise<WarmSession> {
     const systemPrompt = buildSystemPrompt(request.runtime, request.prompt);
-    // Model candidates are deliberately absent: setModel below reconciles the
-    // active model, so editing the fallback list never discards a warm session.
+    // Model candidates (and their reasoning/tool settings) are deliberately
+    // absent: setModel/setThinkingLevel/applyToolPolicy below reconcile the
+    // live session, so editing the sequence never discards a warm session.
     const signature = JSON.stringify([
       request.sessionDir,
       request.workspacePath,
-      request.thinkingLevel,
       request.tools,
       systemPrompt,
     ]);
@@ -409,10 +426,13 @@ export class Runner {
       sameTools(cached.customTools, request.customTools)
     ) {
       cached.lastUsedAt = Date.now();
-      // The session may still sit on last turn's fallback model.
+      // The session may still sit on last turn's fallback model (or a previous
+      // config's reasoning/tool settings).
       const { session } = cached;
-      if (!session.model || modelRef(session.model) !== modelRef(initialModel)) await session.setModel(initialModel);
-      cached.activeModel.current = modelRef(initialModel);
+      if (!session.model || modelRef(session.model) !== modelRef(initial.model)) await session.setModel(initial.model);
+      session.setThinkingLevel(initial.entry.reasoning ?? DEFAULT_REASONING);
+      cached.applyToolPolicy(initial.entry.tools);
+      cached.activeModel.current = modelRef(initial.model);
       return cached;
     }
     this.dropSession(threadId);
@@ -432,7 +452,7 @@ export class Runner {
 
     // Mutable ref so the request-log extension tags payloads with the model
     // actually in use, even after a mid-turn failover.
-    const activeModel = { current: modelRef(initialModel) };
+    const activeModel = { current: modelRef(initial.model) };
 
     const settingsManager = SettingsManager.create(request.workspacePath, agentDir);
     const loader = new DefaultResourceLoader({
@@ -468,8 +488,8 @@ export class Runner {
       cwd: request.workspacePath,
       agentDir,
       modelRuntime,
-      model: initialModel,
-      thinkingLevel: request.thinkingLevel,
+      model: initial.model,
+      thinkingLevel: initial.entry.reasoning ?? DEFAULT_REASONING,
       tools: request.tools
         ? [
             ...request.tools.filter((t) => (PI_BUILTIN_TOOLS as readonly string[]).includes(t)),
@@ -496,12 +516,28 @@ export class Runner {
     const customNames = session.getAllTools()
       .map((tool) => tool.name)
       .filter((name) => !(PI_BUILTIN_TOOLS as readonly string[]).includes(name));
-    session.setActiveToolsByName([...new Set([...session.getActiveToolNames(), ...customNames])]);
     registerClaudeSession(session.sessionId, {
       cwd: request.workspacePath,
       workspaceTools: request.tools,
       customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
     });
+
+    // The workspace-wide active set (pi builtins the workspace allows +
+    // extension/custom tools). A candidate's allowlist only ever gates the four
+    // core capabilities inside it — extension and channel tools stay on.
+    const baseActive = [...new Set([...session.getActiveToolNames(), ...customNames])];
+    // Close over just this field: the closure lives as long as the warm
+    // session, and capturing `request` would pin the turn's text and images.
+    const workspaceTools = request.tools;
+    const applyToolPolicy = (entryTools?: WorkspaceTool[]) => {
+      const policy = intersectTools(workspaceTools, entryTools);
+      const allowed = new Set<string>(policy ?? PI_BUILTIN_TOOLS);
+      session.setActiveToolsByName(
+        baseActive.filter((name) => !(PI_BUILTIN_TOOLS as readonly string[]).includes(name) || allowed.has(name)),
+      );
+      setClaudeWorkspaceTools(session.sessionId, policy);
+    };
+    applyToolPolicy(initial.entry.tools);
 
     const warm: WarmSession = {
       session,
@@ -509,6 +545,7 @@ export class Runner {
       signature,
       customTools: request.customTools,
       activeModel,
+      applyToolPolicy,
       lastUsedAt: Date.now(),
     };
     this.warm.set(threadId, warm);

@@ -7,6 +7,7 @@ import { lruTouch } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
 import { collectInboundMedia, formatInboundBody } from "./media.ts";
+import { parseTelegramSessionKey } from "./session-key.ts";
 import { DraftStream } from "./stream.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
@@ -344,13 +345,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         ? [config?.users?.[String(target.userId)]?.appendSystemPrompt]
         : [group?.appendSystemPrompt, topicConfig?.appendSystemPrompt]
     ).filter((a): a is string => !!a);
-
     try {
       const result = await deps.gateway.handle({
         sessionKey,
         text,
         images,
         workspaceHint: deps.workspace(),
+        // Most specific first: a topic's model settings beat its group's.
+        modelScopes: [topicConfig, group],
         appends,
         customTools: [tool],
         runtime: {
@@ -411,18 +413,17 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   /** Resume a conversation a restart cut off — reconstruct the target from the
    * session key alone (no live update to read) and re-prompt the agent. */
   async function wake(sessionKey: string) {
-    const prefix = `telegram:${name}:`;
-    const match = sessionKey.startsWith(prefix) ? sessionKey.slice(prefix.length).match(/^(-?\d+)(?::topic:(\d+))?$/) : null;
-    if (!match) {
+    const target = parseTelegramSessionKey(sessionKey);
+    if (!target || target.channel !== name) {
       log.warn(`cannot wake ${sessionKey}: unrecognized session key`);
       return;
     }
-    const chatId = Number(match[1]);
+    const { chatId, topic } = target;
     // Telegram private-chat ids equal the user id and are positive; groups/channels are negative.
     const isPrivate = chatId > 0;
     log.info(`waking interrupted turn in ${sessionKey}`);
     await runTurn(
-      { chatId, topic: match[2] !== undefined ? Number(match[2]) : undefined, isPrivate, userId: isPrivate ? chatId : undefined },
+      { chatId, topic, isPrivate, userId: isPrivate ? chatId : undefined },
       WAKE_PROMPT,
       [],
     );

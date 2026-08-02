@@ -113,6 +113,13 @@ export function unregisterClaudeSession(sessionId: string): void {
   sessions.delete(sessionId);
 }
 
+/** Narrow (or restore) the tool policy of a live registration — the runner
+ * applies each model candidate's own allowlist before prompting it. */
+export function setClaudeWorkspaceTools(sessionId: string, tools: WorkspaceTool[] | undefined): void {
+  const session = sessions.get(sessionId);
+  if (session) session.workspaceTools = tools;
+}
+
 /** Delete every hidden Claude transcript owned by one Pi session. */
 export async function cleanupClaudeSessions(sessionId: string): Promise<void> {
   planTasksBySession.delete(sessionId);

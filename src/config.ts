@@ -11,6 +11,18 @@ export type WorkspaceTool = (typeof BUILTIN_TOOLS)[number];
 /** The subset implemented by Pi itself. */
 export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
 
+export const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+/** What a ModelEntry without an explicit reasoning level runs at. The daemon
+ * and the dashboard both take it from here (served via /api/overview). */
+export const DEFAULT_REASONING: ReasoningLevel = "high";
+
+/** Every capability a model's runtime can offer. The UI narrows this further
+ * per catalog entry; the daemon treats unsupported names as simply inactive. */
+export function runtimeTools(provider: string): readonly WorkspaceTool[] {
+  return provider === "claude-code" ? BUILTIN_TOOLS : PI_BUILTIN_TOOLS;
+}
+
 /** Channel types eleven can speak. Telegram today; the config shape is ready for more. */
 export const CHANNEL_TYPES = ["telegram"] as const;
 
@@ -19,13 +31,19 @@ export function isUnresolved(value: string | undefined): boolean {
   return !value || value.startsWith("$");
 }
 
-export interface TopicConfig {
+/** What any scope (workspace, group, topic) may say about models: its own
+ * sequence, replacing the inherited one outright. */
+export interface ModelScope {
+  models?: ModelEntry[];
+}
+
+export interface TopicConfig extends ModelScope {
   title?: string;
   /** Extra instructions appended to this topic's system prompt. */
   appendSystemPrompt?: string;
 }
 
-export interface GroupConfig {
+export interface GroupConfig extends ModelScope {
   requireMention?: boolean;
   title?: string;
   /** Extra instructions appended to this group's system prompt. */
@@ -55,25 +73,32 @@ export interface ChannelConfig {
   groupAllowedUsers?: number[];
 }
 
-export interface WorkspaceConfig {
+export interface WorkspaceConfig extends ModelScope {
   path: string;
   /** Provider-neutral capability allowlist. Omit for the curated full set. */
   tools?: WorkspaceTool[];
-  /** Model override for this workspace, e.g. "openai-codex/gpt-5.5". */
-  model?: string;
   /** Custom personality/style block; omit to use the built-in gateway prompt. */
   systemPrompt?: string;
   /** Chat channels routed to this workspace. */
   channels?: ChannelConfig[];
 }
 
+/** One step of the model sequence: the ref plus how it should run. */
+export interface ModelEntry {
+  /** "provider/model-id" from pi's registry ("claude-code/…" for the native runtime). */
+  model: string;
+  /** Thinking level while this model drives a turn (default "high"). */
+  reasoning?: ReasoningLevel;
+  /** Capability allowlist while this model drives a turn; omit for everything
+   * its runtime supports. Always intersected with the workspace's own tools. */
+  tools?: WorkspaceTool[];
+}
+
 export interface ElevenConfig {
   dashboard: { port: number; host: string };
-  providers: {
-    defaultModel: string;
-    fallbackModels: string[];
-    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  };
+  /** Ordered model sequence: the first entry leads every turn, the rest are
+   * fallbacks tried in order when it fails. */
+  models: ModelEntry[];
   workspaces: Record<string, WorkspaceConfig>;
   /** Shell command that prints a transcript for {{file}} (voice messages). */
   transcription?: { command: string };
@@ -87,7 +112,7 @@ export interface ElevenConfig {
 
 export const DEFAULT_CONFIG: ElevenConfig = {
   dashboard: { port: 1111, host: "127.0.0.1" },
-  providers: { defaultModel: "", fallbackModels: [] },
+  models: [],
   workspaces: {},
 };
 
@@ -148,17 +173,44 @@ export class ConfigStore extends EventEmitter {
     return list;
   }
 
-  /** Ordered model candidates for a turn: override → workspace → default, then fallbacks. */
-  modelCandidates(threadModel?: string, workspaceModel?: string): string[] {
-    const { defaultModel, fallbackModels } = this.resolved.providers;
-    return [...new Set([threadModel ?? workspaceModel ?? defaultModel, ...fallbackModels])].filter(Boolean);
+  /**
+   * Ordered model plan for a turn. Scopes go most-specific first (topic →
+   * group → workspace); the first one carrying its own `models` sequence
+   * replaces the global one outright. A thread's model override is promoted
+   * to the front — matching a sequence entry adopts its reasoning/tools, an
+   * unknown ref runs with defaults.
+   */
+  turnModels(threadModel?: string, scopes: (ModelScope | undefined)[] = []): ModelEntry[] {
+    const sequence = scopes.find((scope) => scope?.models?.length)?.models ?? this.resolved.models;
+    const plan: ModelEntry[] = [];
+    const seen = new Set<string>();
+    const push = (entry: ModelEntry) => {
+      if (!entry.model || seen.has(entry.model)) return;
+      seen.add(entry.model);
+      plan.push(entry);
+    };
+    if (threadModel) push(sequence.find((entry) => entry.model === threadModel) ?? { model: threadModel });
+    for (const entry of sequence) push(entry);
+    return plan;
   }
 
   /** Every model reference the config mentions (doctor validates all of them). */
   configuredModelRefs(): string[] {
-    const { providers, workspaces } = this.resolved;
-    const refs = [providers.defaultModel, ...providers.fallbackModels, ...Object.values(workspaces).map((w) => w.model)];
-    return [...new Set(refs.filter((r): r is string => !!r))];
+    const { models, workspaces } = this.resolved;
+    const scopeRefs = (scope: ModelScope) => (scope.models ?? []).map((entry) => entry.model);
+    const refs = [
+      ...models.map((entry) => entry.model),
+      ...Object.values(workspaces).flatMap((w) => [
+        ...scopeRefs(w),
+        ...(w.channels ?? []).flatMap((channel) =>
+          Object.values(channel.groups ?? {}).flatMap((group) => [
+            ...scopeRefs(group),
+            ...Object.values(group.topics ?? {}).flatMap((topic) => scopeRefs(topic)),
+          ]),
+        ),
+      ]),
+    ];
+    return [...new Set(refs.filter(Boolean))];
   }
 }
 
@@ -170,29 +222,54 @@ function load(): ElevenConfig {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(DEFAULT_CONFIG);
     throw new Error(`Could not parse ${CONFIG_FILE}: ${error}`);
   }
-  // Spread merges only the top level, so a partial "dashboard"/"providers" object
-  // in a hand-edited file would drop the sibling defaults (e.g. host, or the
-  // fallbackModels array modelCandidates() iterates). Merge those nested objects.
+  // Spread merges only the top level, so a partial "dashboard" object in a
+  // hand-edited file would drop the sibling defaults (e.g. host). Merge it.
   const defaults = structuredClone(DEFAULT_CONFIG);
   const config: ElevenConfig = {
     ...defaults,
     ...parsed,
     dashboard: { ...defaults.dashboard, ...parsed.dashboard },
-    providers: { ...defaults.providers, ...parsed.providers },
+    models: parsed.models ?? [],
   };
   validate(config);
   return config;
 }
 
+function validateTools(tools: WorkspaceTool[] | undefined, where: string) {
+  for (const tool of tools ?? []) {
+    if (!(BUILTIN_TOOLS as readonly string[]).includes(tool)) {
+      throw new Error(`${where}: unknown tool capability "${tool}"`);
+    }
+  }
+}
+
+function validateSequence(entries: ModelEntry[] | undefined, where: string) {
+  if (entries === undefined) return;
+  if (!Array.isArray(entries)) throw new Error(`${where}: models must be an array`);
+  entries.forEach((entry, index) => {
+    const label = `${where}[${index}]`;
+    if (!entry.model || typeof entry.model !== "string") throw new Error(`${label}: missing model reference`);
+    if (!entry.model.includes("/")) throw new Error(`${label}: "${entry.model}" is not a provider/model reference`);
+    if (entry.reasoning && !(REASONING_LEVELS as readonly string[]).includes(entry.reasoning)) {
+      throw new Error(`${label}: unknown reasoning level "${entry.reasoning}"`);
+    }
+    validateTools(entry.tools, label);
+  });
+}
+
 export function validate(config: ElevenConfig) {
+  validateSequence(config.models ?? [], "models");
   const seen = new Set<string>();
   for (const [workspace, w] of Object.entries(config.workspaces)) {
-    for (const tool of w.tools ?? []) {
-      if (!(BUILTIN_TOOLS as readonly string[]).includes(tool)) {
-        throw new Error(`workspace "${workspace}": unknown tool capability "${tool}"`);
-      }
-    }
+    validateSequence(w.models, `workspace "${workspace}" models`);
+    validateTools(w.tools, `workspace "${workspace}"`);
     for (const channel of w.channels ?? []) {
+      for (const group of Object.values(channel.groups ?? {})) {
+        validateSequence(group.models, `group "${group.title ?? "?"}" models`);
+        for (const topic of Object.values(group.topics ?? {})) {
+          validateSequence(topic.models, `topic "${topic.title ?? "?"}" models`);
+        }
+      }
       if (!(CHANNEL_TYPES as readonly string[]).includes(channel.type)) {
         throw new Error(`workspace "${workspace}": unknown channel type "${channel.type}"`);
       }

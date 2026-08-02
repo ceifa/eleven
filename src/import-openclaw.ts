@@ -32,10 +32,14 @@ export async function importOpenclaw() {
   };
 
   const defaults = openclaw.agents?.defaults ?? {};
-  const primary = mapModel(defaults.model?.primary);
-  if (primary) config.providers.defaultModel = primary;
-  config.providers.fallbackModels = (defaults.model?.fallbacks ?? []).map(mapModel).filter(Boolean) as string[];
-  if (defaults.thinkingDefault) config.providers.thinkingLevel = defaults.thinkingDefault;
+  const refs = [defaults.model?.primary, ...(defaults.model?.fallbacks ?? [])]
+    .map(mapModel)
+    .filter((ref): ref is string => !!ref);
+  if (refs.length) {
+    config.models = [...new Set(refs)].map((model) =>
+      defaults.thinkingDefault ? { model, reasoning: defaults.thinkingDefault } : { model },
+    );
+  }
 
   const telegram = openclaw.channels?.telegram;
   if (telegram?.botToken) {

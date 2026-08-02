@@ -4,7 +4,9 @@ import { readFile } from "node:fs/promises";
 import { join, extname, normalize, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
-import { BUILTIN_TOOLS, CHANNEL_TYPES, isUnresolved, type ConfigStore, type ElevenConfig } from "../config.ts";
+import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig } from "../config.ts";
+import { collectProviderUsage } from "../provider-usage.ts";
+import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
@@ -111,23 +113,31 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   }
 
   function conversationLabel(sessionKey: string): string {
-    const telegramMatch = sessionKey.match(/^telegram:([^:]+):(-?\d+)(?::topic:(\d+))?$/);
-    if (!telegramMatch) {
+    const target = parseTelegramSessionKey(sessionKey);
+    if (!target) {
       const source = sessionKey.split(":", 1)[0];
       return source === "dashboard" ? "Dashboard" : source === "cli" ? "CLI" : source;
     }
-    const [, channelName, rawChatId, rawTopic] = telegramMatch;
-    const route = config.channels().find(({ channel }) => channel.name === channelName);
-    const chatId = Number(rawChatId);
-    if (chatId > 0) {
-      const user = route?.channel.users?.[rawChatId];
-      const identity = user?.name || (user?.username ? `@${user.username}` : rawChatId);
+    const route = config.channels().find(({ channel }) => channel.name === target.channel);
+    const chatKey = String(target.chatId);
+    if (target.chatId > 0) {
+      const user = route?.channel.users?.[chatKey];
+      const identity = user?.name || (user?.username ? `@${user.username}` : chatKey);
       return `Telegram DM · ${identity}`;
     }
-    const group = route?.channel.groups?.[rawChatId];
-    const groupName = group?.title || rawChatId;
-    const topic = rawTopic ? group?.topics?.[rawTopic]?.title || `topic ${rawTopic}` : undefined;
+    const group = route?.channel.groups?.[chatKey];
+    const groupName = group?.title || chatKey;
+    const topic = target.topic !== undefined ? group?.topics?.[String(target.topic)]?.title || `topic ${target.topic}` : undefined;
     return `Telegram · ${groupName}${topic ? ` · ${topic}` : ""}`;
+  }
+
+  /** The group/topic model scopes a Telegram conversation would run with. */
+  function channelModelScopes(sessionKey: string) {
+    const target = parseTelegramSessionKey(sessionKey);
+    if (!target) return [];
+    const group = config.channels().find(({ channel }) => channel.name === target.channel)?.channel.groups?.[String(target.chatId)];
+    const topic = target.topic !== undefined ? group?.topics?.[String(target.topic)] : undefined;
+    return [topic, group];
   }
 
   function threadView(thread: ReturnType<typeof gateway.threads.list>[number]) {
@@ -179,14 +189,14 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         groups: Object.keys(channel.groups ?? {}).length,
       };
     });
+    const chain = config.turnModels(undefined, [workspace]);
     const result = {
       name,
       path: workspace.path,
       pathExists: existsSync(workspace.path),
-      model: workspace.model ?? config.resolved.providers.defaultModel,
-      modelSource: workspace.model ? "workspace" : "inherited",
-      fallbacks: config.resolved.providers.fallbackModels,
-      thinking: config.resolved.providers.thinkingLevel ?? "high",
+      model: chain[0]?.model ?? "",
+      modelSource: workspace.models?.length ? "workspace" : "inherited",
+      fallbacks: chain.slice(1).map((entry) => entry.model),
       tools: workspace.tools ?? [...BUILTIN_TOOLS],
       customPrompt: workspace.systemPrompt !== undefined,
       channels,
@@ -284,8 +294,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           bots: telegram.status(),
           pairing: telegram.pairing.list(),
           workspaces: redactTokens(config.resolved).workspaces,
-          providers: config.resolved.providers,
           tools: BUILTIN_TOOLS,
+          reasoningLevels: REASONING_LEVELS,
+          defaultReasoning: DEFAULT_REASONING,
           channelTypes: CHANNEL_TYPES,
           builtinSystemPrompt: BUILTIN_SYSTEM_PROMPT,
         });
@@ -314,7 +325,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         ]);
         const workspace = config.resolved.workspaces[thread.workspace];
         const effectiveModel = workspace
-          ? config.modelCandidates(thread.model, workspace.model).find((candidate) => findModel(candidate))
+          ? config.turnModels(thread.model, [...channelModelScopes(thread.sessionKey), workspace])
+              .map((candidate) => candidate.model)
+              .find((ref) => findModel(ref))
           : undefined;
         return send(200, {
           thread: {
@@ -400,14 +413,30 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, request);
       }
       if (method === "GET" && path === "/models") {
+        // The full catalog, with everything the model picker needs to filter:
+        // which runtime serves the ref (and thus which tools exist there),
+        // whether it can reason, and how much context it carries.
         const available = await modelRuntime.getAvailable();
-        return send(200, available.map((m) => `${m.provider}/${m.id}`).sort());
+        return send(200, available
+          .map((m) => ({
+            ref: `${m.provider}/${m.id}`,
+            name: m.name,
+            provider: m.provider,
+            reasoning: m.reasoning,
+            contextWindow: m.contextWindow,
+            tools: runtimeTools(m.provider),
+          }))
+          .sort((a, b) => a.ref.localeCompare(b.ref)));
+      }
+      // Subscription quotas for every provider the sequences reference. Network
+      // calls behind it are slow — the UI fetches this after first paint.
+      if (method === "GET" && path === "/usage") {
+        const providers = [...new Set(config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
+        return send(200, await collectProviderUsage(providers));
       }
       if (method === "GET" && path === "/providers") {
         const configured = new Set(
-          [config.resolved.providers.defaultModel, ...config.resolved.providers.fallbackModels]
-            .map((ref) => ref.split("/")[0])
-            .filter(Boolean),
+          config.resolved.models.map((entry) => entry.model.split("/")[0]).filter(Boolean),
         );
         for (const model of await modelRuntime.getAvailable()) configured.add(model.provider);
         return send(

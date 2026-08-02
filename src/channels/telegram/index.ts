@@ -2,6 +2,7 @@ import { isUnresolved, type ChannelConfig, type ConfigStore } from "../../config
 import type { Gateway } from "../../gateway.ts";
 import { PairingStore, type PairingRequest } from "./pairing.ts";
 import { startTelegramBot, type BotHandle } from "./bot.ts";
+import { parseTelegramSessionKey } from "./session-key.ts";
 import { sendRich } from "./rich.ts";
 import { logger } from "../../log.ts";
 
@@ -114,15 +115,13 @@ export class TelegramChannel {
 
   /** Deliver literal operator-authored prose to the Telegram conversation. */
   async sendToSession(sessionKey: string, text: string): Promise<{ bot: string; chatId: number; topic?: number }> {
-    const match = sessionKey.match(/^telegram:([^:]+):(-?\d+)(?::topic:(\d+))?$/);
-    if (!match) throw new Error("thread has no Telegram delivery target");
-    const [, name, chat, rawTopic] = match;
-    const handle = this.bots.get(name)?.handle;
-    if (!handle) throw new Error(`Telegram channel ${name} is not running`);
-    const chatId = Number(chat);
-    const topic = rawTopic === undefined ? undefined : Number(rawTopic);
+    const target = parseTelegramSessionKey(sessionKey);
+    if (!target) throw new Error("thread has no Telegram delivery target");
+    const { channel, chatId, topic } = target;
+    const handle = this.bots.get(channel)?.handle;
+    if (!handle) throw new Error(`Telegram channel ${channel} is not running`);
     await sendRich(handle.bot.api, chatId, text, { messageThreadId: topic });
-    return { bot: name, chatId, topic };
+    return { bot: channel, chatId, topic };
   }
 
   /** Re-prompt conversations whose turn was interrupted by a restart, routing

@@ -29,6 +29,19 @@ const GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // sane window before the restart that kills them.
 const WAKE_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_HEARTBEAT_MS = 60 * 1000;
+// In-memory activity of a running turn, so a dashboard opened mid-turn can
+// catch up on what already happened (WS events only reach pages already open).
+const LIVE_TOOL_CALLS_MAX = 200;
+const LIVE_TEXT_MAX_CHARS = 64_000;
+
+export interface LiveTurn {
+  startedAt: number;
+  /** Tool calls so far, oldest first; capped — `dropped` counts evictions. */
+  toolCalls: { name: string; summary: string; at: number }[];
+  dropped: number;
+  /** Streamed prose so far (nested runtimes only deliver it at the end). */
+  text: string;
+}
 
 export interface IncomingMessage {
   /** Durable conversation identity, e.g. "telegram:main:12345". */
@@ -72,13 +85,18 @@ export class Gateway extends EventEmitter {
       // the same pi session (not just after a successful turn reports it back).
       if (sessionFile) this.threads.update(threadId, { sessionFile });
       this.pending.begin(threadId);
+      this.liveTurns.set(threadId, { startedAt: Date.now(), toolCalls: [], dropped: 0, text: "" });
     },
     // Fired inside the turn lane, after channel delivery — so the ledger
     // covers the send, and the next turn's begin cannot overlap this end.
-    onTurnEnd: (threadId) => this.pending.end(threadId),
+    onTurnEnd: (threadId) => {
+      this.pending.end(threadId);
+      this.liveTurns.delete(threadId);
+    },
   });
 
   private config: ConfigStore;
+  private liveTurns = new Map<string, LiveTurn>();
 
   constructor(config: ConfigStore) {
     super();
@@ -108,6 +126,8 @@ export class Gateway extends EventEmitter {
       ...incoming.events,
       onDelta: (delta) => {
         incoming.events?.onDelta?.(delta);
+        const live = this.liveTurns.get(thread.id);
+        if (live && live.text.length < LIVE_TEXT_MAX_CHARS) live.text += delta;
         this.emit("delta", { threadId: thread.id, delta });
       },
       onEvent: (event) => incoming.events?.onEvent?.(event),
@@ -115,7 +135,16 @@ export class Gateway extends EventEmitter {
       // names are normalized by its adapter before they reach the dashboard.
       onToolCall: (name, args) => {
         incoming.events?.onToolCall?.(name, args);
-        this.emit("tool-call", { threadId: thread.id, name, summary: summarizeToolArgs(args) });
+        const summary = summarizeToolArgs(args);
+        const live = this.liveTurns.get(thread.id);
+        if (live) {
+          live.toolCalls.push({ name, summary, at: Date.now() });
+          if (live.toolCalls.length > LIVE_TOOL_CALLS_MAX) {
+            live.toolCalls.shift();
+            live.dropped++;
+          }
+        }
+        this.emit("tool-call", { threadId: thread.id, name, summary });
       },
       onTaskActivity: (activity) => {
         incoming.events?.onTaskActivity?.(activity);
@@ -205,6 +234,11 @@ export class Gateway extends EventEmitter {
 
   isThreadRunning(id: string): boolean {
     return this.runner.isRunning(id);
+  }
+
+  /** Activity of the thread's running turn, if one is in flight. */
+  liveTurn(id: string): LiveTurn | undefined {
+    return this.liveTurns.get(id);
   }
 
   /**

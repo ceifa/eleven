@@ -6,6 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
+import { readThreadMessages, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
 
 test("rotated threads are derived as old, not stored as a separate state", () => {
@@ -71,6 +72,50 @@ test("literal outbound messages are appended to the pi transcript", () => {
     if (entry?.type !== "message") return;
     assert.equal(entry.message.role, "assistant");
     assert.deepEqual(entry.message.content, [{ type: "text", text: "operator reply" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recorded nested-runtime tool calls render on the turn's assistant message", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-toolcalls-"));
+  try {
+    const manager = SessionManager.create(dir, dir);
+    manager.appendMessage({ role: "user", content: "fix the test", timestamp: Date.now() });
+    manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      api: "claude-code",
+      provider: "claude-code",
+      model: "fable",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, {
+      calls: [
+        { id: "claude:0:1", name: "Read", args: { file_path: "/tmp/x.ts" } },
+        { id: "claude:1:2", name: "Bash", args: { command: "npm test" } },
+      ],
+    });
+
+    const messages = await readThreadMessages(manager.getSessionFile()!);
+    assert.equal(messages.length, 2);
+    const reply = messages.at(-1)!;
+    assert.equal(reply.role, "assistant");
+    assert.equal(reply.text, "done");
+    assert.deepEqual(reply.toolCalls?.map((call) => call.name), ["Read", "Bash"]);
+    assert.ok(reply.toolCalls?.[0].summary.includes("/tmp/x.ts"));
+
+    // An aborted turn can record calls with no assistant message to attach to —
+    // they must still show up, as their own transcript row.
+    manager.appendMessage({ role: "user", content: "try again", timestamp: Date.now() });
+    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:3", name: "Grep", args: {} }] });
+    const withOrphan = await readThreadMessages(manager.getSessionFile()!);
+    const orphan = withOrphan.at(-1)!;
+    assert.equal(orphan.role, "assistant");
+    assert.equal(orphan.text, "");
+    assert.deepEqual(orphan.toolCalls?.map((call) => call.name), ["Grep"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

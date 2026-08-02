@@ -92,3 +92,12 @@ export function contentText(content: unknown): string {
     .map((c) => c.text)
     .join("");
 }
+
+/** One-line preview of a tool call's args for live chips and transcript rows —
+ * the most telling string field, capped. The full object travels separately. */
+export function summarizeToolArgs(args: unknown, cap = 120): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+  const value = a.path ?? a.file_path ?? a.command ?? a.pattern ?? Object.values(a)[0];
+  return typeof value === "string" ? value.slice(0, cap) : "";
+}

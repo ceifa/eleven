@@ -6,6 +6,7 @@ const state = {
   activeThread: null,
   messages: [],
   requests: [],
+  liveToolCalls: [],
   streaming: "",
   workspaceFilter: "",
   overview: null,
@@ -157,6 +158,7 @@ function connectWs() {
       if (message.threadId === state.activeThread?.id) {
         // Live tool indicator while the turn runs (deltas only stream prose);
         // the turn-done refresh replaces it with the durable on-disk rendering.
+        state.liveToolCalls.push({ name: message.name, summary: message.summary ?? "", at: Date.now() });
         const container = document.getElementById("messages");
         if (container) {
           const stick = atBottom(container);
@@ -362,9 +364,13 @@ async function openThread(id) {
   state.activeThread = data.thread;
   state.messages = data.messages;
   state.requests = data.requests ?? [];
-  state.streaming = "";
+  // A turn already in flight: catch up on its activity so far — from here on
+  // the WS tool-call/delta events keep the pane current.
+  state.liveToolCalls = data.live?.toolCalls ?? [];
+  state.streaming = data.live?.text ?? "";
   renderThreadPane();
   renderThreadList();
+  if (state.streaming) renderStreaming();
 }
 
 // On mobile the list and the conversation share one screen; these swap between
@@ -430,7 +436,10 @@ function renderThreadPane() {
     ...state.requests.map((r) => ({ at: r.at, node: () => requestChip(r) })),
   ].sort((a, b) => a.at - b.at);
   const messages = h("div", { class: "flex-1 overflow-y-auto p-4", id: "messages" },
-    timeline.map((item) => item.node()));
+    timeline.map((item) => item.node()),
+    // The running turn's tool calls so far (server catch-up + WS since); the
+    // turn-done refetch replaces them with the durable on-disk rendering.
+    state.liveToolCalls.map((call) => toolCallRow(call.name, { summary: call.summary })));
   const composer = h("form", { class: "flex gap-2 p-3 border-t border-base-300", onsubmit: sendMessage },
     h("textarea", {
       class: "textarea flex-1 min-h-10 max-h-40",

@@ -1,6 +1,23 @@
 import { stat } from "node:fs/promises";
-import { parseSessionEntries, type SessionEntry, type SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { parseSessionEntries, type CustomEntry, type SessionEntry, type SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { contentText, keyedLane, lruTouch, readFileSlice, summarizeToolArgs } from "../util.ts";
+
+/** Custom session entry recording the tool calls of one nested-runtime turn
+ *  (Claude Code runs its own tool loop, so Pi's transcript never sees them as
+ *  toolCall blocks). Display-only: pi ignores plain custom entries when it
+ *  builds LLM context, which is exactly why the agent loop won't re-execute
+ *  these. Written by the Runner, rendered here. */
+export const TOOL_CALLS_ENTRY_TYPE = "eleven:tool-calls";
+
+export interface RecordedToolCall {
+  id: string;
+  name: string;
+  args?: Record<string, unknown>;
+}
+
+export interface ToolCallsEntryData {
+  calls: RecordedToolCall[];
+}
 
 export interface ThreadMessage {
   role: "user" | "assistant";
@@ -81,6 +98,21 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
     for (const entry of parseSessionEntries(complete)) {
       if (entry.type === "session") continue; // header — not part of the tree
       const node: Node = { id: entry.id, parentId: entry.parentId, message: renderMessage(entry), result: renderResult(entry) };
+      // Nested-runtime tool calls arrive as a custom entry appended right after
+      // the turn's assistant message — fold them into that message so the
+      // dashboard renders them like any provider's tool calls. Attach at parse
+      // time: each entry is parsed exactly once, so calls never double up.
+      const recorded = renderRecordedToolCalls(entry);
+      if (recorded) {
+        const parent = node.parentId ? byId.get(node.parentId) : undefined;
+        if (parent?.message?.role === "assistant") {
+          parent.message.toolCalls = [...recorded, ...(parent.message.toolCalls ?? [])];
+        } else {
+          // No assistant message to attach to (e.g. the turn was aborted
+          // mid-tool) — show the calls as their own transcript row.
+          node.message = { role: "assistant", text: "", timestamp: entry.timestamp, toolCalls: recorded };
+        }
+      }
       nodes.push(node);
       byId.set(node.id, node);
     }
@@ -121,6 +153,13 @@ function renderMessage(entry: SessionEntry): ThreadMessage | undefined {
     }
   }
   return undefined;
+}
+
+function renderRecordedToolCalls(entry: SessionEntry): NonNullable<ThreadMessage["toolCalls"]> | undefined {
+  if (entry.type !== "custom" || entry.customType !== TOOL_CALLS_ENTRY_TYPE) return undefined;
+  const calls = ((entry as CustomEntry<ToolCallsEntryData>).data?.calls ?? []).filter((call) => call?.id && call.name);
+  if (!calls.length) return undefined;
+  return calls.map((call) => ({ id: call.id, name: call.name, summary: summarizeToolArgs(call.args ?? {}, 160), args: call.args }));
 }
 
 // toolResult entries aren't shown as their own messages — their output is

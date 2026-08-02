@@ -339,6 +339,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           },
           messages,
           requests,
+          // Catch-up for a page opened mid-turn: what the running turn already
+          // did (WS tool-call/delta events only reach pages already connected).
+          live: gateway.liveTurn(thread.id),
         });
       }
       if (method === "GET" && path.match(/^\/requests\/[^/]+\/[^/]+$/)) {

@@ -383,7 +383,9 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 .collapse { display: grid; border-radius: var(--radius-box); }
 .collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; opacity: 0; cursor: pointer; margin: 0; }
 .collapse-title { grid-area: 1 / 1; z-index: 1; position: relative; padding: 0.5rem 0.9rem; padding-right: 2rem; }
-.collapse-content { grid-area: 2 / 1; display: none; padding: 0 0.9rem 0.9rem; }
+/* .collapse > … keeps this one notch more specific than the .flex utility the
+   content rows also carry, so the closed state actually hides them. */
+.collapse > .collapse-content { grid-area: 2 / 1; display: none; padding: 0 0.9rem 0.9rem; }
 .collapse:has(> input:checked) > .collapse-content { display: flex; flex-direction: column; }
 /* rotating chevron */
 .collapse-arrow > .collapse-title::after {

@@ -80,42 +80,56 @@ test("literal outbound messages are appended to the pi transcript", () => {
 test("recorded nested-runtime tool calls render on the turn's assistant message", async () => {
   const dir = mkdtempSync(join(tmpdir(), "eleven-toolcalls-"));
   try {
-    const manager = SessionManager.create(dir, dir);
-    manager.appendMessage({ role: "user", content: "fix the test", timestamp: Date.now() });
-    manager.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "done" }],
+    const assistant = (text: string) => ({
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text }],
       api: "claude-code",
       provider: "claude-code",
       model: "fable",
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop",
+      stopReason: "stop" as const,
       timestamp: Date.now(),
     });
-    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, {
-      calls: [
-        { id: "claude:0:1", name: "Read", args: { file_path: "/tmp/x.ts" } },
-        { id: "claude:1:2", name: "Bash", args: { command: "npm test" } },
-      ],
-    });
 
-    const messages = await readThreadMessages(manager.getSessionFile()!);
-    assert.equal(messages.length, 2);
+    // Turn 1 — records written as the calls happen, before the reply lands.
+    const manager = SessionManager.create(dir, dir);
+    manager.appendMessage({ role: "user", content: "fix the test", timestamp: Date.now() });
+    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:1", name: "Read", args: { file_path: "/tmp/x.ts" } }] });
+    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:1:2", name: "Bash", args: { command: "npm test" } }] });
+    manager.appendMessage(assistant("done"));
+
+    const file = manager.getSessionFile()!;
+    const messages = await readThreadMessages(file);
+    assert.deepEqual(messages.map((m) => m.role), ["user", "assistant"]);
     const reply = messages.at(-1)!;
-    assert.equal(reply.role, "assistant");
     assert.equal(reply.text, "done");
     assert.deepEqual(reply.toolCalls?.map((call) => call.name), ["Read", "Bash"]);
     assert.ok(reply.toolCalls?.[0].summary.includes("/tmp/x.ts"));
 
-    // An aborted turn can record calls with no assistant message to attach to —
-    // they must still show up, as their own transcript row.
+    // Turn 2 — the legacy shape (one record right after the assistant message)
+    // must keep rendering on ITS turn, not leak into a later one.
+    manager.appendMessage({ role: "user", content: "and lint it", timestamp: Date.now() });
+    manager.appendMessage(assistant("lint is clean"));
+    manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:9", name: "Bash", args: { command: "npm run lint" } }] });
+    const legacy = await readThreadMessages(file);
+    assert.deepEqual(legacy.at(-1)?.toolCalls?.map((call) => call.name), ["Bash"]);
+    assert.deepEqual(legacy.at(1)?.toolCalls?.map((call) => call.name), ["Read", "Bash"]); // turn 1 untouched
+
+    // Turn 3 — a running (or crashed) turn has records but no assistant message
+    // yet: the calls must still show up, as their own transcript row.
     manager.appendMessage({ role: "user", content: "try again", timestamp: Date.now() });
     manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:3", name: "Grep", args: {} }] });
-    const withOrphan = await readThreadMessages(manager.getSessionFile()!);
+    const withOrphan = await readThreadMessages(file);
     const orphan = withOrphan.at(-1)!;
     assert.equal(orphan.role, "assistant");
     assert.equal(orphan.text, "");
     assert.deepEqual(orphan.toolCalls?.map((call) => call.name), ["Grep"]);
+
+    // Re-reading must not duplicate anything — the fold works on copies, never
+    // on the shared cache.
+    const again = await readThreadMessages(file);
+    assert.deepEqual(again.at(1)?.toolCalls?.length, 2);
+    assert.deepEqual(again.at(-1)?.toolCalls?.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

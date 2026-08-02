@@ -455,6 +455,7 @@ export class Runner {
         : undefined,
     });
     await loader.reload();
+    const extensionToolNames = loader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()]);
 
     const { session } = await createAgentSession({
       cwd: request.workspacePath,
@@ -465,6 +466,7 @@ export class Runner {
       tools: request.tools
         ? [
             ...request.tools.filter((t) => (PI_BUILTIN_TOOLS as readonly string[]).includes(t)),
+            ...extensionToolNames,
             ...(request.customTools ?? []).map((tool) => tool.name),
           ]
         : undefined,
@@ -481,11 +483,17 @@ export class Runner {
     // tool call) — deliver them all at once, not one per boundary.
     session.setSteeringMode("all");
 
-    const customNames = new Set((request.customTools ?? []).map((tool) => tool.name));
+    // Workspace extension tools (workflow, etc.) are Eleven-owned capabilities
+    // just like channel tools. Keep Claude builtins native, but expose every
+    // non-Pi tool through the isolated MCP bridge with its bound executor.
+    const customNames = session.getAllTools()
+      .map((tool) => tool.name)
+      .filter((name) => !(PI_BUILTIN_TOOLS as readonly string[]).includes(name));
+    session.setActiveToolsByName([...new Set([...session.getActiveToolNames(), ...customNames])]);
     registerClaudeSession(session.sessionId, {
       cwd: request.workspacePath,
       workspaceTools: request.tools,
-      customTools: session.agent.state.tools.filter((tool) => customNames.has(tool.name)),
+      customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
     });
 
     const warm: WarmSession = {

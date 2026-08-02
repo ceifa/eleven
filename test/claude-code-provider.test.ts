@@ -245,6 +245,36 @@ test("standalone Pi compaction stays inside the owner context but receives no to
   }
 });
 
+test("workflow subagents inherit only native read tools from the owner runtime", async () => {
+  const ownerId = "88888888-8888-4888-8888-888888888888";
+  const subagentId = "99999999-9999-4999-8999-999999999999";
+  let captured: { options: Record<string, unknown> } | undefined;
+  registerClaudeSession(ownerId, { cwd: "/tmp", customTools: [], workspaceTools: ["read", "bash", "web"] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages.slice(1), (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = {
+      systemPrompt: "workflow subagent",
+      messages: [user("research")],
+      tools: [
+        { name: "read", description: "read", parameters: Type.Object({}) },
+        { name: "structured_output", description: "output", parameters: Type.Object({}) },
+      ],
+    };
+    await runWithClaudeSession(ownerId, async () => {
+      for await (const _event of provider.streamSimple(model, context, { sessionId: subagentId })) { /* drain */ }
+    });
+    assert.deepEqual(captured?.options.tools, ["Read", "Glob", "Grep"]);
+    assert.deepEqual(captured?.options.allowedTools, ["Read", "Glob", "Grep"]);
+    assert.equal(captured?.options.persistSession, false);
+  } finally {
+    unregisterClaudeSession(ownerId);
+  }
+});
+
 test("invalid MCP tool setup terminates the provider stream with an error", async () => {
   const piSessionId = "55555555-5555-4555-8555-555555555555";
   const invalid = {

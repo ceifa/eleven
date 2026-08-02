@@ -135,6 +135,12 @@ export function nativeToolsForPolicy(policy: WorkspaceTool[] | undefined): strin
   return [...new Set(policy.flatMap((name) => POLICY_TO_NATIVE[name] ?? []))];
 }
 
+function nativeToolsForNestedContext(toolNames: string[]): string[] {
+  return toolNames.some((name) => ["read", "grep", "find", "ls"].includes(name))
+    ? ["Read", "Glob", "Grep"]
+    : [];
+}
+
 /** A deterministic UUID for one transactional Claude attempt. Each successful
  * Pi transcript prefix maps to one resumable Claude fork, so daemon restarts do
  * not need a second mapping store. */
@@ -300,7 +306,7 @@ async function consumeClaudeQuery(
       }
     }
 
-    attemptId = claudeAttemptId(ownerSessionId, model.id, context.messages);
+    attemptId = claudeAttemptId(isolated ? requestSessionId : ownerSessionId, model.id, context.messages);
     if (attemptId === baseId) attemptId = randomUUID();
     if (!recovering) {
       try {
@@ -314,18 +320,24 @@ async function consumeClaudeQuery(
     const seenToolCalls = new Set<string>();
     const seenToolSignatures = new Set<string>();
     const markTool = (name: string, args: Record<string, unknown>, id?: string) => {
-      const signature = `${name}\0${JSON.stringify(args)}`;
+      const cleanName = cleanToolName(name);
+      const signature = `${cleanName}\0${JSON.stringify(args)}`;
       if ((id && seenToolCalls.has(id)) || seenToolSignatures.has(signature)) return;
       if (id) seenToolCalls.add(id);
       seenToolSignatures.add(signature);
       if (!isolated) deps.state.markTool(ownerSessionId);
-      registration.onToolCall?.(cleanToolName(name), args);
+      registration.onToolCall?.(cleanName, args);
     };
 
     const activeCustomNames = new Set(context.tools?.map((tool) => tool.name) ?? []);
     const customTools = isolated ? [] : registration.customTools.filter((tool) => activeCustomNames.has(tool.name));
-    const nativeTools = isolated ? [] : nativeToolsForPolicy(registration.workspaceTools);
-    const mcpServer = buildMcpServer(customTools, markTool);
+    // Standalone calls are either Pi compaction (no tools) or workflow
+    // subagents (read-only Pi tools). They share the owner's cwd through
+    // AsyncLocalStorage but never its side-effectful MCP tools or session state.
+    const nativeTools = isolated
+      ? nativeToolsForNestedContext(context.tools?.map((tool) => tool.name) ?? [])
+      : nativeToolsForPolicy(registration.workspaceTools);
+    const mcpServer = buildMcpServer(customTools, ownerSessionId, markTool);
     const qualifiedTools = customTools.map((tool) => `${MCP_PREFIX}${tool.name}`);
 
     if (!isolated) {
@@ -454,6 +466,7 @@ async function consumeClaudeQuery(
 }
 function buildMcpServer(
   customTools: AgentTool[],
+  ownerSessionId: string,
   onBeforeTool: (name: string, args: Record<string, unknown>, id?: string) => void,
 ) {
   if (!customTools.length) return undefined;
@@ -473,7 +486,12 @@ function buildMcpServer(
         try {
           onBeforeTool(tool.name, args, request.requestId);
           const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
-          const result = await tool.execute(request.requestId ?? randomUUID(), prepared, request.signal, undefined);
+          // MCP callbacks cross the SDK transport boundary. Re-enter the owner
+          // explicitly so extension tools that spawn nested AgentSessions
+          // (workflow) inherit Claude's cwd/provider bridge.
+          const result = await activeOwner.run(ownerSessionId, () =>
+            tool.execute(request.requestId ?? randomUUID(), prepared, request.signal, undefined),
+          );
           return {
             content: result.content.map((block) => block.type === "image"
               ? { type: "image" as const, data: block.data, mimeType: block.mimeType }

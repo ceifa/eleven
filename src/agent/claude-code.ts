@@ -216,6 +216,7 @@ const MODEL_BASE = {
 
 export const CLAUDE_CODE_MODELS: readonly Model<Api>[] = [
   { ...MODEL_BASE, id: "default", name: "Claude Code · Default", contextWindow: 1_000_000 },
+  { ...MODEL_BASE, id: "fable", name: "Claude Code · Fable", contextWindow: 1_000_000 },
   { ...MODEL_BASE, id: "opus", name: "Claude Code · Opus", contextWindow: 1_000_000 },
   { ...MODEL_BASE, id: "sonnet", name: "Claude Code · Sonnet", contextWindow: 200_000 },
   { ...MODEL_BASE, id: "haiku", name: "Claude Code · Haiku", contextWindow: 200_000 },

@@ -99,7 +99,8 @@ const successfulMessages = [
   },
 ] as unknown as SDKMessage[];
 
-test("Claude Code uses an explicit, provider-neutral native tool policy", () => {
+test("Claude Code exposes stable moving aliases and an explicit native tool policy", () => {
+  assert.deepEqual(CLAUDE_CODE_MODELS.map((candidate) => candidate.id), ["default", "fable", "opus", "sonnet", "haiku"]);
   assert.deepEqual(nativeToolsForPolicy(["read"]), ["Read", "Glob", "Grep"]);
   assert.deepEqual(nativeToolsForPolicy(["bash", "write"]), ["Bash", "Write"]);
   assert.ok(nativeToolsForPolicy(undefined).includes("WebSearch"));

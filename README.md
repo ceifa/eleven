@@ -14,7 +14,7 @@ The idea is simple: eleven makes your local agent reachable from anywhere, throu
 - **Pairing**: deny-by-default everywhere. Unknown DM senders and unregistered groups show up as requests in the dashboard; one click adds them to the allowlist.
 - **Workspaces**: a directory + tool policy (`read`-only to full `bash`) + optional model override. pi loads the workspace's `AGENTS.md` and `.agents/skills` natively, so your agent's persona lives in the repo, not in eleven.
 - **Dashboard** (`127.0.0.1:1111`): configure channels, providers, workspaces, approve pairings, and browse or join any thread with live streaming.
-- **Models**: any provider pi supports, plus `claude-code/default`, `opus`, `sonnet`, and `haiku` through the official Claude Code runtime. Ordered fallbacks wrap whole turns; Eleven never replays an attempt after a tool has already caused side effects.
+- **Models**: any provider pi supports, plus `claude-code/default`, `fable`, `opus`, `sonnet`, and `haiku` through the official Claude Code runtime. Ordered fallbacks wrap whole turns; Eleven never replays an attempt after a tool has already caused side effects.
 
 ![eleven dashboard: workspace configuration](https://raw.githubusercontent.com/ceifa/eleven/main/assets/dashboard-workspaces.jpg)
 

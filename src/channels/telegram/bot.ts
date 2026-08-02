@@ -8,6 +8,7 @@ import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
 import { collectInboundMedia, formatInboundBody } from "./media.ts";
 import { DraftStream } from "./stream.ts";
+import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
 import { telegramTool } from "./tool.ts";
 import { logger } from "../../log.ts";
@@ -327,6 +328,12 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
           : undefined,
     };
+    const taskProgress = new TelegramTaskProgress(
+      bot.api,
+      chatId,
+      topic,
+      sendOptions.replyParameters,
+    );
 
     // Appends accumulate outermost→innermost: DMs use the user's; groups use group, then topic.
     const config = deps.botConfig();
@@ -375,10 +382,12 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             blocks.length = 0;
             current = "";
           },
+          onTaskActivity: (activity) => taskProgress.update(activity),
         },
       });
 
       if (!result) return; // steered into a running turn; that turn delivers (and clears `sent`)
+      await taskProgress.finish(result.status === "stopped" ? "stopped" : "completed");
       // After a mid-turn flush, result.text still contains the flushed prose —
       // deliver only what accumulated since.
       const final = (flushedEarly ? blocks.join("\n\n") : result.text).trim();
@@ -388,12 +397,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       await sendRich(bot.api, chatId, final, sendOptions);
     } catch (error) {
       sent.clear();
+      await taskProgress.finish("failed");
       log.error(`turn failed: ${error}`);
       await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}`, { messageThreadId: topic }).catch(() => {});
     } finally {
       // The turn is over — stop the draft preview so a throttled/flood-delayed
       // flush can't re-post a stale draft after the final reply has landed.
       stream?.cancel();
+      taskProgress.cancel();
     }
   }
 

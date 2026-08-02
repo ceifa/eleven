@@ -1,8 +1,10 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { REQUESTS_DIR, THREADS_DIR } from "../paths.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { requestLogFile } from "./request-log.ts";
 import type { ThreadStore } from "./store.ts";
+import { cleanupClaudeGarbage, cleanupClaudeSessions } from "../agent/claude-code.ts";
 import { logger } from "../log.ts";
 
 const log = logger("threads/gc");
@@ -14,7 +16,16 @@ const log = logger("threads/gc");
  * orphaned before gc existed. Files of live (current) threads are never touched.
  */
 export async function collectGarbage(threads: ThreadStore, retentionMs: number): Promise<number> {
-  threads.prune(retentionMs);
+  await cleanupClaudeGarbage();
+  const pruned = threads.prune(retentionMs);
+  await Promise.allSettled(pruned.flatMap((thread) => {
+    if (!thread.sessionFile) return [];
+    let sessionId: string | undefined;
+    try { sessionId = SessionManager.open(thread.sessionFile).getSessionId(); } catch {
+      sessionId = thread.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
+    }
+    return sessionId ? [cleanupClaudeSessions(sessionId)] : [];
+  }));
   const cutoff = Date.now() - retentionMs;
   const keep = new Set<string>();
   for (const thread of threads.list()) {

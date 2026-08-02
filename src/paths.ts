@@ -12,6 +12,7 @@ export const MEDIA_DIR = join(STATE_DIR, "media");
 export const REQUESTS_DIR = join(STATE_DIR, "requests");
 export const THREAD_STORE_FILE = join(STATE_DIR, "threads.json");
 export const PENDING_TURNS_FILE = join(STATE_DIR, "pending-turns.json");
+export const CLAUDE_SESSIONS_FILE = join(STATE_DIR, "claude-sessions.json");
 export const PAIRING_FILE = join(STATE_DIR, "pairing.json");
 export const PID_FILE = join(STATE_DIR, "eleven.pid");
 

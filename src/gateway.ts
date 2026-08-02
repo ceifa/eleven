@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ConfigStore, WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
@@ -15,6 +15,7 @@ import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
 import { fetchProviderUsage, formatProviderUsage } from "./provider-usage.ts";
+import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 
 const log = logger("gateway");
 const DEFAULT_IDLE_DAYS = 7;
@@ -98,14 +99,16 @@ export class Gateway extends EventEmitter {
         incoming.events?.onDelta?.(delta);
         this.emit("delta", { threadId: thread.id, delta });
       },
-      onEvent: (event) => {
-        incoming.events?.onEvent?.(event);
-        // Surface tool calls live so the dashboard shows what the agent is doing
-        // mid-turn (deltas only stream prose); the turn-done refresh then replaces
-        // these with the durable, on-disk rendering.
-        if (event.type === "tool_execution_start") {
-          this.emit("tool-call", { threadId: thread.id, name: event.toolName, summary: summarizeToolArgs(event.args) });
-        }
+      onEvent: (event) => incoming.events?.onEvent?.(event),
+      // Pi and nested runtimes report through the same clean event. Claude MCP
+      // names are normalized by its adapter before they reach the dashboard.
+      onToolCall: (name, args) => {
+        incoming.events?.onToolCall?.(name, args);
+        this.emit("tool-call", { threadId: thread.id, name, summary: summarizeToolArgs(args) });
+      },
+      onTaskActivity: (activity) => {
+        incoming.events?.onTaskActivity?.(activity);
+        this.emit("task-activity", { threadId: thread.id, activity });
       },
     };
 
@@ -171,6 +174,11 @@ export class Gateway extends EventEmitter {
     await this.runner.discard(id);
     if (thread.sessionFile) {
       await deleteReferencedMedia(thread.sessionFile);
+      let sessionId: string | undefined;
+      try { sessionId = SessionManager.open(thread.sessionFile).getSessionId(); } catch {
+        sessionId = thread.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
+      }
+      if (sessionId) await cleanupClaudeSessions(sessionId);
       await rm(thread.sessionFile, { force: true });
     }
     await this.requests.delete(id);

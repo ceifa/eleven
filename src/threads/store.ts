@@ -38,17 +38,18 @@ export class ThreadStore {
   }
 
   /** Drop stale threads no conversation points at (gc.ts deletes their files). */
-  prune(maxAgeMs: number) {
+  prune(maxAgeMs: number): ThreadEntry[] {
     const cutoff = Date.now() - maxAgeMs;
     const live = new Set(Object.values(this.data.current));
-    let dropped = 0;
+    const dropped: ThreadEntry[] = [];
     for (const [id, thread] of Object.entries(this.data.threads)) {
       if (!live.has(id) && thread.lastActivityAt < cutoff) {
+        dropped.push(thread);
         delete this.data.threads[id];
-        dropped++;
       }
     }
-    if (dropped) this.persist();
+    if (dropped.length) this.persist();
+    return dropped;
   }
 
   /** Current thread for a key, creating one if absent or idle-expired. */

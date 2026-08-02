@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { Api } from "grammy";
 import { ConfigStore, isUnresolved } from "./config.ts";
 import { findModel, modelRuntime } from "./agent/pi.ts";
+import { CLAUDE_CODE_PROVIDER, probeClaudeCodeAuth } from "./agent/claude-code.ts";
 import { CONFIG_FILE } from "./paths.ts";
 
 export async function runDoctor(): Promise<boolean> {
@@ -26,10 +27,20 @@ export async function runDoctor(): Promise<boolean> {
   const { workspaces, providers } = config.resolved;
 
   if (!providers.defaultModel) check(false, "model", "providers.defaultModel is empty");
+  let claudeAuth: Awaited<ReturnType<typeof probeClaudeCodeAuth>> | undefined;
   for (const ref of config.configuredModelRefs()) {
     const model = findModel(ref);
     if (!model) {
-      check(false, `model ${ref}`, "not in pi's registry");
+      check(false, `model ${ref}`, "not in the model registry");
+      continue;
+    }
+    if (model.provider === CLAUDE_CODE_PROVIDER) {
+      claudeAuth ??= await probeClaudeCodeAuth();
+      check(
+        claudeAuth.ok,
+        `model ${ref}`,
+        claudeAuth.ok ? claudeAuth.detail : `${claudeAuth.detail ?? "not authenticated"} — run \`claude auth login\``,
+      );
       continue;
     }
     const authed = modelRuntime.hasConfiguredAuth(model.provider);

@@ -422,7 +422,7 @@ function renderThreadPane() {
   const keepScroll = renderedThreadId === thread.id && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
   // Chronological timeline: chat messages interleaved with the exact moments
-  // eleven called an AI provider (each chip opens the raw request payload).
+  // eleven called an AI provider (each chip opens the recorded request payload).
   const timeline = [
     ...state.messages.map((m) => ({ at: Date.parse(m.timestamp) || 0, node: () => messageBubble(m) })),
     ...state.requests.map((r) => ({ at: r.at, node: () => requestChip(r) })),
@@ -459,7 +459,7 @@ const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", m
 function requestChip(request) {
   return h("button", {
     class: "request-chip font-mono text-xs",
-    title: "open the exact payload sent to the provider",
+    title: "open the recorded provider request",
     onclick: () => openRequestModal(request),
   }, "⚡", [request.model, request.bytes ? fmtBytes(request.bytes) : null, fmtTime(request.at)].filter(Boolean).join(" · "));
 }

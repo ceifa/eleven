@@ -13,8 +13,17 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
+import {
+  abandonClaudeSession,
+  CLAUDE_CODE_PROVIDER,
+  commitClaudeSession,
+  registerClaudeSession,
+  runWithClaudeSession,
+  setClaudeToolListener,
+  unregisterClaudeSession,
+} from "./claude-code.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
-import { BUILTIN_TOOLS } from "../config.ts";
+import { PI_BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 
@@ -36,8 +45,8 @@ export interface TurnRequest {
   /** Ordered candidates: primary first, then fallbacks. */
   models: string[];
   thinkingLevel: ThinkingLevel;
-  /** Allowlist of pi built-in tools; undefined enables all of them. */
-  tools?: string[];
+  /** Provider-neutral workspace capability allowlist; undefined enables the curated default. */
+  tools?: WorkspaceTool[];
   customTools?: ToolDefinition[];
   /** Resolved prompt for this turn (workspace system prompt + channel appends). */
   prompt?: PromptConfig;
@@ -52,8 +61,10 @@ export interface TurnEvents {
   onAssistantText?: (text: string) => void;
   /** The attempt failed and is retrying on a fallback model — its prose is abandoned. */
   onFailover?: () => void;
-  /** Raw pi event passthrough (dashboard live view). */
+  /** Raw pi event passthrough (channel lifecycle handling). */
   onEvent?: (event: AgentSessionEvent) => void;
+  /** Provider-neutral tool activity for the dashboard. */
+  onToolCall?: (name: string, args: Record<string, unknown>) => void;
 }
 
 export interface TurnResult {
@@ -90,7 +101,7 @@ function sameTools(a: ToolDefinition[] | undefined, b: ToolDefinition[] | undefi
 }
 
 export interface RunnerHooks {
-  /** Fired with the exact payload pi is about to send to a provider. */
+  /** Fired with the provider payload (a logical SDK invocation for nested runtimes). */
   onProviderRequest?: (threadId: string, model: string, payload: unknown) => void;
   /** Fired when an owning turn begins (not for steered messages), with its
    * session file — lets the gateway record it as in-flight so an interrupted
@@ -194,7 +205,10 @@ export class Runner {
       role: "assistant",
       content: [{ type: "text", text }],
       api: model.api,
-      provider: model.provider,
+      // Literal operator delivery never entered Claude Code's hidden session.
+      // Mark it as an Eleven-authored handoff so the next Claude turn rebuilds
+      // from the visible Pi transcript instead of resuming a stale fork.
+      provider: model.provider === CLAUDE_CODE_PROVIDER ? "eleven" : model.provider,
       model: model.id,
       usage: {
         input: 0,
@@ -260,6 +274,11 @@ export class Runner {
     // (retry-worthy) empty response.
     let lastStopReason: string | undefined;
     let lastErrorMessage: string | undefined;
+    let attemptHadToolActivity = false;
+    setClaudeToolListener(session.sessionId, (name, args) => {
+      attemptHadToolActivity = true;
+      events.onToolCall?.(name, args);
+    });
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
       if (event.type === "message_start") {
@@ -268,6 +287,9 @@ export class Runner {
         const delta = event.assistantMessageEvent.delta;
         current += delta;
         events.onDelta?.(delta);
+      } else if (event.type === "tool_execution_start") {
+        attemptHadToolActivity = true;
+        events.onToolCall?.(event.toolName, event.args);
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
         lastStopReason = message.stopReason;
@@ -292,6 +314,7 @@ export class Runner {
       // attempt (session files stay append-only; only the leaf pointer moves).
       const turnStart = sessionManager.getLeafId();
       for (const [index, model] of models.entries()) {
+        attemptHadToolActivity = false;
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
           await rewindFailedAttempt(session, sessionManager, turnStart);
@@ -305,10 +328,13 @@ export class Runner {
         lastStopReason = undefined;
         lastErrorMessage = undefined;
         try {
-          await session.prompt(request.text, { images: request.images });
+          await runWithClaudeSession(session.sessionId, () => session.prompt(request.text, { images: request.images }));
         } catch (error) {
           lastError = error;
           log.error(`turn failed on ${modelRef(model)}: ${error}`);
+          // Rewinding a transcript cannot rewind Bash, edits, Telegram sends,
+          // or any other side effect. Never replay a toolful attempt.
+          if (attemptHadToolActivity) break;
           continue;
         }
         // User /stop aborts the run; pi settles prompt() with
@@ -321,14 +347,17 @@ export class Runner {
         if (lastStopReason === "error") {
           lastError = new Error(`provider error on ${modelRef(model)}: ${lastErrorMessage ?? "unknown"}`);
           log.error(String(lastError));
+          if (attemptHadToolActivity) break;
           continue;
         }
         // An error-free turn with zero prose (e.g. a provider entitlement quirk
         // returning an empty message) still counts as a failure worth failing over.
-        if (collected.length) {
+        if (collected.length || attemptHadToolActivity) {
+          if (model.provider === CLAUDE_CODE_PROVIDER) await commitClaudeSession(session.sessionId);
           warm.lastUsedAt = Date.now();
           return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model) };
         }
+        if (model.provider === CLAUDE_CODE_PROVIDER) await abandonClaudeSession(session.sessionId);
         lastError = new Error(`empty response from ${modelRef(model)}`);
         log.warn(String(lastError));
       }
@@ -344,6 +373,7 @@ export class Runner {
       this.dropSession(threadId);
       throw error;
     } finally {
+      setClaudeToolListener(session.sessionId, undefined);
       unsubscribe();
       this.active.delete(threadId);
       settle();
@@ -380,9 +410,18 @@ export class Runner {
     }
     this.dropSession(threadId);
 
-    const sessionManager = request.sessionFile
-      ? SessionManager.open(request.sessionFile, request.sessionDir, request.workspacePath)
-      : SessionManager.create(request.workspacePath, request.sessionDir);
+    let sessionManager: SessionManager;
+    if (request.sessionFile && existsSync(request.sessionFile)) {
+      sessionManager = SessionManager.open(request.sessionFile, request.sessionDir, request.workspacePath);
+    } else if (request.sessionFile) {
+      // Pi defers creating a first-turn JSONL until an assistant message exists.
+      // If the daemon died before that, preserve the UUID embedded in the
+      // promised filename so Claude's durable active-attempt state remains reachable.
+      const id = request.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
+      sessionManager = SessionManager.create(request.workspacePath, request.sessionDir, id ? { id } : undefined);
+    } else {
+      sessionManager = SessionManager.create(request.workspacePath, request.sessionDir);
+    }
 
     // Mutable ref so the request-log extension tags payloads with the model
     // actually in use, even after a mid-turn failover.
@@ -423,7 +462,12 @@ export class Runner {
       modelRuntime,
       model: initialModel,
       thinkingLevel: request.thinkingLevel,
-      tools: request.tools?.filter((t) => (BUILTIN_TOOLS as readonly string[]).includes(t)),
+      tools: request.tools
+        ? [
+            ...request.tools.filter((t) => (PI_BUILTIN_TOOLS as readonly string[]).includes(t)),
+            ...(request.customTools ?? []).map((tool) => tool.name),
+          ]
+        : undefined,
       customTools: request.customTools,
       resourceLoader: loader,
       sessionManager,
@@ -436,6 +480,13 @@ export class Runner {
     // A burst can steer several messages while a boundary is far away (long
     // tool call) — deliver them all at once, not one per boundary.
     session.setSteeringMode("all");
+
+    const customNames = new Set((request.customTools ?? []).map((tool) => tool.name));
+    registerClaudeSession(session.sessionId, {
+      cwd: request.workspacePath,
+      workspaceTools: request.tools,
+      customTools: session.agent.state.tools.filter((tool) => customNames.has(tool.name)),
+    });
 
     const warm: WarmSession = {
       session,
@@ -453,6 +504,7 @@ export class Runner {
   private dropSession(threadId: string) {
     const warm = this.warm.get(threadId);
     if (!warm) return;
+    unregisterClaudeSession(warm.session.sessionId);
     warm.session.dispose();
     this.warm.delete(threadId);
   }

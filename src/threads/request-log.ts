@@ -36,8 +36,9 @@ interface ThreadIndex {
 }
 
 /**
- * The exact payloads eleven's agent sent to AI providers, one JSONL file per
- * thread, captured via pi's `before_provider_request` extension event. Oldest
+ * Provider request payloads, one JSONL file per thread, captured via Pi's
+ * `before_provider_request` event. Nested runtimes record their logical SDK
+ * invocation because their private wire payload is intentionally unavailable. Oldest
  * entries are trimmed when a thread's file outgrows MAX_FILE_BYTES.
  *
  * record() fires on the model-call hot path, so all file work happens on an

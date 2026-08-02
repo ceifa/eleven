@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { logger } from "../log.ts";
+import { claudeCodeProvider } from "./claude-code.ts";
 
 const log = logger("pi");
 
@@ -19,6 +20,9 @@ export const agentDir = getAgentDir();
  * `refreshModelCatalogs()` after it is up.
  */
 export const modelRuntime = await ModelRuntime.create();
+// Claude Code is an ambient local runtime: it uses the official Agent SDK and
+// the login managed by `claude auth login`, never Pi's Anthropic OAuth/API path.
+modelRuntime.registerNativeProvider(claudeCodeProvider);
 
 /** How often the daemon re-checks provider catalogs. pi throttles the actual
  * network calls to once per four hours per provider, so this is cheap. */

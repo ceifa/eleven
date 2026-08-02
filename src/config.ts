@@ -3,9 +3,13 @@ import { EventEmitter } from "node:events";
 import { CONFIG_FILE, expandHome } from "./paths.ts";
 import { writeJsonFile } from "./util.ts";
 
-/** The pi built-in tools eleven's per-workspace policy can allow. Single source
- * of truth — the runner filters against it and the dashboard renders it. */
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
+/** Provider-neutral workspace capabilities. Pi consumes the four core tools;
+ * Claude Code additionally understands web and native subagents. */
+export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "web", "agent"] as const;
+export type WorkspaceTool = (typeof BUILTIN_TOOLS)[number];
+
+/** The subset implemented by Pi itself. */
+export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
 
 /** Channel types eleven can speak. Telegram today; the config shape is ready for more. */
 export const CHANNEL_TYPES = ["telegram"] as const;
@@ -53,8 +57,8 @@ export interface ChannelConfig {
 
 export interface WorkspaceConfig {
   path: string;
-  /** Allowlist from BUILTIN_TOOLS (read, bash, edit, write). Omit to allow all. */
-  tools?: string[];
+  /** Provider-neutral capability allowlist. Omit for the curated full set. */
+  tools?: WorkspaceTool[];
   /** Model override for this workspace, e.g. "openai-codex/gpt-5.5". */
   model?: string;
   /** Custom personality/style block; omit to use the built-in gateway prompt. */
@@ -183,6 +187,11 @@ function load(): ElevenConfig {
 export function validate(config: ElevenConfig) {
   const seen = new Set<string>();
   for (const [workspace, w] of Object.entries(config.workspaces)) {
+    for (const tool of w.tools ?? []) {
+      if (!(BUILTIN_TOOLS as readonly string[]).includes(tool)) {
+        throw new Error(`workspace "${workspace}": unknown tool capability "${tool}"`);
+      }
+    }
     for (const channel of w.channels ?? []) {
       if (!(CHANNEL_TYPES as readonly string[]).includes(channel.type)) {
         throw new Error(`workspace "${workspace}": unknown channel type "${channel.type}"`);

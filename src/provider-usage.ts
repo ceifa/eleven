@@ -1,5 +1,6 @@
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { modelRuntime } from "./agent/pi.ts";
+import { fetchClaudeCodeRateLimits } from "./agent/claude-code.ts";
 import { logger } from "./log.ts";
 
 const log = logger("usage");
@@ -65,6 +66,7 @@ export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsag
   const provider = modelRef.split("/", 1)[0];
   if (provider === "openai-codex") return fetchCodexUsage(provider);
   if (provider === "github-copilot") return fetchCopilotUsage(provider);
+  if (provider === "claude-code") return fetchClaudeUsage();
   throw new Error(`subscription usage is not available for ${provider}`);
 }
 
@@ -83,6 +85,34 @@ async function providerToken(provider: string, label: string): Promise<string> {
   }
   if (!token) throw new Error(`${provider} is not authenticated`);
   return token;
+}
+
+async function fetchClaudeUsage(): Promise<ProviderUsage> {
+  let data: Awaited<ReturnType<typeof fetchClaudeCodeRateLimits>>;
+  try {
+    data = await fetchClaudeCodeRateLimits();
+  } catch (error) {
+    throw new Error(`Claude Code usage lookup failed: ${error instanceof Error ? error.message : error}`);
+  }
+  const limits = data.rate_limits;
+  const windows: UsageWindow[] = [];
+  const add = (label: string, value: { utilization: number | null; resets_at: string | null } | null | undefined) => {
+    if (!value || typeof value.utilization !== "number") return;
+    const reset = value.resets_at ? Date.parse(value.resets_at) : Number.NaN;
+    windows.push({ label, usedPercent: value.utilization, ...(Number.isFinite(reset) ? { resetAt: reset } : {}) });
+  };
+  add("5-hour", limits?.five_hour);
+  add("7-day", limits?.seven_day);
+  add("OAuth apps", limits?.seven_day_oauth_apps);
+  add("Opus weekly", limits?.seven_day_opus);
+  add("Sonnet weekly", limits?.seven_day_sonnet);
+  for (const scoped of limits?.model_scoped ?? []) add(scoped.display_name, scoped);
+  if (!windows.length && !data.subscription_type) throw new Error("Claude Code did not report subscription limits");
+  return {
+    provider: "Claude Code",
+    plan: data.subscription_type ? titleCase(data.subscription_type) : undefined,
+    windows,
+  };
 }
 
 async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {

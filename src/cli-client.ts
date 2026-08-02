@@ -37,7 +37,6 @@ type WorkspaceView = {
   model: string;
   modelSource: string;
   fallbacks: string[];
-  thinking: string;
   tools: string[];
   customPrompt: boolean;
   channels: { type: string; name: string; username?: string; connected: boolean; users: number; groups: number }[];
@@ -179,7 +178,7 @@ export async function runClientCommand(command: string | undefined, inputArgs: s
 function printWorkspace(workspace: WorkspaceView, detail: boolean) {
   console.log(`${workspace.name}${workspace.pathExists ? "" : "  ⚠ missing path"}`);
   console.log(`  ${shortPath(workspace.path)}`);
-  console.log(`  model: ${workspace.model} (${workspace.modelSource}) · thinking: ${workspace.thinking}`);
+  console.log(`  model: ${workspace.model} (${workspace.modelSource})`);
   console.log(`  tools: ${workspace.tools.join(", ") || "none"}`);
   if (workspace.channels.length) {
     console.log(`  channels: ${workspace.channels.map((channel) => `${channel.type}/${channel.name}${channel.username ? ` (@${channel.username})` : ""}${channel.connected ? "" : " ⚠"}`).join(", ")}`);

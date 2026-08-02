@@ -10,6 +10,7 @@ const state = {
   workspaceFilter: "",
   overview: null,
   config: null,
+  catalog: null,
 };
 
 /* ---------- helpers ---------- */
@@ -314,7 +315,8 @@ function scheduleThreadRefresh(workspace) {
 async function onConfigChanged() {
   // A local save echoes back as config-changed; don't rebuild the view mid-edit.
   if (savesInFlight > 0) return;
-  if (!location.hash.startsWith("#/workspaces") && !location.hash.startsWith("#/settings")) return;
+  // Every view but the threads one renders from config.
+  if (onThreadsView()) return;
   const fresh = await api.get("/config").catch(() => null);
   if (fresh && JSON.stringify(fresh) !== JSON.stringify(state.config)) render();
 }
@@ -812,11 +814,21 @@ function newThreadDialog() {
 const ALL_TOOLS = () => state.overview?.tools ?? ["read", "bash", "edit", "write"];
 
 async function viewWorkspaces() {
-  state.config = await api.get("/config");
+  // Scope sequence editors complete against the catalog (models-list datalist)
+  // and flag unauthenticated providers; both barely change, so cache them.
+  const [config, catalog, auth] = await Promise.all([
+    api.get("/config"),
+    state.catalog ?? api.get("/models").catch(() => []),
+    state.auth ?? api.get("/providers").catch(() => []),
+  ]);
+  state.config = config;
+  state.catalog = catalog;
+  state.auth = auth;
   const pairing = state.overview?.pairing ?? [];
 
   const children = [
     pageTitle("Workspaces"),
+    modelsDatalist(),
     pairing.length ? pairingPanel(pairing) : null,
     ...Object.entries(state.config.workspaces).map(([name, workspace]) => workspaceCard(name, workspace)),
     h("div", { class: "card bg-base-200 max-w-3xl" },
@@ -894,9 +906,9 @@ function workspaceCard(name, workspace) {
                 );
               }),
             )),
-          labeled("Model override", h("input", { class: "input input-sm w-full font-mono", value: workspace.model ?? "", list: "models-list",
-            placeholder: "inherit default", onchange: (e) => updateWorkspace(name, (ws) => { ws.model = e.target.value.trim() || undefined; }) })),
         ),
+        scopeSequenceField(workspace, inheritedSequenceFor(),
+          (fn, structural) => updateWorkspace(name, fn, { structural })),
         systemPromptField(name, workspace),
       ),
     ),
@@ -970,6 +982,55 @@ function systemPromptField(name, workspace) {
   );
 }
 
+/** The sequence a scope inherits when it doesn't carry its own: the nearest
+ * ancestor's, or the global one from the Models page. Call with no arguments
+ * for what a workspace inherits. */
+function inheritedSequenceFor(workspaceName, group) {
+  if (group?.models?.length) return { entries: group.models, source: "the group" };
+  const workspace = state.config?.workspaces?.[workspaceName];
+  if (workspace?.models?.length) return { entries: workspace.models, source: "the workspace" };
+  return { entries: state.config?.models ?? [], source: "the Models page" };
+}
+
+/** Amber badge on group/topic rows that carry their own model sequence. */
+function modelsBadge(scope) {
+  if (!scope.models?.length) return null;
+  return h("span", {
+    class: "badge badge-warning badge-xs badge-soft",
+    title: scope.models.map((entry) => entry.model).join(" → "),
+  }, "models");
+}
+
+/* Scope-level sequence editor (workspace, group, topic). Resting state is a
+   one-line summary of what's inherited and from where; "customize" copies that
+   sequence into the scope and opens the same editor the Models page uses, so
+   every knob (order, reasoning, tools) is available per scope. */
+function scopeSequenceField(scope, inherited, mutateScope) {
+  const overridden = !!scope.models?.length;
+  const header = h("div", { class: "flex items-center gap-2" },
+    h("span", { class: "text-xs dim-label flex items-center gap-1.5" }, "Models",
+      info("The model sequence for turns in this scope: the first entry leads, the rest are fallbacks — each with its own reasoning and tools. Customizing copies the inherited sequence here; removing every entry goes back to inheriting.")),
+    h("div", { class: "ml-auto" },
+      overridden
+        ? h("button", { class: "btn btn-xs btn-ghost", onclick: () => mutateScope((s) => { delete s.models; }, true) }, "revert to inherited")
+        : h("button", { class: "btn btn-xs", onclick: () =>
+            mutateScope((s) => { s.models = structuredClone(inherited.entries); }, true) }, "customize"),
+    ),
+  );
+  if (!overridden) {
+    const summary = inherited.entries.map((entry) => entry.model).join(" → ") || "none configured";
+    return h("div", { class: "flex flex-col gap-1" },
+      header,
+      h("div", { class: "font-mono text-xs opacity-50 truncate" }, `${summary} · from ${inherited.source}`),
+    );
+  }
+  const ops = sequenceOps(mutateScope, { emptyMeansInherit: true });
+  return h("div", { class: "flex flex-col gap-2" },
+    header,
+    sequenceEditor(scope.models, ops, { compact: true }),
+  );
+}
+
 /** Group/topic-level: only an append. */
 function appendField(value, onchange) {
   return labeled("Append to system prompt",
@@ -983,7 +1044,7 @@ function userRow(workspaceName, chIndex, id, user) {
     const ch = ws.channels[chIndex];
     ch.users = { ...ch.users, [id]: { ...ch.users?.[id], ...patch } };
   });
-  return h("div", { class: "collapse collapse-arrow bg-base-200 border" },
+  return h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": `user:${workspaceName}:${chIndex}:${id}` },
     h("input", { type: "checkbox" }),
     h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
       h("span", { class: "font-semibold" }, user.name ?? id),
@@ -1000,10 +1061,10 @@ function userRow(workspaceName, chIndex, id, user) {
 }
 
 function groupRow(workspaceName, chIndex, id, group) {
-  const patchGroup = (patch) => updateWorkspace(workspaceName, (ws) => {
+  const patchGroup = (patch, opts) => updateWorkspace(workspaceName, (ws) => {
     const ch = ws.channels[chIndex];
     ch.groups = { ...ch.groups, [id]: { ...ch.groups?.[id], ...patch } };
-  });
+  }, opts);
   // Adding/removing a topic changes the rendered rows, so those re-render;
   // editing a topic's title or prompt updates in place.
   const patchTopic = (topicId, patch, structural = false) =>
@@ -1014,12 +1075,13 @@ function groupRow(workspaceName, chIndex, id, group) {
       else topics[topicId] = { ...topics[topicId], ...patch };
       g.topics = Object.keys(topics).length ? topics : undefined;
     }, { structural });
-  return h("div", { class: "collapse collapse-arrow bg-base-200 border" },
+  return h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": `group:${workspaceName}:${chIndex}:${id}` },
     h("input", { type: "checkbox" }),
     h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
       h("span", { class: "font-semibold" }, group.title ?? id),
       h("span", { class: "font-mono text-xs opacity-50" }, id),
       group.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
+      modelsBadge(group),
       h("span", { class: "text-xs opacity-50 ml-auto mr-2" }, group.requireMention === false ? "replies freely" : "@mention required"),
     ),
     h("div", { class: "collapse-content flex flex-col gap-3" },
@@ -1032,6 +1094,8 @@ function groupRow(workspaceName, chIndex, id, group) {
         h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () =>
           updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[chIndex]; const groups = { ...ch.groups }; delete groups[id]; ch.groups = groups; }, { structural: true }) }, "remove group"),
       ),
+      scopeSequenceField(group, inheritedSequenceFor(workspaceName),
+        (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].groups[id]), { structural })),
       appendField(group.appendSystemPrompt, (v) => patchGroup({ appendSystemPrompt: v })),
       h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, "Topics",
         info("Each forum topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them.")),
@@ -1042,8 +1106,11 @@ function groupRow(workspaceName, chIndex, id, group) {
               onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
             h("span", { class: "font-mono text-xs opacity-50" }, `topic ${topicId}`),
             topic.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
+            modelsBadge(topic),
             h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () => patchTopic(topicId, null, true) }, "remove"),
           ),
+          scopeSequenceField(topic, inheritedSequenceFor(workspaceName, group),
+            (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].groups[id].topics[topicId]), { structural })),
           appendField(topic.appendSystemPrompt, (v) => patchTopic(topicId, { appendSystemPrompt: v })),
         ),
       ),
@@ -1127,59 +1194,278 @@ async function pairingAction(code, action) {
   render(); // refetches /overview and repaints the badge — no separate fetch needed
 }
 
-/* ---------- providers view ---------- */
+/* ---------- models view (the sequence) ---------- */
 
-async function viewProviders() {
-  const [config, providers, models] = await Promise.all([api.get("/config"), api.get("/providers"), api.get("/models")]);
-  state.config = config;
-  const p = config.providers;
+const fmtContext = (tokens) =>
+  tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 ? 1 : 0)}M` : `${Math.round(tokens / 1000)}k`;
 
-  view.replaceChildren(
-    pageTitle("Providers"),
-    h("datalist", { id: "models-list" }, models.map((m) => h("option", { value: m }))),
-    h("div", { class: "card bg-base-200 max-w-3xl mb-4" },
-      h("div", { class: "card-body gap-3" },
-        h("h2", { class: "card-title text-base" }, "Models"),
-        labeled("Default model", h("input", { class: "input input-sm w-full font-mono", value: p.defaultModel, list: "models-list",
-          onchange: (e) => queueSave((next) => { next.providers.defaultModel = e.target.value.trim(); return next; }) })),
-        labeled("Fallback models",
-          h("div", { class: "flex flex-wrap items-center gap-2" },
-            ...p.fallbackModels.map((model, index) =>
-              h("span", { class: "badge badge-ghost font-mono gap-1" }, model,
-                h("button", { class: "text-error", onclick: () =>
-                  queueSave((next) => { next.providers.fallbackModels.splice(index, 1); return next; }, { structural: true }) }, "✕")),
-            ),
-            h("input", { class: "input input-xs w-56 font-mono", list: "models-list", placeholder: "add fallback model", onchange: (e) => {
-              const value = e.target.value.trim();
-              if (!value) return;
-              queueSave((next) => { next.providers.fallbackModels.push(value); return next; }, { structural: true });
-            } }),
-          ), "Tried in order when the default model fails."),
-        labeled("Thinking level",
-          h("select", { class: "select select-sm w-40", onchange: (e) => queueSave((next) => { next.providers.thinkingLevel = e.target.value; return next; }) },
-            ["off", "minimal", "low", "medium", "high", "xhigh"].map((level) =>
-              h("option", { value: level, selected: (p.thinkingLevel ?? "high") === level }, level)),
-          )),
+const REASONING_LEVELS = () => state.overview?.reasoningLevels ?? ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+function modelsDatalist() {
+  return h("datalist", { id: "models-list" }, (state.catalog ?? []).map((m) => h("option", { value: m.ref })));
+}
+
+/** One usage window as a thin meter: how much of the quota is already burned. */
+function usageMeter(window) {
+  const used = Math.min(100, Math.max(0, window.usedPercent));
+  const level = used >= 90 ? "crit" : used >= 65 ? "warn" : "";
+  const reset = window.resetAt ? ` · resets ${timeUntil(window.resetAt)}` : "";
+  return h("div", { class: "flex items-center gap-2 text-xs" },
+    h("span", { class: "usage-label" }, window.label),
+    window.unlimited
+      ? h("span", { class: "opacity-60" }, "unlimited")
+      : h("div", { class: `meter ${level}` }, h("i", { style: `width:${used}%` })),
+    window.unlimited ? null : h("span", { class: "opacity-60", style: "white-space:nowrap" }, `${Math.round(100 - used)}% left${reset}`),
+  );
+}
+
+function timeUntil(ts) {
+  const minutes = Math.max(0, Math.ceil((ts - Date.now()) / 60_000));
+  const days = Math.floor(minutes / (24 * 60));
+  const hours = Math.floor((minutes % (24 * 60)) / 60);
+  if (days) return `in ${days}d ${hours}h`;
+  if (hours) return `in ${hours}h ${minutes % 60}m`;
+  return `in ${minutes}m`;
+}
+
+/** Fill each provider card's usage slot once /usage answers. The server hits
+ * each provider's quota API for it, so reuse recent reports across the
+ * re-renders every structural edit triggers. */
+const USAGE_TTL_MS = 60_000;
+let usageCache = { at: 0, reports: null };
+async function loadUsage() {
+  if (!usageCache.reports || Date.now() - usageCache.at > USAGE_TTL_MS) {
+    usageCache = { at: Date.now(), reports: await api.get("/usage").catch(() => []) };
+  }
+  const { reports } = usageCache;
+  for (const slot of document.querySelectorAll("[data-usage-provider]")) {
+    const report = reports.find((r) => r.provider === slot.dataset.usageProvider);
+    slot.replaceChildren();
+    if (!report) continue;
+    if (report.unsupported) {
+      slot.append(h("div", { class: "text-xs opacity-40" }, "this provider doesn't report subscription usage"));
+      continue;
+    }
+    if (report.error) {
+      slot.append(h("div", { class: "text-xs text-error opacity-60" }, `usage unavailable — ${report.error}`));
+      continue;
+    }
+    const { usage } = report;
+    for (const window of usage.windows) slot.append(usageMeter(window));
+    if (usage.credits !== undefined) slot.append(h("div", { class: "text-xs opacity-60" }, `${usage.credits.toLocaleString()} credits left`));
+    for (const fact of usage.facts ?? []) slot.append(h("div", { class: "text-xs opacity-60" }, `${fact.label}: ${fact.value}`));
+    // The plan lands in the card header, next to the provider's name.
+    const plan = document.querySelector(`[data-usage-plan="${report.provider}"]`);
+    if (plan && usage.plan) plan.textContent = `${usage.provider} · ${usage.plan}`;
+  }
+}
+
+const PROVIDER_LOGIN_HINTS = { "claude-code": "run `claude auth login`" };
+
+/** One provider the sequences rely on: identity, credentials, live quota. */
+function providerCard(provider) {
+  const authEntry = (state.auth ?? []).find((a) => a.provider === provider);
+  const configured = authEntry?.configured;
+  return h("div", { class: "card bg-base-200 border" },
+    h("div", { class: "card-body gap-2 p-4" },
+      h("div", { class: "flex items-center gap-2 wrap-mobile" },
+        h("span", { class: "font-mono font-semibold" }, provider),
+        configured
+          ? h("span", { class: "badge badge-success badge-xs badge-soft" },
+              `✓ ${authEntry.label ?? AUTH_SOURCE_LABELS[authEntry.source] ?? authEntry.source ?? "authenticated"}`)
+          : h("span", { class: "badge badge-error badge-xs badge-soft" }, "not authenticated"),
+        h("span", { class: "text-xs opacity-50 ml-auto", "data-usage-plan": provider }),
+      ),
+      configured
+        ? h("div", { class: "flex flex-col gap-1.5", "data-usage-provider": provider },
+            h("div", { class: "text-xs opacity-40" }, "checking usage…"))
+        : h("div", { class: "text-xs opacity-60" }, `No credentials — ${PROVIDER_LOGIN_HINTS[provider] ?? "run `pi` and `/login`"}.`),
+    ),
+  );
+}
+
+// pi's credential-source ids, translated to where the login actually lives.
+const AUTH_SOURCE_LABELS = { stored: "pi login", environment: "external login", runtime: "runtime key" };
+
+/** The four sequence mutations, routed through whichever save channel owns the
+ * models array. `withModels(fn, structural)` runs fn(owner) where owner.models
+ * is the sequence; `emptyMeansInherit` drops the array when the last entry
+ * goes (scope overrides revert to inheriting; the global sequence keeps []). */
+function sequenceOps(withModels, { emptyMeansInherit = false } = {}) {
+  return {
+    move: (index, delta) => withModels((owner) => {
+      const [step] = owner.models.splice(index, 1);
+      owner.models.splice(index + delta, 0, step);
+    }, true),
+    patch: (index, mutate, structural = false) => withModels((owner) => mutate(owner.models[index]), structural),
+    remove: (index) => withModels((owner) => {
+      owner.models.splice(index, 1);
+      if (emptyMeansInherit && !owner.models.length) delete owner.models;
+    }, true),
+    add: (ref) => withModels((owner) => { owner.models = [...(owner.models ?? []), { model: ref }]; }, true),
+  };
+}
+
+/** One step of a sequence: a card hanging on the wire. `ops` routes edits to
+ * whichever sequence this card belongs to (global or a scope's). */
+function modelCard(entry, index, total, ops, opts = {}) {
+  const meta = (state.catalog ?? []).find((m) => m.ref === entry.model);
+  const canReason = meta ? meta.reasoning : true;
+  const supported = meta?.tools ?? ALL_TOOLS();
+  const provider = entry.model.split("/")[0];
+  const authEntry = (state.auth ?? []).find((a) => a.provider === provider);
+  const defaultReasoning = state.overview?.defaultReasoning ?? "high";
+
+  return h("div", { class: "chain-step" },
+    h("div", { class: `chain-node ${index === 0 ? "is-lead" : ""}` }, String(index + 1)),
+    h("div", { class: `card ${opts.compact ? "bg-base-100" : "bg-base-200"} border` },
+      h("div", { class: `card-body gap-3 ${opts.compact ? "p-3" : "p-4"}` },
+        h("div", { class: "flex items-center gap-2 wrap-mobile" },
+          h("span", { class: "chain-role" }, index === 0 ? "leads every turn" : "fallback"),
+          !meta ? h("span", { class: "badge badge-error badge-xs badge-soft", title: "not in pi's model registry" }, "unknown model") : null,
+          meta && authEntry && !authEntry.configured
+            ? h("span", { class: "badge badge-error badge-xs badge-soft", title: "no credentials for this provider" }, "no auth")
+            : null,
+          h("div", { class: "flex items-center gap-1 ml-auto" },
+            h("button", { class: "btn btn-ghost btn-xs", disabled: index === 0, "aria-label": "move up", onclick: () => ops.move(index, -1) }, "↑"),
+            h("button", { class: "btn btn-ghost btn-xs", disabled: index === total - 1, "aria-label": "move down", onclick: () => ops.move(index, 1) }, "↓"),
+            h("button", { class: "btn btn-ghost btn-xs text-error", onclick: () => ops.remove(index) }, "remove"),
+          ),
+        ),
+        h("div", { class: "grid-2 gap-4" },
+          labeled("Model", h("input", { class: "input input-sm w-full font-mono", value: entry.model, list: "models-list",
+            onchange: (e) => { const v = e.target.value.trim(); if (v) ops.patch(index, (m) => { m.model = v; }, true); } })),
+          labeled("Reasoning",
+            canReason
+              ? h("select", { class: "select select-sm w-full", onchange: (e) => ops.patch(index, (m) => { m.reasoning = e.target.value === defaultReasoning ? undefined : e.target.value; }) },
+                  REASONING_LEVELS().map((level) => h("option", { value: level, selected: (entry.reasoning ?? defaultReasoning) === level }, level)))
+              : h("div", { class: "text-sm opacity-50", style: "padding:0.3rem 0" }, "not a reasoning model"),
+            canReason ? "Thinking effort while this model drives a turn." : undefined),
+        ),
+        labeled("Tools",
+          h("div", { class: "flex flex-wrap gap-3 py-1" },
+            supported.map((tool) => {
+              const enabled = !entry.tools || entry.tools.includes(tool);
+              return h("label", { class: "label cursor-pointer gap-2 text-sm" },
+                h("input", { type: "checkbox", class: "checkbox checkbox-sm", checked: enabled, onchange: (e) => ops.patch(index, (m) => {
+                  const current = m.tools ?? [...supported];
+                  const next = e.target.checked ? [...new Set([...current, tool])] : current.filter((t) => t !== tool);
+                  m.tools = next.length >= supported.length ? undefined : next;
+                }) }),
+                tool,
+              );
+            }),
+          ),
+          "Only tools this model's runtime actually has are listed. A workspace's own tool limits still apply on top."),
+        meta
+          ? h("div", { class: "text-xs opacity-50 font-mono flex items-center gap-3 flex-wrap" },
+              h("span", {}, meta.name),
+              h("span", {}, `${fmtContext(meta.contextWindow)} context`),
+            )
+          : null,
       ),
     ),
-    h("div", { class: "card bg-base-200 max-w-3xl" },
-      h("div", { class: "card-body gap-2" },
-        h("h2", { class: "card-title text-base" }, "Provider auth"),
-        h("p", { class: "text-xs opacity-60" }, "Run `pi` and /login, or set keys in ~/.pi/agent/auth.json."),
-        h("table", { class: "table table-sm font-mono" },
-          h("thead", {}, h("tr", {}, h("th", {}, "provider"), h("th", {}, "status"), h("th", {}, "source"))),
-          h("tbody", {},
-            providers.map((entry) =>
-              h("tr", {},
-                h("td", {}, entry.provider),
-                h("td", {}, entry.configured ? h("span", { class: "text-success" }, "✓ configured") : h("span", { class: "opacity-40" }, "—")),
-                h("td", { class: "opacity-60" }, entry.source ?? ""),
+  );
+}
+
+/** A full sequence editor: the chain of cards plus the add-model row. */
+function sequenceEditor(models, ops, opts = {}) {
+  const addInput = h("input", { class: "input input-sm w-72 font-mono", list: "models-list",
+    placeholder: models.length ? "add a fallback model" : "provider/model-id" });
+  const add = () => {
+    const value = addInput.value.trim();
+    if (value) ops.add(value);
+  };
+  return h("div", { class: "flex flex-col gap-4" },
+    models.length ? h("div", { class: "chain" }, models.map((entry, index) => modelCard(entry, index, models.length, ops, opts))) : null,
+    h("div", { class: "flex gap-2 items-center stack-mobile", style: "padding-left: 2.4rem" },
+      addInput,
+      h("button", { class: "btn btn-sm btn-primary", onclick: add }, "Add"),
+    ),
+  );
+}
+
+async function viewModels() {
+  // The catalog and auth statuses barely change — fetch them once per session,
+  // not on every structural re-render.
+  const [config, catalog, auth] = await Promise.all([
+    api.get("/config"),
+    state.catalog ?? api.get("/models"),
+    state.auth ?? api.get("/providers"),
+  ]);
+  state.config = config;
+  state.catalog = catalog;
+  state.auth = auth;
+  const models = config.models ?? [];
+
+  const ops = sequenceOps((fn, structural) => queueSave((next) => { fn(next); return next; }, { structural }));
+
+  view.replaceChildren(
+    pageTitle("Models"),
+    modelsDatalist(),
+    h("div", { class: "max-w-3xl flex flex-col gap-4" },
+      h("p", { class: "text-sm opacity-60", style: "max-width: 40rem" },
+        "Every turn starts on the first model. When it fails, the turn retries down the wire — same conversation, next model. Workspaces, groups and topics can carry their own sequence instead of this one."),
+      models.length === 0 ? h("div", { class: "alert" }, "No models yet — add one below to bring eleven to life.") : null,
+      sequenceEditor(models, ops),
+      providersSection(),
+    ),
+  );
+  void loadUsage();
+}
+
+/** Every provider referenced by any sequence (global, workspace, group or
+ * topic) — derived from the config the page already holds, so it can't drift
+ * from what the cards below show. */
+function providersInUse() {
+  const refs = [];
+  const scope = (s) => {
+    for (const entry of s?.models ?? []) refs.push(entry.model);
+  };
+  scope(state.config);
+  for (const workspace of Object.values(state.config?.workspaces ?? {})) {
+    scope(workspace);
+    for (const channel of workspace.channels ?? []) {
+      for (const group of Object.values(channel.groups ?? {})) {
+        scope(group);
+        for (const topic of Object.values(group.topics ?? {})) scope(topic);
+      }
+    }
+  }
+  return [...new Set(refs.map((ref) => ref.split("/")[0]).filter(Boolean))].sort();
+}
+
+/** Auth + subscription usage live per provider, not per model — so they get
+ * their own section: rich cards for the providers the sequences actually use,
+ * the rest tucked into a quiet disclosure. */
+function providersSection() {
+  const inUse = providersInUse();
+  const others = (state.auth ?? []).filter((entry) => !inUse.includes(entry.provider));
+  return h("div", { class: "flex flex-col gap-3 mt-4" },
+    sectionLabel("Providers"),
+    inUse.length === 0 ? h("div", { class: "text-sm opacity-50" }, "No providers in use yet — they show up here once a model is added.") : null,
+    ...inUse.map((provider) => providerCard(provider)),
+    others.length
+      ? h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": "providers:others" },
+          h("input", { type: "checkbox" }),
+          h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
+            h("span", { class: "opacity-60" }, "Other providers"),
+            h("span", { class: "badge badge-ghost badge-xs" }, String(others.length)),
+            h("span", { class: "text-xs opacity-40 ml-auto mr-2" }, `${others.filter((entry) => entry.configured).length} authenticated`),
+          ),
+          h("div", { class: "collapse-content flex flex-col gap-1" },
+            h("p", { class: "text-xs opacity-50" }, "Every provider pi knows. Authenticate with `pi` and `/login` (or keys in ~/.pi/agent/auth.json); Claude Code uses `claude auth login`."),
+            ...others.map((entry) =>
+              h("div", { class: "flex items-center gap-2 font-mono text-xs py-1" },
+                h("span", {}, entry.provider),
+                entry.configured
+                  ? h("span", { class: "text-success" }, `✓ ${entry.label ?? AUTH_SOURCE_LABELS[entry.source] ?? entry.source ?? "authenticated"}`)
+                  : h("span", { class: "opacity-40" }, "—"),
               ),
             ),
           ),
-        ),
-      ),
-    ),
+        )
+      : null,
   );
 }
 
@@ -1257,20 +1543,34 @@ function labeled(label, control, tip) {
 
 /* ---------- router ---------- */
 
-const routes = { threads: viewThreads, workspaces: viewWorkspaces, providers: viewProviders, settings: viewSettings, channels: viewWorkspaces };
+const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, settings: viewSettings, channels: viewWorkspaces };
 
 async function render() {
   const name = (location.hash.replace("#/", "") || "threads").split("/")[0];
   const route = routes[name] ?? viewThreads;
   for (const link of document.querySelectorAll("aside .menu a")) {
-    link.classList.toggle("menu-active", (link.dataset.view === name) || (name === "channels" && link.dataset.view === "workspaces"));
+    link.classList.toggle("menu-active",
+      (link.dataset.view === name)
+      || (name === "channels" && link.dataset.view === "workspaces")
+      || (name === "providers" && link.dataset.view === "models"));
   }
+  // Collapse sections are checkbox-driven, so a structural re-render (any
+  // config save that rebuilds the view) would slam them all shut. Snapshot
+  // which ones are open and reopen them after the rebuild — stale ids (a
+  // removed row, another page) simply match nothing.
+  const openCollapses = [...view.querySelectorAll(".collapse[data-collapse]")]
+    .filter((el) => el.querySelector(":scope > input:checked"))
+    .map((el) => el.dataset.collapse);
   try {
     state.overview = await api.get("/overview");
     applyPairingBadge();
     await route();
   } catch (error) {
     view.replaceChildren(h("div", { class: "alert alert-error" }, `Could not load: ${error.message}`));
+  }
+  for (const id of openCollapses) {
+    const input = view.querySelector(`.collapse[data-collapse="${CSS.escape(id)}"] > input`);
+    if (input) input.checked = true;
   }
 }
 

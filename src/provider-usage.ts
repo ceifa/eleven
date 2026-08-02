@@ -61,13 +61,48 @@ export interface ProviderUsage {
   facts?: { label: string; value: string }[];
 }
 
+/** Quota fetchers by provider — the single source of which providers report
+ * subscription usage. */
+const USAGE_FETCHERS: Record<string, () => Promise<ProviderUsage>> = {
+  "openai-codex": () => fetchCodexUsage("openai-codex"),
+  "github-copilot": () => fetchCopilotUsage("github-copilot"),
+  "claude-code": () => fetchClaudeUsage(),
+};
+
+/** Providers whose subscription quota eleven knows how to read. */
+export const USAGE_PROVIDERS = Object.keys(USAGE_FETCHERS);
+
+/** Fetch the subscription quota of one provider. */
+export async function fetchUsageForProvider(provider: string): Promise<ProviderUsage> {
+  const fetcher = USAGE_FETCHERS[provider];
+  if (!fetcher) throw new Error(`subscription usage is not available for ${provider}`);
+  return fetcher();
+}
+
 /** Fetch the subscription quota for the provider behind a model reference. */
 export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsage> {
-  const provider = modelRef.split("/", 1)[0];
-  if (provider === "openai-codex") return fetchCodexUsage(provider);
-  if (provider === "github-copilot") return fetchCopilotUsage(provider);
-  if (provider === "claude-code") return fetchClaudeUsage();
-  throw new Error(`subscription usage is not available for ${provider}`);
+  return fetchUsageForProvider(modelRef.split("/", 1)[0]);
+}
+
+export interface ProviderUsageReport {
+  provider: string;
+  usage?: ProviderUsage;
+  error?: string;
+  /** This provider has no usage API eleven can read. */
+  unsupported?: boolean;
+}
+
+/** Collect quota reports for a set of providers, one entry per provider, never
+ * throwing — consumers decide how to present errors and unsupported ones. */
+export async function collectProviderUsage(providers: string[]): Promise<ProviderUsageReport[]> {
+  return Promise.all(providers.map(async (provider) => {
+    if (!(provider in USAGE_FETCHERS)) return { provider, unsupported: true };
+    try {
+      return { provider, usage: await fetchUsageForProvider(provider) };
+    } catch (error) {
+      return { provider, error: error instanceof Error ? error.message : String(error) };
+    }
+  }));
 }
 
 /**

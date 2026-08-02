@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ConfigStore, WorkspaceConfig } from "./config.ts";
+import type { ConfigStore, ModelScope, WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
@@ -14,7 +14,7 @@ import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
-import { fetchProviderUsage, formatProviderUsage } from "./provider-usage.ts";
+import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 
 const log = logger("gateway");
@@ -40,6 +40,9 @@ export interface IncomingMessage {
   customTools?: ToolDefinition[];
   /** Default workspace for this conversation (e.g. the bot's configured one). */
   workspaceHint?: string;
+  /** Channel-resolved model scopes, most specific first (topic, then group) —
+   * they outrank the workspace's own model settings. */
+  modelScopes?: (ModelScope | undefined)[];
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
@@ -120,8 +123,7 @@ export class Gateway extends EventEmitter {
           sessionDir: join(THREADS_DIR, thread.workspace),
           workspacePath: workspace.config.path,
           runtime: { ...incoming.runtime, workspace: thread.workspace, workspacePath: workspace.config.path },
-          models: this.config.modelCandidates(thread.model, workspace.config.model),
-          thinkingLevel: this.config.resolved.providers.thinkingLevel ?? "high",
+          models: this.config.turnModels(thread.model, [...(incoming.modelScopes ?? []), workspace.config]),
           tools: workspace.config.tools,
           customTools: incoming.customTools,
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },
@@ -212,9 +214,9 @@ export class Gateway extends EventEmitter {
     if (!thread.sessionFile) throw new Error("thread has no session file");
     const workspace = this.config.resolved.workspaces[thread.workspace];
     if (!workspace) throw new Error(`workspace ${thread.workspace} is not configured`);
-    const candidates = this.config.modelCandidates(thread.model, workspace.model);
-    const model = candidates.find((candidate) => findModel(candidate));
-    if (!model) throw new Error(`no known model among: ${candidates.join(", ") || "none"}`);
+    const candidates = this.config.turnModels(thread.model, [workspace]);
+    const model = candidates.map((candidate) => candidate.model).find((ref) => findModel(ref));
+    if (!model) throw new Error(`no known model among: ${candidates.map((c) => c.model).join(", ") || "none"}`);
 
     return this.runner.runWhenIdle(thread.id, async () => {
       // Re-check after entering the lane: /new may have rotated the conversation
@@ -251,20 +253,14 @@ export class Gateway extends EventEmitter {
 
   /** Live subscription quotas for every provider configured in eleven. */
   async providerUsage(): Promise<string> {
-    const models = this.config.configuredModelRefs().filter((ref, index, refs) => {
-      const provider = ref.split("/", 1)[0];
-      return refs.findIndex((candidate) => candidate.split("/", 1)[0] === provider) === index;
-    });
-    if (!models.length) throw new Error("no providers configured");
-    const reports = await Promise.all(models.map(async (model) => {
-      try {
-        return formatProviderUsage(await fetchProviderUsage(model));
-      } catch (error) {
-        const provider = model.split("/", 1)[0];
-        return `**${provider}**\n- ⚠️ ${error instanceof Error ? error.message : error}`;
-      }
-    }));
-    return reports.join("\n\n");
+    const providers = [...new Set(this.config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
+    if (!providers.length) throw new Error("no providers configured");
+    const reports = await collectProviderUsage(providers);
+    return reports
+      .map((report) => report.usage
+        ? formatProviderUsage(report.usage)
+        : `**${report.provider}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
+      .join("\n\n");
   }
 
   private idleMs(): number {

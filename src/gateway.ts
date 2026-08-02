@@ -14,6 +14,7 @@ import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
+import { summarizeToolArgs } from "./util.ts";
 import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 
@@ -46,6 +47,11 @@ export interface IncomingMessage {
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
+  /** Deliver the finished turn to the channel. The runner runs it inside the
+   * thread's turn lane, so the pending ledger releases only after the send
+   * settles — a daemon death between "model done" and "reply sent" wakes the
+   * conversation instead of silently losing the reply. */
+  deliver?: (result: TurnResult) => Promise<void>;
 }
 
 /**
@@ -67,6 +73,8 @@ export class Gateway extends EventEmitter {
       if (sessionFile) this.threads.update(threadId, { sessionFile });
       this.pending.begin(threadId);
     },
+    // Fired inside the turn lane, after channel delivery — so the ledger
+    // covers the send, and the next turn's begin cannot overlap this end.
     onTurnEnd: (threadId) => this.pending.end(threadId),
   });
 
@@ -129,6 +137,7 @@ export class Gateway extends EventEmitter {
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },
           text: incoming.text,
           images: incoming.images,
+          deliver: incoming.deliver,
         },
         events,
       );
@@ -304,11 +313,3 @@ export class Gateway extends EventEmitter {
   }
 }
 
-/** One-line summary of a tool call's args for the dashboard's live tool chip
- * (mirrors the durable rendering in threads/reader.ts). */
-function summarizeToolArgs(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  const value = a.path ?? a.file_path ?? a.command ?? a.pattern ?? Object.values(a)[0];
-  return typeof value === "string" ? value.slice(0, 120) : "";
-}

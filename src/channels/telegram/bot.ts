@@ -3,7 +3,7 @@ import { run, sequentialize, type RunnerHandle } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ChannelConfig, GroupConfig, UserConfig } from "../../config.ts";
-import { lruTouch } from "../../util.ts";
+import { lruTouch, summarizeToolArgs } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
 import { collectInboundMedia, formatInboundBody } from "./media.ts";
@@ -29,11 +29,12 @@ const SEEN_MESSAGE_TTL_MS = 20 * 60 * 1000;
 const MAX_SEEN_MESSAGES = 5_000;
 
 /** Injected to resume a conversation whose turn a restart cut off (see gateway
- * interruptedTurns). Deliberately neutral about how far the interrupted turn
- * got: the model may have written nothing, part of a reply, or a full one it
- * never delivered — it can see its own prior output and continue from there. */
+ * interruptedTurns). The pending ledger releases only after Telegram confirmed
+ * the send, so waking implies the reply never landed: the model may have
+ * written nothing, part of a reply, or a full one — it can see its own prior
+ * output, and a finished answer must be (re)sent, not assumed delivered. */
 const WAKE_PROMPT =
-  "[eleven restarted mid-turn. Continue from wherever you left off, no need to mention the restart unless it changes your answer]";
+  "[eleven restarted mid-turn. If you already finished a reply above, it likely never reached the user — send it again. Otherwise continue from wherever you left off. No need to mention the restart unless it changes your answer]";
 
 type InboundImage = { type: "image"; data: string; mimeType: string };
 
@@ -346,7 +347,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         : [group?.appendSystemPrompt, topicConfig?.appendSystemPrompt]
     ).filter((a): a is string => !!a);
     try {
-      const result = await deps.gateway.handle({
+      await deps.gateway.handle({
         sessionKey,
         text,
         images,
@@ -385,18 +386,24 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             current = "";
           },
           onTaskActivity: (activity) => taskProgress.update(activity),
+          onToolCall: (name, args) => taskProgress.tool(name, summarizeToolArgs(args)),
+        },
+        // The final send runs inside the turn's durable window: the pending
+        // ledger releases only after this settles, so a daemon death before
+        // Telegram confirms the send wakes the conversation instead of
+        // silently losing the reply. A steered message never gets here — the
+        // owning turn's deliver ships the combined result (and clears `sent`).
+        deliver: async (result) => {
+          await taskProgress.finish(result.status === "stopped" ? "stopped" : "completed");
+          // After a mid-turn flush, result.text still contains the flushed
+          // prose — deliver only what accumulated since.
+          const final = (flushedEarly ? blocks.join("\n\n") : result.text).trim();
+          const duplicate = !!final && sent.has(final);
+          sent.clear(); // the turn is over — next one starts clean
+          if (!final || duplicate) return;
+          await sendRich(bot.api, chatId, final, sendOptions);
         },
       });
-
-      if (!result) return; // steered into a running turn; that turn delivers (and clears `sent`)
-      await taskProgress.finish(result.status === "stopped" ? "stopped" : "completed");
-      // After a mid-turn flush, result.text still contains the flushed prose —
-      // deliver only what accumulated since.
-      const final = (flushedEarly ? blocks.join("\n\n") : result.text).trim();
-      const duplicate = !!final && sent.has(final);
-      sent.clear(); // the turn is over — next one starts clean
-      if (!final || duplicate) return;
-      await sendRich(bot.api, chatId, final, sendOptions);
     } catch (error) {
       sent.clear();
       await taskProgress.finish("failed");

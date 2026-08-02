@@ -54,6 +54,10 @@ export interface TurnRequest {
   prompt?: PromptConfig;
   text: string;
   images?: ImageContent[];
+  /** Channel delivery of the finished turn. Runs inside the thread's turn lane
+   * (before onTurnEnd fires and before the next queued turn can start), so a
+   * durable in-flight ledger keyed on the hooks covers the send itself. */
+  deliver?: (result: TurnResult) => Promise<void>;
 }
 
 export interface TurnEvents {
@@ -122,7 +126,8 @@ export interface RunnerHooks {
    * session file — lets the gateway record it as in-flight so an interrupted
    * turn can be woken back up after a restart. */
   onTurnStart?: (threadId: string, sessionFile: string | undefined) => void;
-  /** Fired when that turn settles (success, failure, or abort). */
+  /** Fired when that turn settles — after its channel delivery, still inside
+   * the turn lane, so begin/end pairs of consecutive turns never overlap. */
   onTurnEnd?: (threadId: string) => void;
 }
 
@@ -149,7 +154,17 @@ export class Runner {
   async submit(threadId: string, request: TurnRequest, events: TurnEvents = {}): Promise<TurnResult | undefined> {
     const running = this.active.get(threadId);
     if (running && (await this.steerIntoTurn(threadId, running, request))) return undefined;
-    return keyedLane(this.lanes, threadId, () => this.runTurn(threadId, request, events));
+    return keyedLane(this.lanes, threadId, async () => {
+      try {
+        const result = await this.runTurn(threadId, request, events);
+        // Inside the lane but outside runTurn: a delivery failure must not
+        // tear down the warm session like a model failure would.
+        await request.deliver?.(result);
+        return result;
+      } finally {
+        this.hooks.onTurnEnd?.(threadId);
+      }
+    });
   }
 
   /**
@@ -397,7 +412,6 @@ export class Runner {
       unsubscribe();
       this.active.delete(threadId);
       settle();
-      this.hooks.onTurnEnd?.(threadId);
     }
   }
 

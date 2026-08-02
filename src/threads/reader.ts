@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { parseSessionEntries, type SessionEntry, type SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { contentText, keyedLane, lruTouch, readFileSlice } from "../util.ts";
+import { contentText, keyedLane, lruTouch, readFileSlice, summarizeToolArgs } from "../util.ts";
 
 export interface ThreadMessage {
   role: "user" | "assistant";
@@ -115,7 +115,7 @@ function renderMessage(entry: SessionEntry): ThreadMessage | undefined {
     const text = contentText(message.content).trim();
     const toolCalls = message.content
       .filter((c) => c.type === "toolCall")
-      .map((c) => ({ id: c.id, name: c.name, summary: summarizeArgs(c.arguments), args: c.arguments }));
+      .map((c) => ({ id: c.id, name: c.name, summary: summarizeToolArgs(c.arguments, 160), args: c.arguments }));
     if (text || toolCalls.length) {
       return { role: "assistant", text, timestamp: entry.timestamp, toolCalls: toolCalls.length ? toolCalls : undefined };
     }
@@ -132,11 +132,3 @@ function renderResult(entry: SessionEntry): (ToolResult & { toolCallId: string }
   return { toolCallId: message.toolCallId, output: contentText(message.content), isError: !!message.isError };
 }
 
-// Just the inline one-liner preview — the full argument object travels in `args`
-// and the dashboard shows it in a JSON viewer on click, so a short cap here is
-// fine (the row truncates to one line anyway).
-function summarizeArgs(args: Record<string, unknown> | undefined): string {
-  if (!args) return "";
-  const value = args.path ?? args.file_path ?? args.command ?? args.pattern ?? Object.values(args)[0];
-  return typeof value === "string" ? value.slice(0, 160) : "";
-}

@@ -58,7 +58,8 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
   ].join("\n"));
 });
 
-test("Telegram task progress sends once then edits the same quiet message", async () => {
+/** Fake bot API recording every raw call; messages are created with id 77. */
+function fakeApi() {
   const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
   const api = {
     raw: {
@@ -70,9 +71,18 @@ test("Telegram task progress sends once then edits the same quiet message", asyn
         calls.push({ method: "edit", payload });
         return true;
       },
+      deleteMessage: async (payload: Record<string, unknown>) => {
+        calls.push({ method: "delete", payload });
+        return true;
+      },
     },
   };
-  const progress = new TelegramTaskProgress(api as never, -100, 42, { message_id: 9 });
+  return { calls, api: api as never };
+}
+
+test("Telegram task progress sends once then edits the same quiet message", async () => {
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, -100, 42, { message_id: 9 });
   progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
   await new Promise((resolve) => setTimeout(resolve, 300));
   progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "completed" } });
@@ -87,24 +97,57 @@ test("Telegram task progress sends once then edits the same quiet message", asyn
 });
 
 test("Telegram task progress terminalizes running agents when stopped", async () => {
-  const payloads: Record<string, unknown>[] = [];
-  const api = {
-    raw: {
-      sendMessage: async (payload: Record<string, unknown>) => {
-        payloads.push(payload);
-        return { message_id: 1 };
-      },
-    },
-  };
-  const progress = new TelegramTaskProgress(api as never, 1);
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, 1);
   progress.update({ kind: "agent", task: { id: "a", title: "Long review", status: "running" } });
   await progress.finish("stopped");
   progress.cancel();
 
-  assert.equal(payloads.length, 1);
-  assert.match(String(payloads[0]?.text), /⏹ Turno interrompido/);
-  assert.match(String(payloads[0]?.text), /⏹ Long review/);
+  assert.deepEqual(calls.map((call) => call.method), ["send"]);
+  assert.match(String(calls[0]?.payload.text), /⏹ Turno interrompido/);
+  assert.match(String(calls[0]?.payload.text), /⏹ Long review/);
   assert.equal(renderTaskActivity([], [], "completed"), "✅ Turno concluído");
+});
+
+test("running header shows the current top-level tool and elapsed time", () => {
+  assert.equal(
+    renderTaskActivity([], [], undefined, { tool: { name: "Bash", summary: "npm test" }, elapsedMs: 65_000 }),
+    "⚙️ Claude trabalhando · 1m05s\n🔧 Bash · npm test",
+  );
+  // Elapsed time stays quiet while the turn still feels instant.
+  assert.equal(
+    renderTaskActivity([], [], undefined, { tool: { name: "Read" }, elapsedMs: 400 }),
+    "⚙️ Claude trabalhando\n🔧 Read",
+  );
+  // Finished renders never carry the live tool line.
+  assert.equal(renderTaskActivity([], [], "completed", undefined), "✅ Turno concluído");
+});
+
+test("quick tool-only turns never post a status message", async () => {
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, 1);
+  progress.tool("Bash", "npm test");
+  // finish() lands before the tool-only render hold-off expires.
+  await progress.finish("completed");
+  progress.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.deepEqual(calls, []);
+});
+
+test("a tool-status-only message is deleted when the turn ends", async () => {
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, 7, undefined, undefined, 30);
+  progress.tool("Bash", "npm test");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await progress.finish("completed");
+  progress.cancel();
+  // The cleanup delete deliberately runs off the reply's critical path.
+  for (let i = 0; i < 50 && calls.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.deepEqual(calls.map((call) => call.method), ["send", "delete"]);
+  assert.match(String(calls[0]?.payload.text), /🔧 Bash · npm test/);
+  assert.equal(calls[1]?.payload.message_id, 77);
 });
 
 test("group attribution wraps the complete inbound body while DMs stay bare", () => {

@@ -11,10 +11,12 @@ export interface PendingTurn {
 
 /**
  * A durable ledger of turns that are mid-flight right now: written when a turn
- * starts, removed when it ends. Whatever survives a restart was interrupted —
- * the daemon was killed while the agent was still working (most often because
- * the agent restarted eleven from inside its own turn). On startup the gateway
- * drains this and re-wakes the conversations that were cut off recently.
+ * starts, removed only after the channel had its chance to deliver the reply
+ * (see Gateway.handle). Whatever survives a restart was interrupted — the
+ * daemon was killed while the agent was still working or before the finished
+ * reply reached the channel (most often because the agent restarted eleven
+ * from inside its own turn). On startup the gateway drains this and re-wakes
+ * the conversations that were cut off recently.
  *
  * Writes are synchronous (not debounced like the other stores): the whole point
  * is that the "begin" record outlives an immediate kill, so we cannot afford to

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatTelegramInboundPrompt, syncTelegramCommands } from "../src/channels/telegram/bot.ts";
+import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
 test("Telegram command sync removes stale group-scoped commands", async () => {
   const calls: Array<{ method: string; value: unknown }> = [];
@@ -29,6 +30,81 @@ test("Telegram command sync removes stale group-scoped commands", async () => {
     },
     { method: "delete", value: { scope: { type: "all_group_chats" } } },
   ]);
+});
+
+test("Telegram task progress renders plan and agent lifecycle compactly", () => {
+  const text = renderTaskActivity(
+    [
+      { id: "1", title: "Inspect adapter", status: "completed" },
+      { id: "2", title: "Wire Telegram", status: "running" },
+      { id: "3", title: "Tests", status: "pending", blockedBy: ["2"] },
+    ],
+    [
+      { id: "a", title: "Review reuse", status: "completed", summary: "Found one duplicate", usage: { durationMs: 7200 } },
+      { id: "b", title: "Check efficiency", status: "running", lastToolName: "Grep", usage: { totalTokens: 1400 } },
+    ],
+  );
+  assert.equal(text, [
+    "⚙️ Claude trabalhando",
+    "",
+    "📋 Plano",
+    "✅ Inspect adapter",
+    "⏳ Wire Telegram",
+    "⏸ Tests · bloqueada por #2",
+    "",
+    "🤖 Agentes",
+    "✅ Review reuse · 7s · Found one duplicate",
+    "⏳ Check efficiency · Grep · 1.4k tok",
+  ].join("\n"));
+});
+
+test("Telegram task progress sends once then edits the same quiet message", async () => {
+  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  const api = {
+    raw: {
+      sendMessage: async (payload: Record<string, unknown>) => {
+        calls.push({ method: "send", payload });
+        return { message_id: 77 };
+      },
+      editMessageText: async (payload: Record<string, unknown>) => {
+        calls.push({ method: "edit", payload });
+        return true;
+      },
+    },
+  };
+  const progress = new TelegramTaskProgress(api as never, -100, 42, { message_id: 9 });
+  progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "completed" } });
+  await progress.finish("completed");
+  progress.cancel();
+
+  assert.deepEqual(calls.map((call) => call.method), ["send", "edit"]);
+  assert.equal(calls[0]?.payload.disable_notification, true);
+  assert.deepEqual(calls[0]?.payload.reply_parameters, { message_id: 9 });
+  assert.equal(calls[1]?.payload.message_id, 77);
+  assert.match(String(calls[1]?.payload.text), /✅ Turno concluído/);
+});
+
+test("Telegram task progress terminalizes running agents when stopped", async () => {
+  const payloads: Record<string, unknown>[] = [];
+  const api = {
+    raw: {
+      sendMessage: async (payload: Record<string, unknown>) => {
+        payloads.push(payload);
+        return { message_id: 1 };
+      },
+    },
+  };
+  const progress = new TelegramTaskProgress(api as never, 1);
+  progress.update({ kind: "agent", task: { id: "a", title: "Long review", status: "running" } });
+  await progress.finish("stopped");
+  progress.cancel();
+
+  assert.equal(payloads.length, 1);
+  assert.match(String(payloads[0]?.text), /⏹ Turno interrompido/);
+  assert.match(String(payloads[0]?.text), /⏹ Long review/);
+  assert.equal(renderTaskActivity([], [], "completed"), "✅ Turno concluído");
 });
 
 test("group attribution wraps the complete inbound body while DMs stay bare", () => {

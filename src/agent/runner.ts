@@ -19,6 +19,7 @@ import {
   commitClaudeSession,
   registerClaudeSession,
   runWithClaudeSession,
+  setClaudeTaskListener,
   setClaudeToolListener,
   unregisterClaudeSession,
 } from "./claude-code.ts";
@@ -26,6 +27,7 @@ import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./sys
 import { PI_BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
+import type { TaskActivityEvent } from "./task-activity.ts";
 
 const log = logger("runner");
 
@@ -65,6 +67,8 @@ export interface TurnEvents {
   onEvent?: (event: AgentSessionEvent) => void;
   /** Provider-neutral tool activity for the dashboard. */
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  /** Plan snapshots and native subagent lifecycle updates. */
+  onTaskActivity?: (event: TaskActivityEvent) => void;
 }
 
 export interface TurnResult {
@@ -72,6 +76,7 @@ export interface TurnResult {
   /** All assistant prose produced this turn, message boundaries joined by blank lines. */
   text: string;
   model: string;
+  status: "completed" | "stopped";
 }
 
 interface ActiveTurn {
@@ -279,6 +284,7 @@ export class Runner {
       attemptHadToolActivity = true;
       events.onToolCall?.(name, args);
     });
+    setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
       if (event.type === "message_start") {
@@ -355,7 +361,7 @@ export class Runner {
         if (collected.length || attemptHadToolActivity) {
           if (model.provider === CLAUDE_CODE_PROVIDER) await commitClaudeSession(session.sessionId);
           warm.lastUsedAt = Date.now();
-          return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model) };
+          return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model), status: "completed" };
         }
         if (model.provider === CLAUDE_CODE_PROVIDER) await abandonClaudeSession(session.sessionId);
         lastError = new Error(`empty response from ${modelRef(model)}`);
@@ -365,7 +371,7 @@ export class Runner {
         // Stopped by the user — hand back whatever prose arrived before the stop
         // (often nothing). The session may sit mid-tool, so rebuild it next turn.
         this.dropSession(threadId);
-        return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: activeModel.current };
+        return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: activeModel.current, status: "stopped" };
       }
       throw lastError ?? new Error("all models failed");
     } catch (error) {
@@ -374,6 +380,7 @@ export class Runner {
       throw error;
     } finally {
       setClaudeToolListener(session.sessionId, undefined);
+      setClaudeTaskListener(session.sessionId, undefined);
       unsubscribe();
       this.active.delete(threadId);
       settle();

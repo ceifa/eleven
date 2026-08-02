@@ -106,6 +106,10 @@ export class Gateway extends EventEmitter {
         incoming.events?.onToolCall?.(name, args);
         this.emit("tool-call", { threadId: thread.id, name, summary: summarizeToolArgs(args) });
       },
+      onTaskActivity: (activity) => {
+        incoming.events?.onTaskActivity?.(activity);
+        this.emit("task-activity", { threadId: thread.id, activity });
+      },
     };
 
     try {

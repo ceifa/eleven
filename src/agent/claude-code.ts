@@ -27,6 +27,7 @@ import type { WorkspaceTool } from "../config.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
+import type { TaskActivityEvent, TaskActivityItem, TaskActivityUsage } from "./task-activity.ts";
 
 const log = logger("claude-code");
 
@@ -73,13 +74,39 @@ export interface ClaudeSessionRegistration {
 
 interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  onTaskActivity?: (event: TaskActivityEvent) => void;
+  planTasks: Map<string, PlanTask>;
+  agentTaskTitles: Map<string, string>;
+}
+
+interface PlanTask {
+  id: string;
+  subject: string;
+  status: TaskActivityItem["status"];
+  blockedBy: Set<string>;
 }
 
 const sessions = new Map<string, RegisteredSession>();
+// Warm Pi sessions are evicted independently of Claude's durable session. Keep
+// the plan mirror across those rebuilds; TaskList/TaskGet reconcile it whenever
+// Claude reads its own task store again. The cap prevents abandoned threads
+// from growing process memory forever.
+const planTasksBySession = new Map<string, Map<string, PlanTask>>();
+const MAX_PLAN_SESSION_CACHE = 256;
 const activeOwner = new AsyncLocalStorage<string>();
 
 export function registerClaudeSession(sessionId: string, registration: ClaudeSessionRegistration): void {
-  sessions.set(sessionId, { ...registration });
+  let planTasks = planTasksBySession.get(sessionId);
+  if (!planTasks) {
+    planTasks = new Map();
+    planTasksBySession.set(sessionId, planTasks);
+    if (planTasksBySession.size > MAX_PLAN_SESSION_CACHE) planTasksBySession.delete(planTasksBySession.keys().next().value!);
+  }
+  sessions.set(sessionId, {
+    ...registration,
+    planTasks,
+    agentTaskTitles: new Map(),
+  });
 }
 
 export function unregisterClaudeSession(sessionId: string): void {
@@ -88,6 +115,7 @@ export function unregisterClaudeSession(sessionId: string): void {
 
 /** Delete every hidden Claude transcript owned by one Pi session. */
 export async function cleanupClaudeSessions(sessionId: string): Promise<void> {
+  planTasksBySession.delete(sessionId);
   const state = claudeSessionState.remove(sessionId);
   if (!state) return;
   await deleteTracked(claudeSessionState, deleteSession, sessionId, state.cwd, state.garbage ?? []);
@@ -128,6 +156,14 @@ export function setClaudeToolListener(
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onToolCall = listener;
+}
+
+export function setClaudeTaskListener(
+  sessionId: string,
+  listener: ((event: TaskActivityEvent) => void) | undefined,
+): void {
+  const session = sessions.get(sessionId);
+  if (session) session.onTaskActivity = listener;
 }
 
 export function nativeToolsForPolicy(policy: WorkspaceTool[] | undefined): string[] {
@@ -392,8 +428,13 @@ async function consumeClaudeQuery(
       hooks: {
         PreToolUse: [{
           hooks: [async (input, toolUseId) => {
-            if (input.hook_event_name === "PreToolUse") markTool(input.tool_name, asArgs(input.tool_input), toolUseId);
-            return { continue: true };
+            if (input.hook_event_name !== "PreToolUse") return { continue: true };
+            const args = asArgs(input.tool_input);
+            markTool(input.tool_name, args, toolUseId);
+            const updatedInput = foregroundToolInput(input.tool_name, args);
+            return updatedInput
+              ? { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, updatedInput } }
+              : { continue: true };
           }],
         }],
       },
@@ -403,14 +444,22 @@ async function consumeClaudeQuery(
       stderr: (line) => log.warn(line.trim()),
     };
 
+    const taskCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
+    const hiddenAgentTasks = new Set<string>();
     sdk = deps.query({ prompt, options: sdkOptions });
     for await (const message of sdk) {
       if (message.type === "assistant") {
         if (message.parent_tool_use_id === null) lastTopLevelText = assistantText(message);
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
-          markTool(block.name, asArgs(block.input), block.id);
+          const args = asArgs(block.input);
+          markTool(block.name, args, block.id);
+          if (isPlanTool(block.name)) taskCalls.set(block.id, { name: block.name, input: args });
         }
+      } else if (message.type === "user") {
+        if (!isolated) applyPlanToolResults(registration, taskCalls, message);
+      } else if (message.type === "system") {
+        if (!isolated) emitAgentTaskActivity(registration, hiddenAgentTasks, message);
       } else if (message.type === "result") {
         result = message;
         break; // streaming input stays open for MCP; the result closes this turn
@@ -628,6 +677,185 @@ function failStream(stream: AssistantMessageEventStream, output: AssistantMessag
 
 function asArgs(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/** A Pi turn cannot outlive its provider stream, so detached native work
+ * would be killed as soon as Claude returns a result. Keep it foregrounded;
+ * parallel Agent calls in one batch still execute concurrently. */
+function foregroundToolInput(name: string, input: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (name === "Agent" || name === "Task") {
+    // Remote/worktree isolation is another detached execution path and would
+    // bypass both the workspace policy and this process-bound lifecycle.
+    const { isolation: _isolation, ...localInput } = input;
+    return { ...localInput, run_in_background: false };
+  }
+  if (name === "Bash" && input.run_in_background === true) return { ...input, run_in_background: false };
+  return undefined;
+}
+
+function isPlanTool(name: string): boolean {
+  return name === "TaskCreate" || name === "TaskGet" || name === "TaskUpdate" || name === "TaskList";
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && !!entry) : [];
+}
+
+function normalizePlanStatus(value: unknown): TaskActivityItem["status"] {
+  return value === "completed" ? "completed" : value === "in_progress" ? "running" : "pending";
+}
+
+function planSnapshot(registration: RegisteredSession): TaskActivityEvent {
+  return {
+    kind: "plan",
+    tasks: [...registration.planTasks.values()].map((task) => ({
+      id: task.id,
+      title: task.subject,
+      status: task.status,
+      ...(task.blockedBy.size ? { blockedBy: [...task.blockedBy] } : {}),
+    })),
+  };
+}
+
+function applyPlanToolResults(
+  registration: RegisteredSession,
+  calls: Map<string, { name: string; input: Record<string, unknown> }>,
+  message: Extract<SDKMessage, { type: "user" }>,
+): void {
+  const content = Array.isArray(message.message.content) ? message.message.content : [];
+  const result = asArgs((message as unknown as { tool_use_result?: unknown }).tool_use_result);
+  for (const block of content) {
+    if (block.type !== "tool_result") continue;
+    const call = calls.get(block.tool_use_id);
+    if (!call) continue;
+    calls.delete(block.tool_use_id);
+    if (block.is_error || result.success === false) continue;
+
+    let changed = false;
+    if (call.name === "TaskList") {
+      if (!Array.isArray(result.tasks)) continue;
+      const listed = result.tasks;
+      registration.planTasks.clear();
+      for (const value of listed) {
+        const task = asArgs(value);
+        const id = readString(task.id);
+        const subject = readString(task.subject);
+        if (!id || !subject) continue;
+        registration.planTasks.set(id, {
+          id,
+          subject,
+          status: normalizePlanStatus(task.status),
+          blockedBy: new Set(readStrings(task.blockedBy)),
+        });
+      }
+      changed = true; // TaskList is the authoritative snapshot, including empty.
+    } else if (call.name === "TaskCreate" || call.name === "TaskGet") {
+      const task = asArgs(result.task);
+      const id = readString(task.id);
+      const subject = readString(task.subject) ?? readString(call.input.subject);
+      if (id && subject) {
+        registration.planTasks.set(id, {
+          id,
+          subject,
+          status: normalizePlanStatus(task.status ?? call.input.status),
+          blockedBy: new Set(readStrings(task.blockedBy ?? call.input.blockedBy)),
+        });
+        changed = true;
+      }
+    } else if (call.name === "TaskUpdate") {
+      const id = readString(call.input.taskId) ?? readString(result.taskId);
+      if (id && call.input.status === "deleted") {
+        changed = registration.planTasks.delete(id);
+        for (const task of registration.planTasks.values()) task.blockedBy.delete(id);
+      } else if (id) {
+        const task = registration.planTasks.get(id);
+        if (task) {
+          const subject = readString(call.input.subject);
+          if (subject) task.subject = subject;
+          if (typeof call.input.status === "string") task.status = normalizePlanStatus(call.input.status);
+          for (const dependency of readStrings(call.input.addBlockedBy)) task.blockedBy.add(dependency);
+          for (const blockedId of readStrings(call.input.addBlocks)) registration.planTasks.get(blockedId)?.blockedBy.add(id);
+          changed = true;
+        }
+      }
+    }
+    if (changed) registration.onTaskActivity?.(planSnapshot(registration));
+  }
+}
+
+function normalizeTaskUsage(value: unknown): TaskActivityUsage | undefined {
+  const usage = asArgs(value);
+  const totalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
+  const toolUses = typeof usage.tool_uses === "number" ? usage.tool_uses : undefined;
+  const durationMs = typeof usage.duration_ms === "number" ? usage.duration_ms : undefined;
+  return totalTokens !== undefined || toolUses !== undefined || durationMs !== undefined
+    ? { totalTokens, toolUses, durationMs }
+    : undefined;
+}
+
+function emitAgentTaskActivity(
+  registration: RegisteredSession,
+  hidden: Set<string>,
+  message: Extract<SDKMessage, { type: "system" }>,
+): void {
+  if (message.subtype === "task_started") {
+    // task_* also covers background Bash/monitor/workflow jobs. This surface is
+    // specifically the native Agent roster; don't mislabel generic jobs.
+    const isAgent = message.task_type === "local_agent" || !!message.subagent_type;
+    if (message.skip_transcript || !isAgent) {
+      hidden.add(message.task_id);
+      return;
+    }
+    registration.agentTaskTitles.set(message.task_id, message.description);
+    registration.onTaskActivity?.({
+      kind: "agent",
+      task: {
+        id: message.task_id,
+        title: message.description,
+        status: "running",
+        ...(message.task_type ? { taskType: message.task_type } : {}),
+        ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
+      },
+    });
+    return;
+  }
+  if (message.subtype === "task_progress") {
+    if (hidden.has(message.task_id)) return;
+    const title = message.description || registration.agentTaskTitles.get(message.task_id) || `Task ${message.task_id}`;
+    registration.agentTaskTitles.set(message.task_id, title);
+    registration.onTaskActivity?.({
+      kind: "agent",
+      task: {
+        id: message.task_id,
+        title,
+        status: "running",
+        ...(message.summary ? { summary: message.summary } : {}),
+        ...(message.last_tool_name ? { lastToolName: cleanToolName(message.last_tool_name) } : {}),
+        ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
+        ...(normalizeTaskUsage(message.usage) ? { usage: normalizeTaskUsage(message.usage) } : {}),
+      },
+    });
+    return;
+  }
+  if (message.subtype === "task_notification") {
+    if (message.skip_transcript || hidden.delete(message.task_id)) return;
+    const title = registration.agentTaskTitles.get(message.task_id) || message.summary || `Task ${message.task_id}`;
+    registration.agentTaskTitles.delete(message.task_id);
+    registration.onTaskActivity?.({
+      kind: "agent",
+      task: {
+        id: message.task_id,
+        title,
+        status: message.status,
+        ...(message.summary ? { summary: message.summary } : {}),
+        ...(normalizeTaskUsage(message.usage) ? { usage: normalizeTaskUsage(message.usage) } : {}),
+      },
+    });
+  }
 }
 
 /** Do not hand Telegram/provider tokens from Eleven's daemon environment to

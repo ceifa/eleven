@@ -391,7 +391,7 @@ const backButton = () =>
 function toolCallRow(name, { summary, args, id } = {}) {
   return h("div", {
     class: `tool-call${id ? " is-clickable" : ""}`,
-    ...(id ? { title: "ver argumentos e resultado", onclick: () => openToolCallModal(name, args, id) } : {}),
+    ...(id ? { title: "view arguments and result", onclick: () => openToolCallModal(name, args, id) } : {}),
   },
     h("span", { class: "tool-call-name" }, `⚙ ${name}`),
     summary ? h("span", { class: "tool-call-arg" }, summary) : null,
@@ -646,8 +646,8 @@ function showToolCallModal(name, args, result) {
   const argsTree = hasArgs ? jsonTree(args) : null;
   const output = result?.output ?? "";
   const resultBlock = result
-    ? h("pre", { class: `toolcall-result${result.isError ? " is-error" : ""}` }, output || "(sem saída)")
-    : h("div", { class: "opacity-60 text-xs" }, "Sem resultado registrado (turno em andamento?).");
+    ? h("pre", { class: `toolcall-result${result.isError ? " is-error" : ""}` }, output || "(no output)")
+    : h("div", { class: "opacity-60 text-xs" }, "No result recorded (turn still running?).");
 
   const body = h("div", { class: "overflow-auto", style: "max-height: 72vh" },
     hasArgs ? h("div", { class: "section-label mb-1" }, "arguments") : null,

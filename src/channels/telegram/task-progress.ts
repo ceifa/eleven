@@ -146,7 +146,7 @@ export class TelegramTaskProgress {
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
     let text = renderTaskActivity([...this.plan.values()], [...this.agents.values()], this.outcome, running);
-    if (!text && this.messageId !== undefined) text = "📋 Nenhuma tarefa ativa";
+    if (!text && this.messageId !== undefined) text = "📋 No active tasks";
     if (!text || text === this.lastText || text === this.pendingText || this.dead) return this.draining ?? Promise.resolve();
     this.pendingText = text; // latest wins while Telegram is slow
     if (!this.draining) {
@@ -209,20 +209,20 @@ export function renderTaskActivity(
 ): string {
   const elapsed = running && running.elapsedMs >= ELAPSED_MIN_MS ? ` · ${formatDuration(running.elapsedMs)}` : "";
   const header = outcome === "failed"
-    ? "❌ Turno encerrado com erro"
+    ? "❌ Turn ended with an error"
     : outcome === "stopped"
-      ? "⏹ Turno interrompido"
+      ? "⏹ Turn stopped"
       : outcome === "completed"
-        ? "✅ Turno concluído"
-        : `⚙️ Agente trabalhando${elapsed}`;
+        ? "✅ Turn completed"
+        : `⚙️ Agent working${elapsed}`;
   const tool = running?.tool;
   const head = tool
     ? `${header}\n🔧 ${tool.name}${tool.summary ? ` · ${compact(tool.summary, 80)}` : ""}`
     : header;
   if (!plan.length && !agents.length) return outcome || tool ? head : "";
   const sections = [head];
-  if (plan.length) sections.push(renderSection("📋 Plano", plan, MAX_PLAN_ROWS, renderPlanRow));
-  if (agents.length) sections.push(renderSection("🤖 Agentes", agents, MAX_AGENT_ROWS, renderAgentRow));
+  if (plan.length) sections.push(renderSection("📋 Plan", plan, MAX_PLAN_ROWS, renderPlanRow));
+  if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow));
   const text = sections.join("\n\n");
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
 }
@@ -234,12 +234,12 @@ function renderSection(
   row: (task: TaskActivityItem) => string,
 ): string {
   const visible = tasks.slice(0, limit).map(row);
-  if (tasks.length > limit) visible.push(`… mais ${tasks.length - limit}`);
+  if (tasks.length > limit) visible.push(`… ${tasks.length - limit} more`);
   return `${title}\n${visible.join("\n")}`;
 }
 
 function renderPlanRow(task: TaskActivityItem): string {
-  const blocked = task.blockedBy?.length ? ` · bloqueada por ${task.blockedBy.map((id) => `#${id}`).join(", ")}` : "";
+  const blocked = task.blockedBy?.length ? ` · blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}` : "";
   return `${statusIcon(task)} ${compact(task.title)}${blocked}`;
 }
 

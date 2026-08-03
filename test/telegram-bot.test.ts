@@ -45,14 +45,14 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
     ],
   );
   assert.equal(text, [
-    "⚙️ Agente trabalhando",
+    "⚙️ Agent working",
     "",
-    "📋 Plano",
+    "📋 Plan",
     "✅ Inspect adapter",
     "⏳ Wire Telegram",
-    "⏸ Tests · bloqueada por #2",
+    "⏸ Tests · blocked by #2",
     "",
-    "🤖 Agentes",
+    "🤖 Agents",
     "✅ Review reuse · 7s · Found one duplicate",
     "⏳ Check efficiency · Grep · 1.4k tok",
   ].join("\n"));
@@ -93,7 +93,7 @@ test("Telegram task progress sends once then edits the same quiet message", asyn
   assert.equal(calls[0]?.payload.disable_notification, true);
   assert.deepEqual(calls[0]?.payload.reply_parameters, { message_id: 9 });
   assert.equal(calls[1]?.payload.message_id, 77);
-  assert.match(String(calls[1]?.payload.text), /✅ Turno concluído/);
+  assert.match(String(calls[1]?.payload.text), /✅ Turn completed/);
 });
 
 test("Telegram task progress terminalizes running agents when stopped", async () => {
@@ -104,23 +104,23 @@ test("Telegram task progress terminalizes running agents when stopped", async ()
   progress.cancel();
 
   assert.deepEqual(calls.map((call) => call.method), ["send"]);
-  assert.match(String(calls[0]?.payload.text), /⏹ Turno interrompido/);
+  assert.match(String(calls[0]?.payload.text), /⏹ Turn stopped/);
   assert.match(String(calls[0]?.payload.text), /⏹ Long review/);
-  assert.equal(renderTaskActivity([], [], "completed"), "✅ Turno concluído");
+  assert.equal(renderTaskActivity([], [], "completed"), "✅ Turn completed");
 });
 
 test("running header shows the current top-level tool and elapsed time", () => {
   assert.equal(
     renderTaskActivity([], [], undefined, { tool: { name: "Bash", summary: "npm test" }, elapsedMs: 65_000 }),
-    "⚙️ Agente trabalhando · 1m05s\n🔧 Bash · npm test",
+    "⚙️ Agent working · 1m05s\n🔧 Bash · npm test",
   );
   // Elapsed time stays quiet while the turn still feels instant.
   assert.equal(
     renderTaskActivity([], [], undefined, { tool: { name: "Read" }, elapsedMs: 400 }),
-    "⚙️ Agente trabalhando\n🔧 Read",
+    "⚙️ Agent working\n🔧 Read",
   );
   // Finished renders never carry the live tool line.
-  assert.equal(renderTaskActivity([], [], "completed", undefined), "✅ Turno concluído");
+  assert.equal(renderTaskActivity([], [], "completed", undefined), "✅ Turn completed");
 });
 
 test("quick tool-only turns never post a status message", async () => {
@@ -156,9 +156,9 @@ test("group attribution wraps the complete inbound body while DMs stay bare", ()
     me: { id: 999 },
     message: { from: { id: 42, first_name: "Gabriel", username: "c3if4" } },
   };
-  const body = "[Transcript]\nVamos em outubro.";
+  const body = "[Transcript]\nLet's go in October.";
 
-  assert.equal(formatTelegramInboundPrompt(group as never, body), "[Gabriel @c3if4]\n[Transcript]\nVamos em outubro.");
+  assert.equal(formatTelegramInboundPrompt(group as never, body), "[Gabriel @c3if4]\n[Transcript]\nLet's go in October.");
   assert.equal(formatTelegramInboundPrompt({ chat: { type: "private" } } as never, body), body);
 });
 
@@ -168,17 +168,17 @@ test("Telegram reply context prefers the selected quote", () => {
     me: { id: 999 },
     message: {
       from: { id: 42, first_name: "Gabriel", username: "c3if4" },
-      quote: { text: "o hotel em setembro custa R$ 4.800", position: 20, is_manual: true },
+      quote: { text: "the hotel in September costs $4,800", position: 20, is_manual: true },
       reply_to_message: {
         from: { id: 43, first_name: "Samara", last_name: "Lana" },
-        text: "Uma mensagem original muito maior que contém o trecho selecionado.",
+        text: "A much longer original message that contains the selected excerpt.",
       },
     },
   };
 
   assert.equal(
-    formatTelegramInboundPrompt(ctx as never, "Você considerou isso?"),
-    '[Gabriel @c3if4]\n[Replying to Samara Lana: "o hotel em setembro custa R$ 4.800"]\nVocê considerou isso?',
+    formatTelegramInboundPrompt(ctx as never, "Did you consider this?"),
+    '[Gabriel @c3if4]\n[Replying to Samara Lana: "the hotel in September costs $4,800"]\nDid you consider this?',
   );
 });
 
@@ -194,8 +194,8 @@ test("long implicit reply quotes keep a compact head and tail", () => {
   };
 
   assert.equal(
-    formatTelegramInboundPrompt(ctx as never, "Concordo."),
-    `[Gabriel]\n[Replying to Samara: "${"A".repeat(120)}…${"Z".repeat(70)}"]\nConcordo.`,
+    formatTelegramInboundPrompt(ctx as never, "Agreed."),
+    `[Gabriel]\n[Replying to Samara: "${"A".repeat(120)}…${"Z".repeat(70)}"]\nAgreed.`,
   );
 });
 
@@ -210,7 +210,7 @@ test("media replies identify the bot as you without copying ids", () => {
   };
 
   assert.equal(
-    formatTelegramInboundPrompt(ctx as never, "Essa aqui."),
-    "[Gabriel]\n[Replying to your photo]\nEssa aqui.",
+    formatTelegramInboundPrompt(ctx as never, "This one."),
+    "[Gabriel]\n[Replying to your photo]\nThis one.",
   );
 });

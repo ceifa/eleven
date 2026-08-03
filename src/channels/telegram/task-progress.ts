@@ -214,7 +214,7 @@ export function renderTaskActivity(
       ? "⏹ Turno interrompido"
       : outcome === "completed"
         ? "✅ Turno concluído"
-        : `⚙️ Claude trabalhando${elapsed}`;
+        : `⚙️ Agente trabalhando${elapsed}`;
   const tool = running?.tool;
   const head = tool
     ? `${header}\n🔧 ${tool.name}${tool.summary ? ` · ${compact(tool.summary, 80)}` : ""}`

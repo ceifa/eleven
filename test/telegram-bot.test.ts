@@ -45,7 +45,7 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
     ],
   );
   assert.equal(text, [
-    "⚙️ Claude trabalhando",
+    "⚙️ Agente trabalhando",
     "",
     "📋 Plano",
     "✅ Inspect adapter",
@@ -112,12 +112,12 @@ test("Telegram task progress terminalizes running agents when stopped", async ()
 test("running header shows the current top-level tool and elapsed time", () => {
   assert.equal(
     renderTaskActivity([], [], undefined, { tool: { name: "Bash", summary: "npm test" }, elapsedMs: 65_000 }),
-    "⚙️ Claude trabalhando · 1m05s\n🔧 Bash · npm test",
+    "⚙️ Agente trabalhando · 1m05s\n🔧 Bash · npm test",
   );
   // Elapsed time stays quiet while the turn still feels instant.
   assert.equal(
     renderTaskActivity([], [], undefined, { tool: { name: "Read" }, elapsedMs: 400 }),
-    "⚙️ Claude trabalhando\n🔧 Read",
+    "⚙️ Agente trabalhando\n🔧 Read",
   );
   // Finished renders never carry the live tool line.
   assert.equal(renderTaskActivity([], [], "completed", undefined), "✅ Turno concluído");

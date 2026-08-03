@@ -280,6 +280,52 @@ test("Claude task tools and subagents emit normalized activity", async () => {
   }
 });
 
+test("a resume that reports jobs orphaned by an earlier process still answers the prompt", async () => {
+  const piSessionId = "bbbbbbbb-1111-4111-8111-111111111111";
+  // What Claude Code emits when a fork inherits background jobs from the process
+  // that died with the previous turn: terminal notifications for task ids this
+  // stream never saw start, then a zero-turn result for the injected report.
+  const orphan = (taskId: string) => ({
+    type: "system", subtype: "task_notification", task_id: taskId, status: "stopped",
+    summary: "Orphaned by a previous Claude Code process exit and reported in an aggregate summary.",
+    output_file: "", uuid: `n-${taskId}`, session_id: "session",
+  });
+  const messages = [
+    orphan("bj3n4hjt3"),
+    orphan("bu4nh8gbe"),
+    {
+      type: "result", subtype: "success", is_error: false, result: "", session_id: "session",
+      duration_ms: 17, duration_api_ms: 0, num_turns: 0, total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {}, permission_denials: [],
+      origin: { kind: "task-notification" }, uuid: "noop-result",
+    },
+    ...successfulMessages,
+  ] as unknown as SDKMessage[];
+  const activities: Array<import("../src/agent/task-activity.ts").TaskActivityEvent> = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read", "agent"], customTools: [] });
+  try {
+    setClaudeTaskListener(piSessionId, (event) => activities.push(event));
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(messages, () => {}),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      events.push(event);
+    }
+
+    // The orphan report belongs to no agent of this turn.
+    assert.deepEqual(activities, []);
+    // And the turn is the one that followed it, not the empty no-op.
+    assert.equal(events.find((event) => event.type === "text_delta")?.delta, "done");
+    assert.equal(events.find((event) => event.type === "done")?.message.stopReason, "stop");
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
 test("Claude turns fork deterministically from the last committed transcript prefix", async () => {
   const piSessionId = "22222222-2222-4222-8222-222222222222";
   const firstInput = [user("one")];

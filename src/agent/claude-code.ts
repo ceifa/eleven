@@ -46,6 +46,16 @@ const DEFAULT_NATIVE_TOOLS = [
   "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
 ] as const;
 
+// Claude Code settles a result for every turn its loop runs, including turns it
+// never sent to a model: a resume that finds background jobs orphaned by the
+// previous process injects its report ahead of the queue with shouldQuery=false,
+// and answers it with a zero-turn result while this turn's prompt still waits.
+// Taking that as the answer reports an empty response and closes the stream
+// before the real turn starts, so skip a few and keep reading.
+const MAX_NOOP_RESULT_SKIPS = 3;
+// If the real turn never follows a skipped result, stop waiting on the child.
+const NOOP_RESULT_GRACE_MS = 60_000;
+
 const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
   read: ["Read", "Glob", "Grep"],
   bash: ["Bash"],
@@ -452,9 +462,13 @@ async function consumeClaudeQuery(
     };
 
     const taskCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
-    const hiddenAgentTasks = new Set<string>();
+    let skippedResult: SDKMessage | undefined;
+    let noopSkips = 0;
+    let grace: NodeJS.Timeout | undefined;
     sdk = deps.query({ prompt, options: sdkOptions });
     for await (const message of sdk) {
+      // The child is alive and talking — a skipped result was indeed not the end.
+      if (grace) { clearTimeout(grace); grace = undefined; }
       if (message.type === "assistant") {
         if (message.parent_tool_use_id === null) lastTopLevelText = assistantText(message);
         for (const block of message.message.content) {
@@ -466,12 +480,28 @@ async function consumeClaudeQuery(
       } else if (message.type === "user") {
         if (!isolated) applyPlanToolResults(registration, taskCalls, message);
       } else if (message.type === "system") {
-        if (!isolated) emitAgentTaskActivity(registration, hiddenAgentTasks, message);
+        if (!isolated) emitAgentTaskActivity(registration, message);
       } else if (message.type === "result") {
+        // A turn that queried no model and produced no prose answered someone
+        // else's injected message, not this prompt (see MAX_NOOP_RESULT_SKIPS).
+        if (
+          message.subtype === "success" && message.num_turns === 0 && !message.result && !lastTopLevelText
+          && noopSkips++ < MAX_NOOP_RESULT_SKIPS
+        ) {
+          log.info(`ignoring a ${message.origin?.kind ?? "zero-turn"} result: this turn's prompt is still queued`);
+          skippedResult = message;
+          grace = setTimeout(() => abortController.abort(), NOOP_RESULT_GRACE_MS);
+          grace.unref();
+          continue;
+        }
         result = message;
         break; // streaming input stays open for MCP; the result closes this turn
       }
     }
+    if (grace) clearTimeout(grace);
+    // The stream ended (or the grace above aborted it) without the real turn
+    // ever starting — fall back to the empty result the runner knows how to fail.
+    result ??= skippedResult;
 
     if (!result || result.type !== "result") throw new Error("Claude Code ended without a result");
     const error = sdkResultError(result);
@@ -806,18 +836,19 @@ function normalizeTaskUsage(value: unknown): TaskActivityUsage | undefined {
 
 function emitAgentTaskActivity(
   registration: RegisteredSession,
-  hidden: Set<string>,
   message: Extract<SDKMessage, { type: "system" }>,
 ): void {
+  // Only tasks whose start this stream saw belong on the roster. Everything else
+  // is a job of another kind, or one Claude Code inherited from an earlier
+  // process and reported on resume ("Orphaned by a previous Claude Code process
+  // exit…") — neither is an agent of this turn.
+  const known = registration.agentTaskTitles;
   if (message.subtype === "task_started") {
     // task_* also covers background Bash/monitor/workflow jobs. This surface is
     // specifically the native Agent roster; don't mislabel generic jobs.
     const isAgent = message.task_type === "local_agent" || !!message.subagent_type;
-    if (message.skip_transcript || !isAgent) {
-      hidden.add(message.task_id);
-      return;
-    }
-    registration.agentTaskTitles.set(message.task_id, message.description);
+    if (message.skip_transcript || !isAgent) return;
+    known.set(message.task_id, message.description);
     registration.onTaskActivity?.({
       kind: "agent",
       task: {
@@ -831,9 +862,9 @@ function emitAgentTaskActivity(
     return;
   }
   if (message.subtype === "task_progress") {
-    if (hidden.has(message.task_id)) return;
-    const title = message.description || registration.agentTaskTitles.get(message.task_id) || `Task ${message.task_id}`;
-    registration.agentTaskTitles.set(message.task_id, title);
+    if (!known.has(message.task_id)) return;
+    const title = message.description || known.get(message.task_id)!;
+    known.set(message.task_id, title);
     registration.onTaskActivity?.({
       kind: "agent",
       task: {
@@ -849,9 +880,9 @@ function emitAgentTaskActivity(
     return;
   }
   if (message.subtype === "task_notification") {
-    if (message.skip_transcript || hidden.delete(message.task_id)) return;
-    const title = registration.agentTaskTitles.get(message.task_id) || message.summary || `Task ${message.task_id}`;
-    registration.agentTaskTitles.delete(message.task_id);
+    const title = known.get(message.task_id);
+    if (message.skip_transcript || !title) return;
+    known.delete(message.task_id);
     registration.onTaskActivity?.({
       kind: "agent",
       task: {

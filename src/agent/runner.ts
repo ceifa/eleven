@@ -70,8 +70,11 @@ export interface TurnEvents {
   onFailover?: () => void;
   /** Raw pi event passthrough (channel lifecycle handling). */
   onEvent?: (event: AgentSessionEvent) => void;
-  /** Provider-neutral tool activity for the dashboard. */
-  onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  /** Provider-neutral tool activity for the dashboard. `id` is the call's
+   *  durable id — pi's toolCallId, or the id the nested-runtime record was
+   *  written under — so a live row can open the same detail view (args, and
+   *  the result once it lands) a persisted one does. */
+  onToolCall?: (name: string, args: Record<string, unknown>, id: string) => void;
   /** Plan snapshots and native subagent lifecycle updates. */
   onTaskActivity?: (event: TaskActivityEvent) => void;
 }
@@ -321,7 +324,7 @@ export class Runner {
       } catch (error) {
         log.warn(`failed to record tool call ${name} for ${threadId}: ${error}`);
       }
-      events.onToolCall?.(name, args);
+      events.onToolCall?.(name, args, call.id);
     });
     setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
     const unsubscribe = session.subscribe((event) => {
@@ -334,7 +337,7 @@ export class Runner {
         events.onDelta?.(delta);
       } else if (event.type === "tool_execution_start") {
         attemptHadToolActivity = true;
-        events.onToolCall?.(event.toolName, event.args);
+        events.onToolCall?.(event.toolName, event.args, event.toolCallId);
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
         lastStopReason = message.stopReason;

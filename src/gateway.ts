@@ -131,9 +131,12 @@ export class Gateway extends EventEmitter {
       onEvent: (event) => incoming.events?.onEvent?.(event),
       // Pi and nested runtimes report through the same clean event. Claude MCP
       // names are normalized by its adapter before they reach the dashboard.
-      onToolCall: (name, args) => {
-        incoming.events?.onToolCall?.(name, args);
-        this.emit("tool-call", { threadId: thread.id, name, summary: summarizeToolArgs(args) });
+      onToolCall: (name, args, id) => {
+        incoming.events?.onToolCall?.(name, args, id);
+        // Carry the durable call id and the full args: a dashboard watching the
+        // turn can then open the call right away, instead of having to reload
+        // the page to get the persisted (clickable) row.
+        this.emit("tool-call", { threadId: thread.id, id, name, args, summary: summarizeToolArgs(args) });
       },
       onTaskActivity: (activity) => {
         incoming.events?.onTaskActivity?.(activity);

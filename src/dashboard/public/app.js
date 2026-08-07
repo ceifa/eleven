@@ -158,11 +158,14 @@ function connectWs() {
       if (message.threadId === state.activeThread?.id) {
         // Live tool indicator while the turn runs (deltas only stream prose);
         // the turn-done refresh replaces it with the durable on-disk rendering.
-        state.liveToolCalls.push({ name: message.name, summary: message.summary ?? "", at: Date.now() });
+        // The event carries the durable id and args, so the row is already
+        // clickable — no reload needed to inspect a call mid-turn.
+        const call = { id: message.id, name: message.name, summary: message.summary ?? "", args: message.args, at: Date.now() };
+        state.liveToolCalls.push(call);
         const container = document.getElementById("messages");
         if (container) {
           const stick = atBottom(container);
-          const chip = toolCallRow(message.name, { summary: message.summary ?? "" });
+          const chip = toolCallRow(call.name, call);
           const streaming = container.querySelector("[data-streaming]");
           streaming ? container.insertBefore(chip, streaming) : container.append(chip);
           if (stick) container.scrollTop = container.scrollHeight;
@@ -384,10 +387,10 @@ const backButton = () =>
     h("span", { html: "‹", style: "font-size:1.3rem;line-height:1" }));
 
 // One tool call, rendered identically for the live indicator and the durable
-// transcript. The arg preview is truncated to a single line by CSS; durable
-// rows carry a call id, so they're clickable and open the modal with the full
-// args and the recorded result. Live rows have no id yet — the turn-done
-// refetch replaces them with clickable durable ones.
+// transcript. The arg preview is truncated to a single line by CSS; a row with
+// a call id is clickable and opens the modal with the full args and the
+// recorded result. Live rows carry the same id the record is written under, so
+// they're clickable while the turn runs — the result simply isn't there yet.
 function toolCallRow(name, { summary, args, id } = {}) {
   return h("div", {
     class: `tool-call${id ? " is-clickable" : ""}`,
@@ -440,7 +443,7 @@ function renderThreadPane() {
     timeline.map((item) => item.node()),
     // The running turn's tool calls so far (server catch-up + WS since); the
     // turn-done refetch replaces them with the durable on-disk rendering.
-    state.liveToolCalls.map((call) => toolCallRow(call.name, { summary: call.summary })));
+    state.liveToolCalls.map((call) => toolCallRow(call.name, call)));
   const composer = h("form", { class: "flex gap-2 p-3 border-t border-base-300", onsubmit: sendMessage },
     h("textarea", {
       class: "textarea flex-1 min-h-10 max-h-40",
@@ -599,7 +602,7 @@ function openModal(title, subtitle, toolbar, body) {
       body,
     ),
     // Full-screen click target that closes the dialog — no visible label.
-    h("form", { method: "dialog", class: "modal-backdrop" }, h("button", { "aria-label": "fechar" })),
+    h("form", { method: "dialog", class: "modal-backdrop" }, h("button", { "aria-label": "close" })),
   );
   document.body.append(dialog);
   dialog.showModal();

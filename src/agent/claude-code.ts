@@ -15,9 +15,11 @@ import {
   type AssistantMessage,
   type AssistantMessageEventStream,
   type Context,
+  type ImageContent,
   type Model,
   type Provider,
   type SimpleStreamOptions,
+  type TextContent,
 } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -87,6 +89,65 @@ interface RegisteredSession extends ClaudeSessionRegistration {
   onTaskActivity?: (event: TaskActivityEvent) => void;
   planTasks: Map<string, PlanTask>;
   agentTaskTitles: Map<string, string>;
+  /** The open input stream of a live turn, while one is running. */
+  live?: InputQueue;
+}
+
+/**
+ * The SDK input stream of one live turn. It stays open for the whole turn (MCP
+ * needs it), which also makes it the only way to hand Claude Code human input
+ * mid-loop: Claude runs its entire tool loop inside a single Pi turn, so Pi's
+ * own boundary injection would park a steered message until the loop ends —
+ * minutes, in a real investigation.
+ */
+class InputQueue {
+  private readonly buffer: SDKUserMessage[] = [];
+  private waiting: ((message: SDKUserMessage | undefined) => void) | undefined;
+  private open = true;
+  /** Human turns handed over after the seed — each one earns its own SDK result. */
+  pushed = 0;
+
+  /** The message this turn was created for; it answers the caller's own prompt. */
+  seed(message: SDKUserMessage): void {
+    this.buffer.push(message);
+  }
+
+  /** Queue another human turn. False once the turn stopped reading results —
+   * then the caller must deliver the message some other way. */
+  push(message: SDKUserMessage): boolean {
+    if (!this.open) return false;
+    this.pushed++;
+    const resume = this.waiting;
+    this.waiting = undefined;
+    if (resume) resume(message);
+    else this.buffer.push(message);
+    return true;
+  }
+
+  /** Stop accepting input without ending the stream (the turn is wrapping up). */
+  seal(): void {
+    this.open = false;
+  }
+
+  close(): void {
+    this.seal();
+    this.waiting?.(undefined);
+    this.waiting = undefined;
+  }
+
+  async *drain(): AsyncGenerator<SDKUserMessage> {
+    for (;;) {
+      const queued = this.buffer.shift();
+      if (queued) {
+        yield queued;
+        continue;
+      }
+      if (!this.open) return;
+      const next = await new Promise<SDKUserMessage | undefined>((resolve) => (this.waiting = resolve));
+      if (!next) return;
+      yield next;
+    }
+  }
 }
 
 interface PlanTask {
@@ -173,6 +234,21 @@ export function setClaudeToolListener(
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onToolCall = listener;
+}
+
+/**
+ * Deliver human input into a session's live turn, so Claude sees it between two
+ * tool calls instead of after the whole loop. False when no turn of this session
+ * is reading input — the caller falls back to Pi's own steering.
+ *
+ * The message enters Claude's hidden transcript but never Pi's: the caller owns
+ * recording it (and rebuilding the Pi session afterwards, so the next turn's
+ * context has it).
+ */
+export function steerClaudeSession(sessionId: string, text: string, images?: ImageContent[]): boolean {
+  const live = sessions.get(sessionId)?.live;
+  if (!live) return false;
+  return live.push(humanMessage(userBlocks(text, images)));
 }
 
 export function setClaudeTaskListener(
@@ -319,6 +395,7 @@ async function consumeClaudeQuery(
   else options?.signal?.addEventListener("abort", onAbort, { once: true });
 
   let inputDone: (() => void) | undefined;
+  let live: InputQueue | undefined;
   let sdk: Query | undefined;
   let attemptId: string | undefined;
   let stateBegan = false;
@@ -402,12 +479,18 @@ async function consumeClaudeQuery(
       stateBegan = true;
     }
 
-    let releaseInput!: () => void;
-    const inputClosed = new Promise<void>((resolve) => (releaseInput = resolve));
-    inputDone = releaseInput;
-    const prompt = promptStream(context, currentStart, bootstrap, inputClosed);
+    const input = new InputQueue();
+    live = input;
+    input.seed(humanMessage(promptBlocks(context, currentStart, bootstrap)));
+    inputDone = () => input.close();
+    // Steering targets the owning session, never a compaction/subagent call.
+    if (!isolated) registration.live = input;
+    const prompt = input.drain();
     let result: SDKMessage | undefined;
     let lastTopLevelText = "";
+    /** Prose of the turns that answered steered input, in arrival order. */
+    const answers: string[] = [];
+    let resultsSeen = 0;
 
     const logicalPayload = {
       runtime: "claude-code",
@@ -495,6 +578,20 @@ async function consumeClaudeQuery(
           continue;
         }
         result = message;
+        const answer = message.subtype === "success" ? (message.result || lastTopLevelText) : lastTopLevelText;
+        if (answer) answers.push(answer);
+        lastTopLevelText = "";
+        // Each message steered into this live turn is a turn of its own for
+        // Claude Code, with its own result. Keep reading until every one of them
+        // has been answered, so a steered question is answered inside the Pi
+        // turn it interrupted instead of dangling.
+        if (++resultsSeen <= input.pushed) {
+          applyUsage(output, message);
+          continue;
+        }
+        // Sealed before the first await below: a push racing this break would
+        // otherwise be queued into a stream nobody reads anymore.
+        input.seal();
         break; // streaming input stays open for MCP; the result closes this turn
       }
     }
@@ -506,7 +603,9 @@ async function consumeClaudeQuery(
     if (!result || result.type !== "result") throw new Error("Claude Code ended without a result");
     const error = sdkResultError(result);
     if (error) throw new Error(error);
-    const text = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
+    // A turn that answered steered input mid-loop produced prose in several
+    // passes; Pi's transcript takes one assistant message per turn.
+    const text = answers.join("\n\n");
     applyUsage(output, result);
     if (text) {
       output.content.push({ type: "text", text });
@@ -545,6 +644,7 @@ async function consumeClaudeQuery(
     }
   } finally {
     inputDone?.();
+    if (live && registration.live === live) registration.live = undefined;
     options?.signal?.removeEventListener("abort", onAbort);
     try { sdk?.close(); } catch { /* already closed */ }
     if (isolated && attemptId) await deps.deleteSession(attemptId, { dir: registration.cwd }).catch(() => {});
@@ -596,13 +696,9 @@ function buildMcpServer(
   return createSdkMcpServer({ name: MCP_SERVER, version: "1.0.0", tools, alwaysLoad: true });
 }
 
-async function* promptStream(
-  context: Context,
-  currentStart: number,
-  bootstrap: boolean,
-  done: Promise<void>,
-): AsyncGenerator<SDKUserMessage> {
-  const current = context.messages.slice(currentStart);
+/** The content blocks of the turn's own prompt: the pending user input, plus a
+ * transcript of everything that happened in another runtime before it. */
+function promptBlocks(context: Context, currentStart: number, bootstrap: boolean): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   if (bootstrap && currentStart > 0) {
     blocks.push({
@@ -610,26 +706,36 @@ async function* promptStream(
       text: `The conversation before this turn happened in another runtime. Continue it faithfully from this transcript:\n\n${formatTranscript(context.messages.slice(0, currentStart))}`,
     });
   }
-  for (const message of current) {
+  for (const message of context.messages.slice(currentStart)) {
     if (message.role !== "user") continue; // failed-attempt assistant envelopes are not new human input
     const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
-    for (const block of content) {
-      if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
-      if (block.type === "image") {
-        blocks.push({
-          type: "image",
-          source: { type: "base64", media_type: block.mimeType, data: block.data },
-        });
-      }
+    blocks.push(...userBlocks(content));
+  }
+  return blocks;
+}
+
+function userBlocks(content: string | (TextContent | ImageContent)[], images?: ImageContent[]): Array<Record<string, unknown>> {
+  const parts = typeof content === "string" ? [{ type: "text" as const, text: content }, ...(images ?? [])] : content;
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const block of parts) {
+    if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
+    if (block.type === "image") {
+      blocks.push({
+        type: "image",
+        source: { type: "base64", media_type: block.mimeType, data: block.data },
+      });
     }
   }
-  yield {
+  return blocks;
+}
+
+function humanMessage(blocks: Array<Record<string, unknown>>): SDKUserMessage {
+  return {
     type: "user",
     message: { role: "user", content: blocks as never },
     parent_tool_use_id: null,
     origin: { kind: "human" },
   };
-  await done;
 }
 
 function formatTranscript(messages: Context["messages"]): string {
@@ -678,15 +784,17 @@ function sdkResultError(message: Extract<SDKMessage, { type: "result" }>): strin
   return errors.join("\n") || `Claude Code failed: ${message.subtype}`;
 }
 
+/** Additive: a turn that answered steered input mid-loop settles several SDK
+ * results, and the Pi message they collapse into owns the sum. */
 function applyUsage(output: AssistantMessage, message: Extract<SDKMessage, { type: "result" }>): void {
   const usage = "usage" in message ? message.usage : undefined;
   if (!usage) return;
-  output.usage.input = usage.input_tokens ?? 0;
-  output.usage.output = usage.output_tokens ?? 0;
-  output.usage.cacheRead = usage.cache_read_input_tokens ?? 0;
-  output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  output.usage.input += usage.input_tokens ?? 0;
+  output.usage.output += usage.output_tokens ?? 0;
+  output.usage.cacheRead += usage.cache_read_input_tokens ?? 0;
+  output.usage.cacheWrite += usage.cache_creation_input_tokens ?? 0;
   output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-  if ("total_cost_usd" in message && typeof message.total_cost_usd === "number") output.usage.cost.total = message.total_cost_usd;
+  if ("total_cost_usd" in message && typeof message.total_cost_usd === "number") output.usage.cost.total += message.total_cost_usd;
 }
 
 function emptyAssistant(model: Model<Api>): AssistantMessage {

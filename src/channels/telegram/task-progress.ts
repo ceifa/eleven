@@ -9,6 +9,10 @@ const FIRST_RENDER_DELAY_MS = 250;
 // A tool-status-only message has no lasting value — hold it back long enough
 // that quick turns never spawn one.
 const TOOL_FIRST_RENDER_DELAY_MS = 4_000;
+// A turn can also produce nothing at all for minutes — a provider stalling on
+// the very first request. Say something anyway: silence in a chat reads as "it
+// never saw my message", and that is exactly what it does not mean.
+const IDLE_FIRST_RENDER_DELAY_MS = 12_000;
 // Refresh the elapsed time in the running header between events; only show it
 // once the turn stops feeling instant.
 const ELAPSED_TICK_MS = 10_000;
@@ -27,15 +31,24 @@ export interface RunningStatus {
   elapsedMs: number;
 }
 
-/** One quiet, editable Telegram message for a turn's plan, subagents, and the
- * top-level tool currently running. Plan/agent content is a durable record of
- * the turn; a message that only ever showed tool status is deleted when the
- * turn ends — the reply (or failure notice) that follows supersedes it. */
+/** A retryable provider failure the runtime is working around. */
+export interface RetryStatus {
+  attempt: number;
+  maxAttempts: number;
+  errorMessage: string;
+}
+
+/** One quiet, editable Telegram message for a turn's plan, subagents, the
+ * top-level tool currently running, and provider retries. Plan/agent content and
+ * retries are a durable record of the turn; a message that only ever showed tool
+ * status is deleted when the turn ends — the reply (or failure notice) that
+ * follows supersedes it. */
 export class TelegramTaskProgress {
   private readonly plan = new Map<string, TaskActivityItem>();
   private readonly agents = new Map<string, TaskActivityItem>();
   private readonly startedAt = Date.now();
   private currentTool: RunningStatus["tool"];
+  private currentRetry: RetryStatus | undefined;
   /** Plan/agent content appeared — the message is worth keeping after finish. */
   private hasTasks = false;
   private messageId: number | undefined;
@@ -52,23 +65,41 @@ export class TelegramTaskProgress {
   private readonly topic: number | undefined;
   private readonly replyParameters: ReplyParameters | undefined;
   private readonly toolRenderDelayMs: number;
+  private readonly idleRenderDelayMs: number;
 
-  constructor(api: Api, chatId: number, topic?: number, replyParameters?: ReplyParameters, toolRenderDelayMs = TOOL_FIRST_RENDER_DELAY_MS) {
+  constructor(
+    api: Api,
+    chatId: number,
+    topic?: number,
+    replyParameters?: ReplyParameters,
+    toolRenderDelayMs = TOOL_FIRST_RENDER_DELAY_MS,
+    idleRenderDelayMs = IDLE_FIRST_RENDER_DELAY_MS,
+  ) {
     this.api = api;
     this.chatId = chatId;
     this.topic = topic;
     this.replyParameters = replyParameters;
     this.toolRenderDelayMs = toolRenderDelayMs;
+    this.idleRenderDelayMs = idleRenderDelayMs;
+  }
+
+  /** The turn began. Arms the bare "working" header for a turn that produces no
+   * events at all — the case that used to be indistinguishable from a lost message. */
+  start(): void {
+    this.schedule();
+  }
+
+  /** The provider failed and the runtime is retrying the same turn. This is the
+   * reason a turn can go quiet for minutes, so it is worth showing live and
+   * keeping in the chat once the turn ends. */
+  retry(status: RetryStatus): void {
+    if (this.dead || this.outcome) return;
+    this.currentRetry = status;
+    this.rearm();
   }
 
   update(event: TaskActivityEvent): void {
     if (this.dead || this.outcome) return;
-    if (!this.hasTasks && this.timer) {
-      // Task content upgrades the first render from the long tool-only
-      // hold-off to the prompt one — rearm.
-      clearTimeout(this.timer);
-      this.timer = undefined;
-    }
     this.hasTasks = true;
     if (event.kind === "plan") {
       this.plan.clear();
@@ -77,19 +108,19 @@ export class TelegramTaskProgress {
       const previous = this.agents.get(event.task.id);
       this.agents.set(event.task.id, previous ? { ...previous, ...event.task } : event.task);
     }
-    this.schedule();
+    this.rearm();
   }
 
   /** Note the top-level tool the model just started — shown while the turn runs. */
   tool(name: string, summary: string): void {
     if (this.dead || this.outcome) return;
     this.currentTool = { name, summary: summary || undefined };
-    this.schedule();
+    this.rearm();
   }
 
   async finish(outcome: TaskProgressOutcome): Promise<void> {
     if (this.dead || this.outcome) return;
-    if (!this.hasTasks) {
+    if (!this.worthKeeping) {
       // Tool-status-only message: the reply (or failure notice) that follows
       // supersedes it. Clean up off the reply's critical path — the delete's
       // outcome affects nothing downstream.
@@ -101,7 +132,7 @@ export class TelegramTaskProgress {
           this.api.raw.deleteMessage({ chat_id: this.chatId, message_id: messageId }),
         );
       }).catch((error) => {
-        if (!isNoop(error)) log.warn(`tool status cleanup failed for chat ${this.chatId}: ${error}`);
+        if (!isNoop(error)) log.warn(`status cleanup failed for chat ${this.chatId}: ${error}`);
       });
       return;
     }
@@ -121,6 +152,11 @@ export class TelegramTaskProgress {
     this.stopTimers();
   }
 
+  /** Plan/agent content and retries outlive the turn; bare tool status does not. */
+  private get worthKeeping(): boolean {
+    return this.hasTasks || !!this.currentRetry;
+  }
+
   private stopTimers(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
@@ -128,13 +164,25 @@ export class TelegramTaskProgress {
     this.ticker = undefined;
   }
 
+  /** Richer content shortens the hold-off — re-arm against the new deadline. */
+  private rearm(): void {
+    if (this.timer && !this.lastSentAt) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.schedule();
+  }
+
   private schedule(): void {
-    if (this.timer) return;
+    if (this.timer || this.dead || this.outcome) return;
+    const hold = this.hasTasks || this.currentRetry
+      ? FIRST_RENDER_DELAY_MS
+      : this.currentTool
+        ? this.toolRenderDelayMs
+        : this.idleRenderDelayMs;
     const delay = this.lastSentAt
       ? Math.max(0, THROTTLE_MS - (Date.now() - this.lastSentAt))
-      : this.hasTasks
-        ? FIRST_RENDER_DELAY_MS
-        : this.toolRenderDelayMs;
+      : Math.max(0, this.startedAt + hold - Date.now());
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.queueRender();
@@ -145,7 +193,13 @@ export class TelegramTaskProgress {
     const running = this.outcome
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
-    let text = renderTaskActivity([...this.plan.values()], [...this.agents.values()], this.outcome, running);
+    let text = renderTaskActivity(
+      [...this.plan.values()],
+      [...this.agents.values()],
+      this.outcome,
+      running,
+      this.currentRetry,
+    );
     if (!text && this.messageId !== undefined) text = "📋 No active tasks";
     if (!text || text === this.lastText || text === this.pendingText || this.dead) return this.draining ?? Promise.resolve();
     this.pendingText = text; // latest wins while Telegram is slow
@@ -206,6 +260,7 @@ export function renderTaskActivity(
   agents: readonly TaskActivityItem[],
   outcome?: TaskProgressOutcome,
   running?: RunningStatus,
+  retry?: RetryStatus,
 ): string {
   const elapsed = running && running.elapsedMs >= ELAPSED_MIN_MS ? ` · ${formatDuration(running.elapsedMs)}` : "";
   const header = outcome === "failed"
@@ -216,10 +271,13 @@ export function renderTaskActivity(
         ? "✅ Turn completed"
         : `⚙️ Agent working${elapsed}`;
   const tool = running?.tool;
-  const head = tool
-    ? `${header}\n🔧 ${tool.name}${tool.summary ? ` · ${compact(tool.summary, 80)}` : ""}`
-    : header;
-  if (!plan.length && !agents.length) return outcome || tool ? head : "";
+  const lines = [header];
+  if (retry) lines.push(`🔁 Retry ${retry.attempt}/${retry.maxAttempts} · ${compact(retry.errorMessage, 90)}`);
+  if (tool) lines.push(`🔧 ${tool.name}${tool.summary ? ` · ${compact(tool.summary, 80)}` : ""}`);
+  const head = lines.join("\n");
+  // A bare running header is the whole point of an event-less turn: it says the
+  // message arrived. Only a call with nothing at all to report renders empty.
+  if (!plan.length && !agents.length) return outcome || running || retry ? head : "";
   const sections = [head];
   if (plan.length) sections.push(renderSection("📋 Plan", plan, MAX_PLAN_ROWS, renderPlanRow));
   if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow));

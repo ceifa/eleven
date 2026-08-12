@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
 import type { Context, Model } from "@earendil-works/pi-ai";
-import type { Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
   claudeAttemptId,
@@ -13,6 +13,7 @@ import {
   registerClaudeSession,
   runWithClaudeSession,
   setClaudeTaskListener,
+  steerClaudeSession,
   unregisterClaudeSession,
 } from "../src/agent/claude-code.ts";
 
@@ -59,6 +60,50 @@ function scriptedQuery(messages: SDKMessage[], capture: (input: unknown) => void
       initializationResult: async () => ({ account: {} }),
     }) as unknown as Query;
   }) as never;
+}
+
+function resultMessage(text: string, uuid: string) {
+  return {
+    type: "result", subtype: "success", is_error: false, result: text, session_id: "session",
+    duration_ms: 1, duration_api_ms: 1, num_turns: 2, total_cost_usd: 0,
+    usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    modelUsage: {}, permission_denials: [], uuid,
+  } as unknown as SDKMessage;
+}
+
+/**
+ * A query that keeps reading its input stream: it answers the seed prompt, then
+ * blocks until a second human turn shows up — the shape of a Telegram message
+ * steered into a live Claude tool loop.
+ */
+function steerableQuery(steer: () => void, seen: string[]) {
+  return ((input: { prompt: AsyncIterable<SDKUserMessage> }) => {
+    const stream = input.prompt[Symbol.asyncIterator]();
+    const iterator = (async function* () {
+      const seed = await stream.next();
+      seen.push(promptText(seed.value));
+      // The message lands while Claude is still working on the seed prompt.
+      steer();
+      yield resultMessage("first answer", "result-1");
+      const steered = await stream.next();
+      seen.push(promptText(steered.value));
+      yield resultMessage("second answer", "result-2");
+    })();
+    return Object.assign(iterator, {
+      close() {},
+      interrupt: async () => {},
+      initializationResult: async () => ({ account: {} }),
+    }) as unknown as Query;
+  }) as never;
+}
+
+function promptText(message: SDKUserMessage | undefined): string {
+  const content = message?.message.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map((block) => block.text)
+    .join(" ");
 }
 
 const successfulMessages = [
@@ -504,6 +549,38 @@ test("only active Eleven custom tools are exposed through the Eleven MCP namespa
     assert.deepEqual(captured?.options.tools, []);
     assert.deepEqual(captured?.options.allowedTools, ["mcp__eleven__telegram"]);
     assert.ok((captured?.options.mcpServers as Record<string, unknown>).eleven);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("a message steered into a live turn is answered inside that same turn", async () => {
+  const piSessionId = "cccccccc-1111-4111-8111-111111111111";
+  const seen: string[] = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: steerableQuery(() => {
+        assert.equal(steerClaudeSession(piSessionId, "Viu minha msg?"), true);
+      }, seen),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("investigate the zip")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      events.push(event);
+    }
+
+    // Both human turns went through the one open input stream, in order.
+    assert.deepEqual(seen, ["investigate the zip", "Viu minha msg?"]);
+    const done = events.find((event) => event.type === "done");
+    // Pi takes one assistant message per turn: both answers, in arrival order.
+    assert.equal(done?.message.content[0]?.type === "text" && done.message.content[0].text, "first answer\n\nsecond answer");
+    // Usage of every SDK result the turn settled, not just the last.
+    assert.equal(done?.message.usage.totalTokens, 12);
+    // The turn is over: a late steer must find no live stream and fall back to Pi.
+    assert.equal(steerClaudeSession(piSessionId, "too late"), false);
   } finally {
     unregisterClaudeSession(piSessionId);
   }

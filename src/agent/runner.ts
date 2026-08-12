@@ -21,6 +21,7 @@ import {
   setClaudeTaskListener,
   setClaudeToolListener,
   setClaudeWorkspaceTools,
+  steerClaudeSession,
   unregisterClaudeSession,
 } from "./claude-code.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
@@ -68,6 +69,9 @@ export interface TurnEvents {
   onAssistantText?: (text: string) => void;
   /** The attempt failed and is retrying on a fallback model — its prose is abandoned. */
   onFailover?: () => void;
+  /** A retryable provider error (529, stream drop) and the runtime is running the
+   * same turn again. Minutes of silence otherwise indistinguishable from thinking. */
+  onRetry?: (notice: RetryNotice) => void;
   /** Raw pi event passthrough (channel lifecycle handling). */
   onEvent?: (event: AgentSessionEvent) => void;
   /** Provider-neutral tool activity for the dashboard. `id` is the call's
@@ -77,6 +81,12 @@ export interface TurnEvents {
   onToolCall?: (name: string, args: Record<string, unknown>, id: string) => void;
   /** Plan snapshots and native subagent lifecycle updates. */
   onTaskActivity?: (event: TaskActivityEvent) => void;
+}
+
+export interface RetryNotice {
+  attempt: number;
+  maxAttempts: number;
+  errorMessage: string;
 }
 
 export interface TurnResult {
@@ -89,10 +99,15 @@ export interface TurnResult {
 
 interface ActiveTurn {
   session: AgentSession;
+  /** Writes the transcript a steered message must be recorded in. */
+  sessionManager: SessionManager;
   /** Settles when the turn ends — steering races against it to detect a missed injection. */
   done: Promise<void>;
   /** Set by interrupt() so the failover loop stops instead of retrying. */
   aborted: boolean;
+  /** A message was handed straight to the runtime, bypassing Pi's queue — the
+   * warm session's in-memory context has to be rebuilt after the turn. */
+  injected: boolean;
 }
 
 interface WarmSession {
@@ -180,6 +195,7 @@ export class Runner {
    */
   private async steerIntoTurn(threadId: string, running: ActiveTurn, request: TurnRequest): Promise<boolean> {
     log.info(`steering message into live turn of ${threadId}`);
+    if (this.steerIntoRuntime(threadId, running, request)) return true;
     let commit!: () => void;
     const committed = new Promise<boolean>((resolve) => (commit = () => resolve(true)));
     const unsubscribe = running.session.subscribe((event) => {
@@ -204,6 +220,33 @@ export class Runner {
     }
     log.info(`steer missed the turn of ${threadId}, running as its own turn`);
     return false;
+  }
+
+  /**
+   * Hand the message to a nested runtime that is reading input right now, so it
+   * lands between two tool calls instead of after the whole loop. Pi treats a
+   * Claude Code turn as a single turn of its own, so its boundary injection can
+   * be minutes away — long enough for the sender to conclude they were ignored.
+   *
+   * Pi never sees this message as input, so we record it in the transcript
+   * ourselves, at the point in time it actually arrived, and mark the turn for a
+   * session rebuild (the live in-memory context cannot be appended to).
+   */
+  private steerIntoRuntime(threadId: string, running: ActiveTurn, request: TurnRequest): boolean {
+    if (!steerClaudeSession(running.session.sessionId, request.text, request.images)) return false;
+    log.info(`delivered into the live runtime turn of ${threadId}`);
+    running.injected = true;
+    try {
+      running.sessionManager.appendMessage({
+        role: "user",
+        content: request.images?.length ? [{ type: "text", text: request.text }, ...request.images] : request.text,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      // The runtime already has it; a transcript gap is better than a duplicate.
+      log.warn(`failed to record the steered message of ${threadId}: ${error}`);
+    }
+    return true;
   }
 
   /** Whether this process is currently running a turn for the thread. */
@@ -297,7 +340,13 @@ export class Runner {
     // killed mid-turn, this is what a restart uses to wake the conversation.
     this.hooks.onTurnStart?.(threadId, sessionManager.getSessionFile());
     let settle!: () => void;
-    const active: ActiveTurn = { session, done: new Promise((resolve) => (settle = resolve)), aborted: false };
+    const active: ActiveTurn = {
+      session,
+      sessionManager,
+      done: new Promise((resolve) => (settle = resolve)),
+      aborted: false,
+      injected: false,
+    };
     this.active.set(threadId, active);
 
     const collected: string[] = [];
@@ -335,6 +384,13 @@ export class Runner {
         const delta = event.assistantMessageEvent.delta;
         current += delta;
         events.onDelta?.(delta);
+      } else if (event.type === "auto_retry_start") {
+        // Pi retries a retryable provider error under the failover loop, without
+        // ever settling prompt() — so this is the only trace the turn stalled.
+        log.warn(`retrying turn of ${threadId} (${event.attempt}/${event.maxAttempts}) after: ${event.errorMessage}`);
+        events.onRetry?.({ attempt: event.attempt, maxAttempts: event.maxAttempts, errorMessage: event.errorMessage });
+      } else if (event.type === "auto_retry_end" && !event.success) {
+        log.warn(`turn of ${threadId} gave up after ${event.attempt} retries: ${event.finalError ?? "unknown error"}`);
       } else if (event.type === "tool_execution_start") {
         attemptHadToolActivity = true;
         events.onToolCall?.(event.toolName, event.args, event.toolCallId);
@@ -427,6 +483,9 @@ export class Runner {
       setClaudeToolListener(session.sessionId, undefined);
       setClaudeTaskListener(session.sessionId, undefined);
       unsubscribe();
+      // A message went into the runtime and the transcript but not into the
+      // session's context snapshot — rebuild it so the next turn can see it.
+      if (active.injected) this.dropSession(threadId);
       this.active.delete(threadId);
       settle();
     }

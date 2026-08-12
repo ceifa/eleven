@@ -566,10 +566,17 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 @keyframes e11-blink { 50% { opacity: 0; } }
 
 /* ---------- tool calls ---------- */
-/* One row per call (the durable render used to join with \n, which the bubble's
-   white-space:normal collapsed into a single run-on line). The arg preview
-   truncates to one line; clickable rows open the JSON viewer with every arg. */
-.tool-calls { margin-top: 0.35rem; }
+/* A run of calls is its own transcript row, hanging off a rail on the
+   assistant's side of the conversation — the same rendering while the turn
+   streams and after a reload, so nothing rearranges under the reader. One row
+   per call, arg preview truncated to a single line; clickable rows open the
+   JSON viewer with every arg. */
+.tool-calls {
+  max-width: 80%;
+  margin: 0 0 0.75rem;
+  padding-left: 0.7rem;
+  border-left: 2px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+}
 .tool-call {
   display: flex; gap: 0.5rem; align-items: baseline;
   font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;

@@ -6,7 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
-import { readThreadMessages, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
+import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
 
 test("rotated threads are derived as old, not stored as a separate state", () => {
@@ -77,7 +77,7 @@ test("literal outbound messages are appended to the pi transcript", () => {
   }
 });
 
-test("recorded nested-runtime tool calls render on the turn's assistant message", async () => {
+test("the transcript renders tool calls as their own rows, in the order they happened", async () => {
   const dir = mkdtempSync(join(tmpdir(), "eleven-toolcalls-"));
   try {
     const assistant = (text: string) => ({
@@ -99,37 +99,41 @@ test("recorded nested-runtime tool calls render on the turn's assistant message"
     manager.appendMessage(assistant("done"));
 
     const file = manager.getSessionFile()!;
-    const messages = await readThreadMessages(file);
-    assert.deepEqual(messages.map((m) => m.role), ["user", "assistant"]);
-    const reply = messages.at(-1)!;
-    assert.equal(reply.text, "done");
-    assert.deepEqual(reply.toolCalls?.map((call) => call.name), ["Read", "Bash"]);
-    assert.ok(reply.toolCalls?.[0].summary.includes("/tmp/x.ts"));
+    const timeline = await readThreadTimeline(file);
+    // The calls happened before the reply, so they render before it — and the
+    // consecutive records merge into a single block.
+    assert.deepEqual(timeline.map((item) => item.kind), ["message", "tool-calls", "message"]);
+    const calls = timeline[1];
+    assert.equal(calls.kind, "tool-calls");
+    if (calls.kind !== "tool-calls") return;
+    assert.deepEqual(calls.calls.map((call) => call.name), ["Read", "Bash"]);
+    assert.ok(calls.calls[0].summary.includes("/tmp/x.ts"));
+    assert.deepEqual(timeline.at(-1), { kind: "message", role: "assistant", text: "done", timestamp: timeline.at(-1)!.timestamp });
 
-    // Turn 2 — the legacy shape (one record right after the assistant message)
-    // must keep rendering on ITS turn, not leak into a later one.
+    // Turn 2 — the legacy shape (one record written right after the assistant
+    // message) still renders, in the position the file gives it.
     manager.appendMessage({ role: "user", content: "and lint it", timestamp: Date.now() });
     manager.appendMessage(assistant("lint is clean"));
     manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:9", name: "Bash", args: { command: "npm run lint" } }] });
-    const legacy = await readThreadMessages(file);
-    assert.deepEqual(legacy.at(-1)?.toolCalls?.map((call) => call.name), ["Bash"]);
-    assert.deepEqual(legacy.at(1)?.toolCalls?.map((call) => call.name), ["Read", "Bash"]); // turn 1 untouched
+    const legacy = await readThreadTimeline(file);
+    assert.deepEqual(legacy.slice(3).map((item) => item.kind), ["message", "message", "tool-calls"]);
+    assert.deepEqual(legacy.slice(0, 3).map((item) => item.kind), ["message", "tool-calls", "message"]); // turn 1 untouched
 
     // Turn 3 — a running (or crashed) turn has records but no assistant message
-    // yet: the calls must still show up, as their own transcript row.
+    // yet: the calls must still show up.
     manager.appendMessage({ role: "user", content: "try again", timestamp: Date.now() });
     manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:3", name: "Grep", args: {} }] });
-    const withOrphan = await readThreadMessages(file);
-    const orphan = withOrphan.at(-1)!;
-    assert.equal(orphan.role, "assistant");
-    assert.equal(orphan.text, "");
-    assert.deepEqual(orphan.toolCalls?.map((call) => call.name), ["Grep"]);
+    const running = await readThreadTimeline(file);
+    const orphan = running.at(-1)!;
+    assert.equal(orphan.kind, "tool-calls");
+    if (orphan.kind !== "tool-calls") return;
+    assert.deepEqual(orphan.calls.map((call) => call.name), ["Grep"]);
 
-    // Re-reading must not duplicate anything — the fold works on copies, never
-    // on the shared cache.
-    const again = await readThreadMessages(file);
-    assert.deepEqual(again.at(1)?.toolCalls?.length, 2);
-    assert.deepEqual(again.at(-1)?.toolCalls?.length, 1);
+    // Re-reading must not duplicate anything — rows own fresh arrays, the parsed
+    // entries behind them are cached and shared.
+    const again = await readThreadTimeline(file);
+    assert.deepEqual(again.map((item) => item.kind), running.map((item) => item.kind));
+    assert.equal(again[1].kind === "tool-calls" && again[1].calls.length, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

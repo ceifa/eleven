@@ -31,14 +31,23 @@ const WAKE_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_HEARTBEAT_MS = 60 * 1000;
 // In-memory activity of a running turn, so a dashboard opened mid-turn can
 // catch up on what already happened (WS events only reach pages already open).
-// Tool calls need no equivalent: they're persisted to the session file as they
-// happen and arrive with the thread's regular messages.
+// It records prose, tool calls and provider requests *in order*: tool calls are
+// also persisted to the session file, but the streamed prose is not, so the
+// on-disk transcript alone can't say whether text came before or after a call.
 const LIVE_TEXT_MAX_CHARS = 64_000;
+const LIVE_ITEMS_MAX = 400;
+
+export type LiveItem =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; id: string; name: string; summary: string; args?: Record<string, unknown> }
+  | { kind: "request"; id: string; model: string; at: number };
 
 export interface LiveTurn {
   startedAt: number;
-  /** Streamed prose so far (nested runtimes only deliver it at the end). */
-  text: string;
+  /** What the turn has produced so far, oldest first. */
+  items: LiveItem[];
+  /** Streamed characters kept so far, against LIVE_TEXT_MAX_CHARS. */
+  chars: number;
 }
 
 export interface IncomingMessage {
@@ -76,6 +85,7 @@ export class Gateway extends EventEmitter {
   readonly runner = new Runner({
     onProviderRequest: (threadId, model, payload) => {
       const meta = this.requests.record(threadId, model, payload);
+      this.pushLive(threadId, { kind: "request", id: meta.id, model, at: Date.now() });
       this.emit("provider-request", { threadId, id: meta.id, model });
     },
     onTurnStart: (threadId, sessionFile) => {
@@ -83,7 +93,10 @@ export class Gateway extends EventEmitter {
       // the same pi session (not just after a successful turn reports it back).
       if (sessionFile) this.threads.update(threadId, { sessionFile });
       this.pending.begin(threadId);
-      this.liveTurns.set(threadId, { startedAt: Date.now(), text: "" });
+      this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0 });
+      // Queued messages run back to back on the same thread: this is the only
+      // point where a watcher can tell one turn's output from the next one's.
+      this.emit("turn-start", { threadId });
     },
     // Fired inside the turn lane, after channel delivery — so the ledger
     // covers the send, and the next turn's begin cannot overlap this end.
@@ -125,10 +138,29 @@ export class Gateway extends EventEmitter {
       onDelta: (delta) => {
         incoming.events?.onDelta?.(delta);
         const live = this.liveTurns.get(thread.id);
-        if (live && live.text.length < LIVE_TEXT_MAX_CHARS) live.text += delta;
+        if (live && live.chars < LIVE_TEXT_MAX_CHARS) {
+          live.chars += delta.length;
+          // Prose after a tool call is a new paragraph of the turn, not a
+          // continuation of the last one — that's what keeps the order readable.
+          const last = live.items.at(-1);
+          if (last?.kind === "text") last.text += delta;
+          else this.pushLive(thread.id, { kind: "text", text: delta });
+        }
         this.emit("delta", { threadId: thread.id, delta });
       },
       onEvent: (event) => incoming.events?.onEvent?.(event),
+      // A failover rewinds the transcript to the start of the turn, so whatever
+      // the failed attempt streamed is off the surviving branch — drop it from
+      // the live view too, instead of leaving orphan prose glued to the retry.
+      onFailover: () => {
+        incoming.events?.onFailover?.();
+        const live = this.liveTurns.get(thread.id);
+        if (live) {
+          live.items = [];
+          live.chars = 0;
+        }
+        this.emit("turn-rewound", { threadId: thread.id });
+      },
       // Pi and nested runtimes report through the same clean event. Claude MCP
       // names are normalized by its adapter before they reach the dashboard.
       onToolCall: (name, args, id) => {
@@ -136,7 +168,9 @@ export class Gateway extends EventEmitter {
         // Carry the durable call id and the full args: a dashboard watching the
         // turn can then open the call right away, instead of having to reload
         // the page to get the persisted (clickable) row.
-        this.emit("tool-call", { threadId: thread.id, id, name, args, summary: summarizeToolArgs(args) });
+        const summary = summarizeToolArgs(args);
+        this.pushLive(thread.id, { kind: "tool", id, name, args, summary });
+        this.emit("tool-call", { threadId: thread.id, id, name, args, summary });
       },
       onTaskActivity: (activity) => {
         incoming.events?.onTaskActivity?.(activity);
@@ -231,6 +265,17 @@ export class Gateway extends EventEmitter {
   /** Activity of the thread's running turn, if one is in flight. */
   liveTurn(id: string): LiveTurn | undefined {
     return this.liveTurns.get(id);
+  }
+
+  /** Append to the running turn's live record, oldest entries falling off first
+   *  so a very long turn can't grow it without bound. */
+  private pushLive(threadId: string, item: LiveItem): void {
+    const live = this.liveTurns.get(threadId);
+    if (!live) return;
+    live.items.push(item);
+    // Dropped tool calls still reach a reloading page: they're persisted in the
+    // session file, so they simply render as part of the durable transcript.
+    if (live.items.length > LIVE_ITEMS_MAX) live.items.splice(0, live.items.length - LIVE_ITEMS_MAX);
   }
 
   /**

@@ -21,15 +21,26 @@ export interface ToolCallsEntryData {
   calls: RecordedToolCall[];
 }
 
-export interface ThreadMessage {
-  role: "user" | "assistant";
-  text: string;
-  timestamp?: string;
-  /** Tool calls made by an assistant message: the call id (to fetch its result
-   *  lazily), name, a one-line preview, and the full argument object — the
-   *  dashboard renders args + result in a JSON viewer on click. */
-  toolCalls?: { id: string; name: string; summary: string; args?: Record<string, unknown> }[];
+/** A tool call as the transcript shows it: the call id (to fetch its result
+ *  lazily), name, a one-line preview, and the full argument object — the
+ *  dashboard renders args + result in a JSON viewer on click. */
+export interface ToolCallView {
+  id: string;
+  name: string;
+  summary: string;
+  args?: Record<string, unknown>;
 }
+
+/**
+ * One row of the rendered transcript. Tool calls are their own row rather than
+ * a footer on the nearest message: a nested runtime (Claude Code) calls its
+ * tools *before* it produces prose, so folding them into the reply printed them
+ * under text that came after them. Rows are emitted in file order, which is the
+ * order things actually happened.
+ */
+export type ThreadItem =
+  | { kind: "message"; role: "user" | "assistant"; text: string; timestamp?: string }
+  | { kind: "tool-calls"; calls: ToolCallView[]; timestamp?: string };
 
 /** A tool call's recorded output, fetched on demand (results can be large, so
  *  they're kept out of the thread payload and its turn-done refreshes). */
@@ -39,14 +50,15 @@ export interface ToolResult {
 }
 
 /** A session entry slimmed to its tree link plus what's displayable: the
- *  rendered message, for toolResult entries the recorded output, or — for
- *  nested-runtime records — the tool calls to fold into their turn's message. */
+ *  rendered message, the tool calls it made (pi's own toolCall blocks, or a
+ *  nested runtime's recorded ones), and for toolResult entries the output. */
 interface Node {
   id: string;
   parentId: string | null;
-  message?: ThreadMessage;
+  timestamp?: string;
+  message?: { role: "user" | "assistant"; text: string };
+  calls?: ToolCallView[];
   result?: ToolResult & { toolCallId: string };
-  record?: { calls: NonNullable<ThreadMessage["toolCalls"]>; timestamp?: string };
 }
 
 // Session files are append-only and re-read on every dashboard view — cache the
@@ -63,8 +75,8 @@ const lanes = new Map<string, Promise<unknown>>();
  * linear, but model failover rewinds and retries on a new branch — so only the
  * active path (tip of the file back to the root) is rendered, not every entry.
  */
-export function readThreadMessages(sessionFile: string): Promise<ThreadMessage[]> {
-  return keyedLane(lanes, sessionFile, () => readMessages(sessionFile));
+export function readThreadTimeline(sessionFile: string): Promise<ThreadItem[]> {
+  return keyedLane(lanes, sessionFile, () => buildTimeline(sessionFile));
 }
 
 /** The recorded output of one tool call, or undefined if the session has none
@@ -101,13 +113,13 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
 
     for (const entry of parseSessionEntries(complete)) {
       if (entry.type === "session") continue; // header — not part of the tree
-      const recorded = renderRecordedToolCalls(entry);
       const node: Node = {
         id: entry.id,
         parentId: entry.parentId,
-        message: renderMessage(entry),
+        timestamp: entry.timestamp,
+        ...renderMessage(entry),
+        ...(renderRecordedToolCalls(entry) ?? {}),
         result: renderResult(entry),
-        ...(recorded ? { record: { calls: recorded, timestamp: entry.timestamp } } : {}),
       };
       nodes.push(node);
       byId.set(node.id, node);
@@ -118,7 +130,7 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
   return { nodes, byId };
 }
 
-async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
+async function buildTimeline(sessionFile: string): Promise<ThreadItem[]> {
   const parsed = await ensureParsed(sessionFile);
   if (!parsed) return [];
   const { nodes, byId } = parsed;
@@ -128,80 +140,49 @@ async function readMessages(sessionFile: string): Promise<ThreadMessage[]> {
   const branch: Node[] = [];
   let hops = nodes.length;
   for (let node = nodes.at(-1); node && hops-- > 0; node = node.parentId ? byId.get(node.parentId) : undefined) {
-    if (node.message || node.record) branch.push(node);
+    if (node.message || node.calls) branch.push(node);
   }
   branch.reverse();
 
-  // Fold recorded tool calls into their turn's message. Records are written as
-  // the calls happen, so they precede their turn's assistant message; older
-  // files carry one record right after it (parent = the assistant). Everything
-  // is emitted as copies — the cache is shared and reused across reads.
-  const messages: ThreadMessage[] = [];
-  const emittedAt = new Map<string, number>(); // node id → index in `messages`
-  let pending: NonNullable<ThreadMessage["toolCalls"]> = [];
-  let pendingTimestamp: string | undefined;
-  const flushPending = () => {
-    if (!pending.length) return;
-    // The turn never produced an assistant message (aborted mid-tool, still
-    // running, or the daemon died) — the calls get their own transcript row.
-    messages.push({ role: "assistant", text: "", timestamp: pendingTimestamp, toolCalls: pending });
-    pending = [];
-    pendingTimestamp = undefined;
+  // File order is chronological order, so the rows come out in it: text where
+  // the model wrote text, tool calls where it called tools. Consecutive tool
+  // entries (a nested runtime writes one per call) merge into a single block so
+  // the transcript reads as one list, not one row per record. Rows own fresh
+  // arrays — the parsed nodes are cached and reused across reads.
+  const items: ThreadItem[] = [];
+  const pushCalls = (calls: ToolCallView[], timestamp?: string) => {
+    const last = items.at(-1);
+    if (last?.kind === "tool-calls") last.calls.push(...calls);
+    else items.push({ kind: "tool-calls", calls: [...calls], timestamp });
   };
   for (const node of branch) {
-    if (node.record) {
-      const parentIndex = node.parentId !== null ? emittedAt.get(node.parentId) : undefined;
-      const parent = parentIndex !== undefined ? messages[parentIndex] : undefined;
-      if (parent?.role === "assistant") {
-        parent.toolCalls = [...node.record.calls, ...(parent.toolCalls ?? [])];
-      } else {
-        pendingTimestamp ??= node.record.timestamp;
-        pending.push(...node.record.calls);
-      }
-      continue;
-    }
-    const message = node.message!;
-    if (message.role === "assistant") {
-      const copy: ThreadMessage = pending.length
-        ? { ...message, toolCalls: [...pending, ...(message.toolCalls ?? [])] }
-        : { ...message, ...(message.toolCalls ? { toolCalls: [...message.toolCalls] } : {}) };
-      pending = [];
-      pendingTimestamp = undefined;
-      emittedAt.set(node.id, messages.length);
-      messages.push(copy);
-    } else {
-      flushPending();
-      emittedAt.set(node.id, messages.length);
-      messages.push(message);
-    }
+    if (node.message?.text) items.push({ kind: "message", ...node.message, timestamp: node.timestamp });
+    if (node.calls?.length) pushCalls(node.calls, node.timestamp);
   }
-  flushPending();
-  return messages;
+  return items;
 }
 
-function renderMessage(entry: SessionEntry): ThreadMessage | undefined {
-  if (entry.type !== "message") return undefined;
+/** The displayable halves of a message entry: its prose and its tool calls. */
+function renderMessage(entry: SessionEntry): Pick<Node, "message" | "calls"> {
+  if (entry.type !== "message") return {};
   const { message } = entry as SessionMessageEntry;
   if (message.role === "user") {
-    const text = contentText(message.content).trim();
-    if (text) return { role: "user", text, timestamp: entry.timestamp };
-  } else if (message.role === "assistant") {
-    const text = contentText(message.content).trim();
-    const toolCalls = message.content
+    return { message: { role: "user", text: contentText(message.content).trim() } };
+  }
+  if (message.role === "assistant") {
+    const calls = message.content
       .filter((c) => c.type === "toolCall")
       .map((c) => ({ id: c.id, name: c.name, summary: summarizeToolArgs(c.arguments, 160), args: c.arguments }));
-    if (text || toolCalls.length) {
-      return { role: "assistant", text, timestamp: entry.timestamp, toolCalls: toolCalls.length ? toolCalls : undefined };
-    }
+    return { message: { role: "assistant", text: contentText(message.content).trim() }, ...(calls.length ? { calls } : {}) };
   }
-  return undefined;
+  return {};
 }
 
-function renderRecordedToolCalls(entry: SessionEntry): NonNullable<ThreadMessage["toolCalls"]> | undefined {
+function renderRecordedToolCalls(entry: SessionEntry): Pick<Node, "calls"> | undefined {
   if (entry.type !== "custom" || entry.customType !== TOOL_CALLS_ENTRY_TYPE) return undefined;
   const calls = ((entry as CustomEntry<ToolCallsEntryData>).data?.calls ?? []).filter((call) => call?.id && call.name);
   if (!calls.length) return undefined;
-  return calls.map((call) => ({ id: call.id, name: call.name, summary: summarizeToolArgs(call.args ?? {}, 160), args: call.args }));
+  return { calls: calls.map((call) => ({ id: call.id, name: call.name, summary: summarizeToolArgs(call.args ?? {}, 160), args: call.args })) };
 }
 
 // toolResult entries aren't shown as their own messages — their output is

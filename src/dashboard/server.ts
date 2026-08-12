@@ -11,7 +11,7 @@ import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
-import { readThreadMessages, readToolResult } from "../threads/reader.ts";
+import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
 import { logger } from "../log.ts";
 
@@ -20,6 +20,9 @@ const PUBLIC_DIR = join(import.meta.dirname, "public");
 // One Telegram rich-message request: avoids ambiguous partial delivery and
 // duplicate prefixes when a multi-chunk send fails midway.
 const MAX_OUTBOUND_MESSAGE_CHARS = 32_000;
+// How much of a message the activity broadcast carries. Enough to read the
+// bubble; the transcript refetch that follows replaces it with the real thing.
+const ACTIVITY_PREVIEW_CHARS = 4_000;
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -93,10 +96,21 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   gateway.on("delta", (event) => broadcast({ type: "delta", ...event }));
   gateway.on("provider-request", (event) => broadcast({ type: "provider-request", ...event }));
   gateway.on("tool-call", (event) => broadcast({ type: "tool-call", ...event }));
+  gateway.on("turn-start", (event) => broadcast({ type: "turn-start", ...event }));
   gateway.on("turn-done", (event) => broadcast({ type: "turn-done", ...event }));
   gateway.on("turn-error", (event) => broadcast({ type: "turn-error", ...event }));
-  gateway.on("thread-activity", ({ thread, direction }) =>
-    broadcast({ type: "activity", threadId: thread.id, workspace: thread.workspace, direction }),
+  gateway.on("turn-rewound", (event) => broadcast({ type: "turn-rewound", ...event }));
+  // The message itself rides along (clipped — the transcript refetch has the
+  // full text): a page watching the thread can show an inbound Telegram message
+  // the moment it lands, instead of only after the turn finishes.
+  gateway.on("thread-activity", ({ thread, direction, text }) =>
+    broadcast({
+      type: "activity",
+      threadId: thread.id,
+      workspace: thread.workspace,
+      direction,
+      text: typeof text === "string" ? text.slice(0, ACTIVITY_PREVIEW_CHARS) : undefined,
+    }),
   );
   telegram.pairing.on("request", (request) => broadcast({ type: "pairing", request }));
   // The daemon itself mutates config (pairing approvals, group/topic auto-registry) —
@@ -319,10 +333,11 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
-        const [messages, requests] = await Promise.all([
-          thread.sessionFile ? readThreadMessages(thread.sessionFile) : [],
+        const [timeline, requests] = await Promise.all([
+          thread.sessionFile ? readThreadTimeline(thread.sessionFile) : [],
           gateway.requests.list(thread.id),
         ]);
+        const messages = timeline.flatMap((item) => (item.kind === "message" ? [item] : []));
         const workspace = config.resolved.workspaces[thread.workspace];
         const effectiveModel = workspace
           ? config.turnModels(thread.model, [...channelModelScopes(thread.sessionKey), workspace])
@@ -337,10 +352,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
             messages: messages.length,
             turns: messages.filter((message) => message.role === "user").length,
           },
-          messages,
+          timeline,
           requests,
           // Catch-up for a page opened mid-turn: what the running turn already
-          // did (WS tool-call/delta events only reach pages already connected).
+          // did, in order (WS events only reach pages already connected).
           live: gateway.liveTurn(thread.id),
         });
       }

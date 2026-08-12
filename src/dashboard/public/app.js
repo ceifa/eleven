@@ -4,10 +4,14 @@ const view = document.getElementById("view");
 const state = {
   threads: [],
   activeThread: null,
-  messages: [],
+  /** Durable transcript rows as the session file has them, oldest first. */
+  timeline: [],
   requests: [],
-  liveToolCalls: [],
-  streaming: "",
+  /** The running turn's activity in order: prose, tool calls, provider requests. */
+  live: [],
+  /** Messages that exist but haven't landed in the transcript yet — just sent
+   *  from here, or just arrived from a channel. */
+  pending: [],
   workspaceFilter: "",
   overview: null,
   config: null,
@@ -132,44 +136,43 @@ function connectWs() {
     if (message.type === "ping") return;
     pulse();
     stripFlash();
+    const active = message.threadId && message.threadId === state.activeThread?.id;
+    // A turn began (or failed over and restarted): the live region belongs to
+    // the new attempt, so drop whatever the old one left there. Anything durable
+    // it produced is already on disk and comes back with the transcript.
+    if (message.type === "turn-start" || message.type === "turn-rewound") {
+      markThreadLive(message.threadId);
+      if (active) {
+        liveEpoch++;
+        state.live = [];
+        renderLive(true);
+      }
+    }
     if (message.type === "delta") {
       markThreadLive(message.threadId);
-      if (message.threadId === state.activeThread?.id) {
-        state.streaming += message.delta;
-        renderStreaming();
+      if (active) {
+        // Prose that follows a tool call starts its own bubble — same shape the
+        // transcript has after a reload.
+        const last = state.live.at(-1);
+        if (last?.kind === "text") last.text += message.delta;
+        else state.live.push({ kind: "text", text: message.delta });
+        scheduleLiveRender();
       }
     }
     if (message.type === "provider-request") {
       markThreadLive(message.threadId);
-      if (message.threadId === state.activeThread?.id) {
-        // Live chip while the turn runs; the turn-done refresh replaces it with the durable one.
-        const container = document.getElementById("messages");
-        if (container) {
-          const stick = atBottom(container);
-          const chip = requestChip({ id: message.id, model: message.model, at: Date.now(), bytes: 0 });
-          const streaming = container.querySelector("[data-streaming]");
-          streaming ? container.insertBefore(chip, streaming) : container.append(chip);
-          if (stick) container.scrollTop = container.scrollHeight;
-        }
+      if (active) {
+        state.live.push({ kind: "request", id: message.id, model: message.model, at: Date.now() });
+        renderLive();
       }
     }
     if (message.type === "tool-call") {
       markThreadLive(message.threadId);
-      if (message.threadId === state.activeThread?.id) {
-        // Live tool indicator while the turn runs (deltas only stream prose);
-        // the turn-done refresh replaces it with the durable on-disk rendering.
-        // The event carries the durable id and args, so the row is already
-        // clickable — no reload needed to inspect a call mid-turn.
-        const call = { id: message.id, name: message.name, summary: message.summary ?? "", args: message.args, at: Date.now() };
-        state.liveToolCalls.push(call);
-        const container = document.getElementById("messages");
-        if (container) {
-          const stick = atBottom(container);
-          const chip = toolCallRow(call.name, call);
-          const streaming = container.querySelector("[data-streaming]");
-          streaming ? container.insertBefore(chip, streaming) : container.append(chip);
-          if (stick) container.scrollTop = container.scrollHeight;
-        }
+      // The event carries the durable call id and the full args, so the row is
+      // clickable right away — no reload needed to inspect a call mid-turn.
+      if (active) {
+        state.live.push({ kind: "tool", id: message.id, name: message.name, summary: message.summary ?? "", args: message.args });
+        renderLive();
       }
     }
     if (message.type === "turn-done" || message.type === "turn-error") {
@@ -178,19 +181,31 @@ function connectWs() {
         toast(message.error, true);
         stripError();
       }
-      if (message.threadId === state.activeThread?.id) openThread(message.threadId);
+      if (active) openThread(message.threadId);
       refreshThreads();
     }
     if (message.type === "thread-deleted") {
       markThreadIdle(message.threadId);
-      if (message.threadId === state.activeThread?.id) {
+      if (active) {
         state.activeThread = null;
         renderThreadPane();
         closePaneMobile();
       }
       refreshThreads();
     }
-    if (message.type === "activity") scheduleThreadRefresh(message.workspace);
+    if (message.type === "activity") {
+      // Show the message now instead of at the end of the turn: a Telegram
+      // message (or a reply eleven sent on its own) is real the moment the
+      // daemon reports it, and the next transcript read reconciles it.
+      if (active && message.text) {
+        const role = message.direction === "in" ? "user" : "assistant";
+        // A reply from the running turn is already on screen as streamed prose;
+        // only one eleven sent outside a turn (the operator "send") needs a bubble.
+        if (role === "user" || !state.live.some((item) => item.kind === "text")) showPending(role, message.text);
+        scheduleReconcile();
+      }
+      scheduleThreadRefresh(message.workspace);
+    }
     if (message.type === "config-changed") onConfigChanged();
     if (message.type === "pairing") {
       toast(`pairing request: ${message.request.chatTitle ?? message.request.name ?? message.request.userId}`);
@@ -361,20 +376,63 @@ setInterval(() => {
   }
 }, 30_000);
 
+// Guards against an older /threads/:id response landing after a newer one (or
+// after the reader moved on to another thread) and painting stale history.
+let openSeq = 0;
+// Bumped whenever the running turn's live record is invalidated (a turn started,
+// or failed over), so an in-flight fetch can tell its snapshot is already old.
+let liveEpoch = 0;
+
 async function openThread(id) {
+  const seq = ++openSeq;
+  const epoch = liveEpoch;
+  if (id !== state.activeThread?.id) {
+    // Switching threads: nothing from the old one survives the move.
+    state.live = [];
+    state.pending = [];
+  }
   const data = await api.get(`/threads/${id}`).catch(() => null);
-  if (!data) return;
+  if (!data || seq !== openSeq) return;
   state.activeThread = data.thread;
-  state.messages = data.messages;
+  state.timeline = data.timeline ?? [];
   state.requests = data.requests ?? [];
-  // A turn already in flight: its tool calls are already in `messages` (they
-  // persist as they happen); catch up on the streamed prose here — from there
-  // on the WS tool-call/delta events keep the pane current.
-  state.liveToolCalls = [];
-  state.streaming = data.live?.text ?? "";
+  state.pending = state.pending.filter((message) => !landed(message));
+  if (epoch === liveEpoch) {
+    // No live turn means the turn is over and everything it produced is now in
+    // the transcript. With one running, the server snapshot is only a catch-up
+    // for a page that missed events — once we're receiving them ourselves, ours
+    // is the complete record and the snapshot would lose the newest deltas.
+    if (!data.live) state.live = [];
+    else if (!state.live.length) state.live = data.live.items ?? [];
+  }
   renderThreadPane();
   renderThreadList();
-  if (state.streaming) renderStreaming();
+}
+
+// A pending bubble is redundant once the same message shows up in the
+// transcript. Compare a prefix: the activity broadcast clips long messages.
+const MATCH_CHARS = 200;
+const landed = (pending) =>
+  state.timeline.some(
+    (item) => item.kind === "message" && item.role === pending.role && item.text.slice(0, MATCH_CHARS) === pending.text.slice(0, MATCH_CHARS),
+  );
+
+/** Show a message that isn't in the transcript yet (and won't be until the turn
+ *  persists it), unless it's already on screen. */
+function showPending(role, text) {
+  const message = { role, text };
+  if (landed(message) || state.pending.some((p) => p.role === role && p.text.slice(0, MATCH_CHARS) === text.slice(0, MATCH_CHARS))) return;
+  state.pending.push(message);
+  renderPending();
+}
+
+// A message that arrives outside a turn (an operator send) has no turn-done to
+// refresh on, so re-read the transcript shortly after any activity. Coalesced:
+// a burst of events costs one read.
+let reconcileTimer;
+function scheduleReconcile() {
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(() => state.activeThread && openThread(state.activeThread.id), 1500);
 }
 
 // On mobile the list and the conversation share one screen; these swap between
@@ -386,12 +444,13 @@ const backButton = () =>
   h("button", { class: "btn btn-ghost btn-sm mobile-only px-2", "aria-label": "Back to threads", onclick: closePaneMobile },
     h("span", { html: "‹", style: "font-size:1.3rem;line-height:1" }));
 
-// One tool call, rendered identically for the live indicator and the durable
-// transcript. The arg preview is truncated to a single line by CSS; a row with
-// a call id is clickable and opens the modal with the full args and the
+// One tool call, rendered identically for the live row and the durable
+// transcript — same markup, same place in the flow, so a reload mid-turn
+// doesn't visibly rearrange the page. The arg preview is truncated to a single
+// line by CSS; a row with a call id opens the modal with the full args and the
 // recorded result. Live rows carry the same id the record is written under, so
 // they're clickable while the turn runs — the result simply isn't there yet.
-function toolCallRow(name, { summary, args, id } = {}) {
+function toolCallRow({ name, summary, args, id }) {
   return h("div", {
     class: `tool-call${id ? " is-clickable" : ""}`,
     ...(id ? { title: "view arguments and result", onclick: () => openToolCallModal(name, args, id) } : {}),
@@ -401,16 +460,108 @@ function toolCallRow(name, { summary, args, id } = {}) {
   );
 }
 
+/** A run of consecutive tool calls, as its own transcript row. */
+const toolCallsBlock = (calls) => h("div", { class: "tool-calls" }, calls.map(toolCallRow));
+
 function messageBubble(message, streaming = false) {
   const isUser = message.role === "user";
   return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}` },
     h("div", { class: `chat-bubble ${isUser ? "chat-bubble-primary" : "bg-base-200 text-base-content"} ${streaming ? "msg-streaming" : ""}` },
       h("div", { class: "msg-body", html: md(message.text) }),
-      message.toolCalls
-        ? h("div", { class: "tool-calls" }, message.toolCalls.map((t) => toolCallRow(t.name, { summary: t.summary, args: t.args, id: t.id })))
-        : null,
     ),
   );
+}
+
+/* The transcript is three stacked regions inside one scroller:
+   #transcript  — the durable rows, rebuilt only when the session file is read
+   #pending     — messages that exist but aren't persisted yet
+   #live        — the running turn, appended to as events arrive
+   Splitting them is what keeps a delta stream from re-rendering all of history
+   (and what lets the live region be replaced wholesale when a turn restarts). */
+
+const scroller = () => document.getElementById("messages");
+
+// Mutate the transcript while keeping a reader who scrolled up in place, and a
+// reader at the bottom pinned to the newest row.
+function sticky(mutate) {
+  const el = scroller();
+  const stick = el ? atBottom(el) : false;
+  mutate();
+  if (el && stick) el.scrollTop = el.scrollHeight;
+}
+
+/** The durable rows in the order they happened. Tool calls and requests already
+ *  rendered in the live region are skipped: they're the running turn's, and the
+ *  live record knows how they interleave with prose the transcript can't see. */
+function durableRows() {
+  const liveIds = new Set(state.live.filter((item) => item.kind !== "text").map((item) => item.id));
+  const rows = [];
+  let at = 0;
+  for (const item of state.timeline) {
+    // Undated rows (older sessions) inherit the last known time so they can't
+    // sort to the top of the transcript.
+    at = Date.parse(item.timestamp) || at;
+    if (item.kind === "message") rows.push({ at, tie: 0, node: () => messageBubble(item) });
+    else {
+      const calls = item.calls.filter((call) => !liveIds.has(call.id));
+      if (calls.length) rows.push({ at, tie: 0, node: () => toolCallsBlock(calls) });
+    }
+  }
+  // The exact moments eleven called an AI provider, interleaved by time — a
+  // request precedes the message it produced, hence the tiebreak.
+  for (const request of state.requests) {
+    if (!liveIds.has(request.id)) rows.push({ at: request.at, tie: 1, node: () => requestChip(request) });
+  }
+  return rows.sort((a, b) => a.at - b.at || a.tie - b.tie).map((row) => row.node());
+}
+
+function renderPending() {
+  const region = document.getElementById("pending");
+  if (!region) return;
+  sticky(() => region.replaceChildren(...state.pending.map((message) => messageBubble(message))));
+}
+
+// The live region only ever grows, so nodes are appended rather than rebuilt —
+// one delta must not cost a re-render of the turn so far. `liveRendered` is how
+// many of state.live already have a node; a shrink (or an explicit rebuild)
+// starts the region over.
+let liveRendered = 0;
+function renderLive(rebuild = false) {
+  const region = document.getElementById("live");
+  if (!region) return;
+  sticky(() => {
+    if (rebuild || liveRendered > state.live.length) {
+      region.replaceChildren();
+      liveRendered = 0;
+    }
+    for (let i = liveRendered; i < state.live.length; i++) {
+      const item = state.live[i];
+      const previous = region.lastElementChild;
+      // Consecutive calls join one block — the same merged shape the transcript
+      // renders after a reload.
+      if (item.kind === "tool" && previous?.classList.contains("tool-calls")) previous.append(toolCallRow(item));
+      else region.append(liveNode(item));
+    }
+    liveRendered = state.live.length;
+    // The trailing prose bubble grows delta by delta — patch it in place.
+    const last = state.live.at(-1);
+    if (last?.kind === "text") region.lastElementChild.querySelector(".msg-body").innerHTML = md(last.text);
+  });
+}
+
+function liveNode(item) {
+  if (item.kind === "tool") return toolCallsBlock([item]);
+  if (item.kind === "request") return requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 });
+  return messageBubble({ role: "assistant", text: item.text }, true);
+}
+
+// Deltas arrive dozens of times per second — coalesce to one render per frame.
+let liveRaf;
+function scheduleLiveRender() {
+  liveRaf ??= requestAnimationFrame(() => {
+    liveRaf = undefined;
+    renderLive();
+  });
 }
 
 let renderedThreadId;
@@ -430,20 +581,14 @@ function renderThreadPane() {
   // Re-rendering the same thread (a turn finished) should leave a reader who
   // scrolled up where they were; switching threads or sitting at the bottom
   // jumps to the latest message.
-  const prev = document.getElementById("messages");
+  const prev = scroller();
   const keepScroll = renderedThreadId === thread.id && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
-  // Chronological timeline: chat messages interleaved with the exact moments
-  // eleven called an AI provider (each chip opens the recorded request payload).
-  const timeline = [
-    ...state.messages.map((m) => ({ at: Date.parse(m.timestamp) || 0, node: () => messageBubble(m) })),
-    ...state.requests.map((r) => ({ at: r.at, node: () => requestChip(r) })),
-  ].sort((a, b) => a.at - b.at);
   const messages = h("div", { class: "flex-1 overflow-y-auto p-4", id: "messages" },
-    timeline.map((item) => item.node()),
-    // The running turn's tool calls so far (server catch-up + WS since); the
-    // turn-done refetch replaces them with the durable on-disk rendering.
-    state.liveToolCalls.map((call) => toolCallRow(call.name, call)));
+    h("div", { id: "transcript" }, durableRows()),
+    h("div", { id: "pending" }),
+    h("div", { id: "live" }),
+  );
   const composer = h("form", { class: "flex gap-2 p-3 border-t border-base-300", onsubmit: sendMessage },
     h("textarea", {
       class: "textarea flex-1 min-h-10 max-h-40",
@@ -465,6 +610,10 @@ function renderThreadPane() {
     messages,
     composer,
   );
+  // Both regions live inside the pane, so they can only be filled once it's
+  // attached; the scroll position is applied after, over the finished height.
+  renderPending();
+  renderLive(true);
   messages.scrollTop = keepScroll ?? messages.scrollHeight;
 }
 
@@ -679,32 +828,6 @@ async function openToolCallModal(name, args, callId) {
   showToolCallModal(name, args, result);
 }
 
-// Re-rendering the whole in-progress reply per delta is quadratic in reply
-// length — coalesce to one render per animation frame.
-let streamRaf;
-function renderStreaming() {
-  if (streamRaf) return;
-  streamRaf = requestAnimationFrame(() => {
-    streamRaf = undefined;
-    renderStreamingNow();
-  });
-}
-
-function renderStreamingNow() {
-  if (!state.streaming) return; // turn ended (or thread switched) before the frame fired
-  const container = document.getElementById("messages");
-  if (!container) return;
-  let live = container.querySelector("[data-streaming]");
-  if (!live) {
-    live = messageBubble({ role: "assistant", text: "" }, true);
-    live.dataset.streaming = "1";
-    container.append(live);
-  }
-  const stick = atBottom(container);
-  live.querySelector(".msg-body").innerHTML = md(state.streaming);
-  if (stick) container.scrollTop = container.scrollHeight; // don't yank a reader who scrolled up
-}
-
 // Deletion is irreversible (history, request logs, and referenced media all
 // go), so it takes two clicks: the first arms the button, the second commits.
 // No native confirm() — a modal dialog would block scripted browsers.
@@ -754,18 +877,20 @@ async function sendMessage(event) {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  state.messages.push({ role: "user", text, timestamp: new Date().toISOString() });
-  state.streaming = "";
-  renderThreadPane();
+  // Optimistic bubble: it stays until the transcript read finds the real one,
+  // so a long turn doesn't leave the message you just sent off-screen.
+  const message = { role: "user", text };
+  state.pending.push(message);
+  renderPending();
   try {
     await api.send("POST", `/threads/${state.activeThread.id}/message`, { text });
   } catch (error) {
-    // The send failed — roll back the optimistic bubble and restore the draft
-    // so it doesn't look delivered.
+    // The send failed — drop the optimistic bubble and restore the draft so it
+    // doesn't look delivered.
     toast(error.message, true);
-    state.messages.pop();
+    state.pending = state.pending.filter((entry) => entry !== message);
     input.value = text;
-    renderThreadPane();
+    renderPending();
   }
 }
 

@@ -336,6 +336,10 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       topic,
       sendOptions.replyParameters,
     );
+    // A turn that produces no event at all (a provider stalling on the first
+    // request) still owes the chat a sign of life — the typing action expires in
+    // five seconds and says nothing about a turn that takes minutes.
+    taskProgress.start();
 
     // Appends accumulate outermost→innermost: DMs use the user's; groups use group, then topic.
     const config = deps.botConfig();
@@ -387,6 +391,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           },
           onTaskActivity: (activity) => taskProgress.update(activity),
           onToolCall: (name, args) => taskProgress.tool(name, summarizeToolArgs(args)),
+          onRetry: (notice) => taskProgress.retry(notice),
         },
         // The final send runs inside the turn's durable window: the pending
         // ledger releases only after this settles, so a daemon death before

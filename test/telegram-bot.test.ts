@@ -150,6 +150,36 @@ test("a tool-status-only message is deleted when the turn ends", async () => {
   assert.equal(calls[1]?.payload.message_id, 77);
 });
 
+test("a turn that produces no event at all still reports that it is working", async () => {
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, 5, undefined, undefined, 4_000, 30);
+  progress.start();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.deepEqual(calls.map((call) => call.method), ["send"]);
+  assert.equal(String(calls[0]?.payload.text), "\u2699\ufe0f Agent working");
+
+  // Still only status: the reply that follows supersedes it.
+  await progress.finish("completed");
+  progress.cancel();
+  for (let i = 0; i < 50 && calls.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls.map((call) => call.method), ["send", "delete"]);
+});
+
+test("a provider retry is announced live and kept after the turn", async () => {
+  const { calls, api } = fakeApi();
+  const progress = new TelegramTaskProgress(api, 5);
+  progress.retry({ attempt: 1, maxAttempts: 3, errorMessage: "API Error: 529 Overloaded" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await progress.finish("completed");
+  progress.cancel();
+
+  // No delete: why a turn went quiet for minutes outlives the turn.
+  assert.deepEqual(calls.map((call) => call.method), ["send", "edit"]);
+  assert.match(String(calls[0]?.payload.text), /^\u2699\ufe0f Agent working\n\ud83d\udd01 Retry 1\/3 \u00b7 API Error: 529 Overloaded$/);
+  assert.match(String(calls[1]?.payload.text), /\u2705 Turn completed\n\ud83d\udd01 Retry 1\/3/);
+});
+
 test("group attribution wraps the complete inbound body while DMs stay bare", () => {
   const group = {
     chat: { type: "supergroup" },

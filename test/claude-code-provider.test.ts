@@ -559,7 +559,7 @@ test("only active Eleven custom tools are exposed through the Eleven MCP namespa
   }
 });
 
-test("a message steered into a live turn is answered inside that same turn", async () => {
+test("a message steered into a live turn is answered inside that same turn", { timeout: 1_000 }, async () => {
   const piSessionId = "cccccccc-1111-4111-8111-111111111111";
   const seen: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });

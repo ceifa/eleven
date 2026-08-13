@@ -584,8 +584,12 @@ async function consumeClaudeQuery(
         // Each message steered into this live turn is a turn of its own for
         // Claude Code, with its own result. Keep reading until every one of them
         // has been answered, so a steered question is answered inside the Pi
-        // turn it interrupted instead of dangling.
+        // turn it interrupted instead of dangling. The real SDK does not emit
+        // the final result while its prompt iterable can still produce another
+        // turn, so seal as soon as the seed result arrives. Already-buffered
+        // messages still drain; later steering safely falls back to Pi.
         if (++resultsSeen <= input.pushed) {
+          input.seal();
           applyUsage(output, message);
           continue;
         }

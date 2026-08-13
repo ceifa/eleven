@@ -87,6 +87,11 @@ function steerableQuery(steer: () => void, seen: string[]) {
       yield resultMessage("first answer", "result-1");
       const steered = await stream.next();
       seen.push(promptText(steered.value));
+      // The real SDK withholds the final result until the prompt iterable ends.
+      // This caught a production deadlock where Eleven waited for that result
+      // while leaving the iterable open for another steered message forever.
+      const end = await stream.next();
+      assert.equal(end.done, true);
       yield resultMessage("second answer", "result-2");
     })();
     return Object.assign(iterator, {

@@ -104,19 +104,21 @@ class InputQueue {
   private readonly buffer: SDKUserMessage[] = [];
   private waiting: ((message: SDKUserMessage | undefined) => void) | undefined;
   private open = true;
-  /** Human turns handed over after the seed — each one earns its own SDK result. */
-  pushed = 0;
 
   /** The message this turn was created for; it answers the caller's own prompt. */
   seed(message: SDKUserMessage): void {
     this.buffer.push(message);
   }
 
-  /** Queue another human turn. False once the turn stopped reading results —
-   * then the caller must deliver the message some other way. */
+  /**
+   * Queue one human follow-up, then close input. The Agent SDK folds every
+   * queued message into one query and withholds its single final result until
+   * this iterable reaches EOF; leaving it open for another steer deadlocks both
+   * sides. Later messages return false and fall back to Pi's own steering.
+   */
   push(message: SDKUserMessage): boolean {
     if (!this.open) return false;
-    this.pushed++;
+    this.open = false;
     const resume = this.waiting;
     this.waiting = undefined;
     if (resume) resume(message);
@@ -488,9 +490,6 @@ async function consumeClaudeQuery(
     const prompt = input.drain();
     let result: SDKMessage | undefined;
     let lastTopLevelText = "";
-    /** Prose of the turns that answered steered input, in arrival order. */
-    const answers: string[] = [];
-    let resultsSeen = 0;
 
     const logicalPayload = {
       runtime: "claude-code",
@@ -578,25 +577,12 @@ async function consumeClaudeQuery(
           continue;
         }
         result = message;
-        const answer = message.subtype === "success" ? (message.result || lastTopLevelText) : lastTopLevelText;
-        if (answer) answers.push(answer);
-        lastTopLevelText = "";
-        // Each message steered into this live turn is a turn of its own for
-        // Claude Code, with its own result. Keep reading until every one of them
-        // has been answered, so a steered question is answered inside the Pi
-        // turn it interrupted instead of dangling. The real SDK does not emit
-        // the final result while its prompt iterable can still produce another
-        // turn, so seal as soon as the seed result arrives. Already-buffered
-        // messages still drain; later steering safely falls back to Pi.
-        if (++resultsSeen <= input.pushed) {
-          input.seal();
-          applyUsage(output, message);
-          continue;
-        }
-        // Sealed before the first await below: a push racing this break would
-        // otherwise be queued into a stream nobody reads anymore.
+        // A result closes this query. With live steering, InputQueue already
+        // reached EOF after accepting its one follow-up; without steering the
+        // SDK can emit the seed result while input remains open, so seal here to
+        // reject a push racing the provider's teardown.
         input.seal();
-        break; // streaming input stays open for MCP; the result closes this turn
+        break;
       }
     }
     if (grace) clearTimeout(grace);
@@ -607,9 +593,7 @@ async function consumeClaudeQuery(
     if (!result || result.type !== "result") throw new Error("Claude Code ended without a result");
     const error = sdkResultError(result);
     if (error) throw new Error(error);
-    // A turn that answered steered input mid-loop produced prose in several
-    // passes; Pi's transcript takes one assistant message per turn.
-    const text = answers.join("\n\n");
+    const text = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
     applyUsage(output, result);
     if (text) {
       output.content.push({ type: "text", text });

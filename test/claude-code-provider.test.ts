@@ -72,9 +72,9 @@ function resultMessage(text: string, uuid: string) {
 }
 
 /**
- * A query that keeps reading its input stream: it answers the seed prompt, then
- * blocks until a second human turn shows up — the shape of a Telegram message
- * steered into a live Claude tool loop.
+ * Reproduce the Agent SDK's real streaming-input contract: it consumes the seed
+ * and a queued human message, then withholds its one final result until the
+ * prompt iterable reaches EOF. It does not emit one result per input message.
  */
 function steerableQuery(steer: () => void, seen: string[]) {
   return ((input: { prompt: AsyncIterable<SDKUserMessage> }) => {
@@ -84,15 +84,13 @@ function steerableQuery(steer: () => void, seen: string[]) {
       seen.push(promptText(seed.value));
       // The message lands while Claude is still working on the seed prompt.
       steer();
-      yield resultMessage("first answer", "result-1");
       const steered = await stream.next();
       seen.push(promptText(steered.value));
-      // The real SDK withholds the final result until the prompt iterable ends.
-      // This caught a production deadlock where Eleven waited for that result
-      // while leaving the iterable open for another steered message forever.
+      // Production deadlocked here: Eleven waited for the result while the SDK
+      // waited for EOF, because Eleven left the prompt open for more steering.
       const end = await stream.next();
       assert.equal(end.done, true);
-      yield resultMessage("second answer", "result-2");
+      yield resultMessage("answer to both messages", "result-1");
     })();
     return Object.assign(iterator, {
       close() {},
@@ -580,10 +578,9 @@ test("a message steered into a live turn is answered inside that same turn", { t
     // Both human turns went through the one open input stream, in order.
     assert.deepEqual(seen, ["investigate the zip", "Viu minha msg?"]);
     const done = events.find((event) => event.type === "done");
-    // Pi takes one assistant message per turn: both answers, in arrival order.
-    assert.equal(done?.message.content[0]?.type === "text" && done.message.content[0].text, "first answer\n\nsecond answer");
-    // Usage of every SDK result the turn settled, not just the last.
-    assert.equal(done?.message.usage.totalTokens, 12);
+    // The real SDK emits one result after processing both inputs.
+    assert.equal(done?.message.content[0]?.type === "text" && done.message.content[0].text, "answer to both messages");
+    assert.equal(done?.message.usage.totalTokens, 6);
     // The turn is over: a late steer must find no live stream and fall back to Pi.
     assert.equal(steerClaudeSession(piSessionId, "too late"), false);
   } finally {

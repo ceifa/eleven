@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -64,7 +64,7 @@ test("literal outbound messages are appended to the pi transcript", () => {
       sessionManager: manager,
       lastUsedAt: Date.now(),
     });
-    runner.appendOutbound("thread", file, "openai-codex/gpt-5.6-sol", "operator reply");
+    runner.appendOutbound("thread", { sessionFile: file, sessionDir: dir, workspacePath: dir }, "openai-codex/gpt-5.6-sol", "operator reply");
     assert.equal(disposed, true);
     assert.equal((runner as unknown as { warm: Map<string, unknown> }).warm.has("thread"), false);
     const entry = SessionManager.open(file).getEntries().at(-1);
@@ -72,6 +72,52 @@ test("literal outbound messages are appended to the pi transcript", () => {
     if (entry?.type !== "message") return;
     assert.equal(entry.message.role, "assistant");
     assert.deepEqual(entry.message.content, [{ type: "text", text: "operator reply" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a destination that only ever receives output gets its session materialized", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-outbound-no-session-"));
+  try {
+    // A Telegram topic the agent writes to but nobody ever replies in: the
+    // thread record exists with sessionFile unset, and delivery used to be
+    // refused outright ("thread has no session file"), which silently pushed
+    // the health route to a DM.
+    const runner = new Runner();
+    const file = runner.appendOutbound(
+      "thread",
+      { sessionDir: join(dir, "sessions"), workspacePath: dir },
+      "openai-codex/gpt-5.6-sol",
+      "operator reply",
+    );
+    assert.ok(existsSync(file), "the session file must exist on disk after the append");
+    const entry = SessionManager.open(file).getEntries().at(-1);
+    assert.equal(entry?.type, "message");
+    if (entry?.type !== "message") return;
+    assert.equal(entry.message.role, "assistant");
+    assert.deepEqual(entry.message.content, [{ type: "text", text: "operator reply" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("outbound delivery on a promised-but-missing session keeps the session id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-outbound-promised-"));
+  try {
+    // The daemon died before pi wrote the first-turn JSONL: the filename is the
+    // only surviving link to Claude's durable state, so the id must be reused
+    // instead of a second fresh session being forked.
+    const id = "3f1c9d02-5b7a-4c31-9e2f-8a6d4b0c17e5";
+    const promised = join(dir, "sessions", `2026-08-18_${id}.jsonl`);
+    const runner = new Runner();
+    const file = runner.appendOutbound(
+      "thread",
+      { sessionFile: promised, sessionDir: join(dir, "sessions"), workspacePath: dir },
+      "openai-codex/gpt-5.6-sol",
+      "operator reply",
+    );
+    assert.equal(SessionManager.open(file).getSessionId(), id);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -291,7 +291,6 @@ export class Gateway extends EventEmitter {
       const current = this.threads.current(thread.sessionKey);
       throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
     }
-    if (!thread.sessionFile) throw new Error("thread has no session file");
     const workspace = this.config.resolved.workspaces[thread.workspace];
     if (!workspace) throw new Error(`workspace ${thread.workspace} is not configured`);
     const candidates = this.config.turnModels(thread.model, [workspace]);
@@ -313,8 +312,15 @@ export class Gateway extends EventEmitter {
         return { target, recorded: false, warning };
       }
       try {
-        this.runner.appendOutbound(thread.id, thread.sessionFile!, model, text);
-        this.threads.update(thread.id, { lastActivityAt: Date.now() });
+        // A destination that only ever received output has no session file yet;
+        // appendOutbound creates one and reports it back, so the thread record
+        // stops being a dangling stub after the first delivery.
+        const sessionFile = this.runner.appendOutbound(thread.id, {
+          sessionFile: thread.sessionFile,
+          sessionDir: join(THREADS_DIR, thread.workspace),
+          workspacePath: workspace.path,
+        }, model, text);
+        this.threads.update(thread.id, { sessionFile, lastActivityAt: Date.now() });
         this.emit("thread-activity", { thread, direction: "out", text });
         return { target, recorded: true };
       } catch (error) {

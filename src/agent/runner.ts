@@ -40,11 +40,27 @@ const SESSION_IDLE_MS = 10 * 60 * 1000;
 const SESSION_SWEEP_MS = 60 * 1000;
 const MAX_WARM_SESSIONS = 32;
 
-export interface TurnRequest {
-  /** Absolute path of the pi session file (undefined → new session, file reported back). */
+/** Everything needed to reach a conversation's pi session on disk. */
+export interface SessionTarget {
+  /** Absolute path of the pi session file; absent when none was ever created. */
   sessionFile?: string;
   sessionDir: string;
   workspacePath: string;
+}
+
+/**
+ * Open the conversation's session, creating it when the file is missing. Pi
+ * defers creating a first-turn JSONL until a message exists, so a promised path
+ * may not be on disk yet: preserve the UUID embedded in the filename so
+ * Claude's durable active-attempt state stays reachable.
+ */
+function openOrCreateSession({ sessionFile, sessionDir, workspacePath }: SessionTarget): SessionManager {
+  if (sessionFile && existsSync(sessionFile)) return SessionManager.open(sessionFile, sessionDir, workspacePath);
+  const id = sessionFile?.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
+  return SessionManager.create(workspacePath, sessionDir, id ? { id } : undefined);
+}
+
+export interface TurnRequest extends SessionTarget {
   runtime: RuntimeContext;
   /** Ordered candidates: primary first, then fallbacks — each with its own
    * reasoning level and tool allowlist. */
@@ -271,13 +287,19 @@ export class Runner {
    * Persist prose delivered directly by an operator/channel without invoking a
    * model. Reuse the warm manager when present so its in-memory branch stays in
    * sync with the append-only session file.
+   *
+   * A destination that only ever receives output (a Telegram topic the agent
+   * writes to but nobody replies in) never had an inbound turn, so it has no
+   * session file: materialize one here instead of refusing the delivery.
+   * Returns the session file actually written, for the caller to pin onto the
+   * thread record.
    */
-  appendOutbound(threadId: string, sessionFile: string, modelReference: string, text: string): void {
+  appendOutbound(threadId: string, target: SessionTarget, modelReference: string, text: string): string {
     if (this.active.has(threadId)) throw new Error("thread has a running turn");
     const model = findModel(modelReference);
     if (!model) throw new Error(`unknown model ${modelReference}`);
     const warm = this.warm.get(threadId);
-    const sessionManager = warm?.sessionManager ?? SessionManager.open(sessionFile);
+    const sessionManager = warm?.sessionManager ?? openOrCreateSession(target);
     const message: AssistantMessage = {
       role: "assistant",
       content: [{ type: "text", text }],
@@ -302,6 +324,9 @@ export class Runner {
     // AgentSession keeps its own context snapshot. Rebuild it next turn so the
     // operator-authored message appended above is actually visible to the model.
     if (warm) this.dropSession(threadId);
+    const written = sessionManager.getSessionFile();
+    if (!written) throw new Error("session is not persisted");
+    return written;
   }
 
   /** Abort the in-flight turn of a thread, if any. */
@@ -527,18 +552,7 @@ export class Runner {
     }
     this.dropSession(threadId);
 
-    let sessionManager: SessionManager;
-    if (request.sessionFile && existsSync(request.sessionFile)) {
-      sessionManager = SessionManager.open(request.sessionFile, request.sessionDir, request.workspacePath);
-    } else if (request.sessionFile) {
-      // Pi defers creating a first-turn JSONL until an assistant message exists.
-      // If the daemon died before that, preserve the UUID embedded in the
-      // promised filename so Claude's durable active-attempt state remains reachable.
-      const id = request.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
-      sessionManager = SessionManager.create(request.workspacePath, request.sessionDir, id ? { id } : undefined);
-    } else {
-      sessionManager = SessionManager.create(request.workspacePath, request.sessionDir);
-    }
+    const sessionManager = openOrCreateSession(request);
 
     // Mutable ref so the request-log extension tags payloads with the model
     // actually in use, even after a mid-turn failover.

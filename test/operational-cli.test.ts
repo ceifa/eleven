@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { Runner } from "../src/agent/runner.ts";
+import { listWorkspaceSkills, Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
 import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
+import { readJsonFile } from "../src/util.ts";
 
 test("rotated threads are derived as old, not stored as a separate state", () => {
   const dir = mkdtempSync(join(tmpdir(), "eleven-thread-store-"));
@@ -213,4 +214,77 @@ test("Telegram delivery resolves bot, chat and forum topic from a session key", 
   assert.deepEqual(sent[0].rich_message, { markdown: "**hello**" });
   await assert.rejects(() => telegram.sendToSession("dashboard:agent:123", "hello"), /no Telegram delivery target/);
   await assert.rejects(() => telegram.sendToSession("telegram:missing:123", "hello"), /not running/);
+});
+
+// --- silent-failure regressions: a read that fails is not a read that found nothing ---
+
+test("state files tell a missing file apart from an unreadable one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-state-read-"));
+  try {
+    const fallback = { version: 1, threads: {}, current: {} };
+    // Missing is the normal case: a fresh install has no state file yet.
+    assert.deepEqual(readJsonFile(join(dir, "absent.json"), fallback), fallback);
+
+    // A real read failure must not be laundered into the fallback. Reading a
+    // directory raises EISDIR here; in the wild it is EACCES or EIO. Either way
+    // the old code answered "empty", and the store's next write persisted that
+    // emptiness over the real thread index. (Pointing at a path under a regular
+    // file covers the ENOTDIR shape of the same branch.)
+    const file = join(dir, "state.json");
+    writeFileSync(file, JSON.stringify(fallback));
+    assert.throws(() => readJsonFile(dir, fallback), /Could not read/);
+    assert.throws(() => readJsonFile(join(file, "nested.json"), fallback), /Could not read/);
+
+    // Unparsable content is a fault too, not an empty store.
+    const corrupt = join(dir, "corrupt.json");
+    writeFileSync(corrupt, "{ not json");
+    assert.throws(() => readJsonFile(corrupt, fallback), /Could not parse/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable session raises instead of rendering as an empty thread", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-session-read-"));
+  try {
+    const file = join(dir, "session.jsonl");
+    writeFileSync(file, "");
+    // A session that was deleted legitimately has no timeline.
+    assert.deepEqual(await readThreadTimeline(join(dir, "gone.jsonl")), []);
+    // One that cannot be stat'ed at all is a fault — reporting "no history"
+    // hides it and reads as a transcript that failed to record.
+    await assert.rejects(() => readThreadTimeline(join(file, "nested.jsonl")), /Could not read session/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a skill directory that cannot be enumerated is reported, not silently dropped", {
+  // chmod cannot lock root out of a directory, so the fault is unreproducible there.
+  skip: process.getuid?.() === 0 ? "requires a non-root user" : false,
+}, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-skill-scan-"));
+  const blocked = join(dir, "context");
+  try {
+    mkdirSync(join(blocked, ".agents", "skills"), { recursive: true });
+    chmodSync(blocked, 0o000);
+
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+    try {
+      await listWorkspaceSkills(dir);
+    } finally {
+      console.warn = realWarn;
+    }
+    // The walk still returns — losing a subtree must not fail a turn — but the
+    // loss now leaves a trace instead of being cached away for a minute.
+    assert.ok(
+      warnings.some((line) => line.includes("skill scan") && line.includes(blocked)),
+      `expected a skill-scan warning naming ${blocked}, got ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    chmodSync(blocked, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

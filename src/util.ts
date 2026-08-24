@@ -2,12 +2,29 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname } from "node:path";
 
-/** Read a JSON state file, returning `fallback` when missing or unparsable. */
+/**
+ * Read a JSON state file. Only a *missing* file yields `fallback`: a permission
+ * or I/O failure, or unparsable content, throws.
+ *
+ * Collapsing those into `fallback` made a transient read failure look like a
+ * fresh install — and since every store writes itself back, the next write
+ * persisted that emptiness over real state. An unreadable thread index became a
+ * permanently empty one; an unreadable pending-turn ledger silently dropped the
+ * very turns it exists to recover. Loud beats laundered — which is what
+ * `load()` in config.ts has always done for the config file.
+ */
 export function readJsonFile<T>(file: string, fallback: T): T {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    return fallback;
+    raw = readFileSync(file, "utf8");
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
+    throw new Error(`Could not read ${file}: ${error}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error: unknown) {
+    throw new Error(`Could not parse ${file}: ${error}`);
   }
 }
 

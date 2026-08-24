@@ -59,8 +59,8 @@ const COMMANDS = [
 ] as const;
 
 /** Keep one canonical command list. Telegram gives group-specific scopes
- * precedence over the default scope, and gateways such as OpenClaw leave an
- * all_group_chats list behind when a bot token is migrated. */
+ * precedence over the default scope, so a bot token that served another gateway
+ * before can still carry that gateway's all_group_chats list. */
 export async function syncTelegramCommands(
   api: Pick<Bot["api"], "setMyCommands" | "deleteMyCommands">,
 ): Promise<void> {

@@ -32,18 +32,19 @@ eleven init
 eleven doctor
 ```
 
-Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for you, so the fastest path is: `eleven start`, open `http://127.0.0.1:1111`, add a bot token and a workspace. Migrating from OpenClaw? `npx eleven import openclaw` brings over your Telegram bot, allowlists, groups, model preferences and voice transcription.
+Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for you, so the fastest path is: `eleven start`, open `http://127.0.0.1:1111`, add a bot token and a workspace.
 
 ## Configuration
 
 ```json
 {
   "dashboard": { "port": 1111, "host": "127.0.0.1" },
-  "providers": {
-    "defaultModel": "openai-codex/gpt-5.5",
-    "fallbackModels": ["github-copilot/gpt-5.5"],
-    "thinkingLevel": "high"
-  },
+  "models": [
+    { "model": "openai-codex/gpt-5.6-sol", "reasoning": "high" },
+    { "model": "claude-code/opus", "reasoning": "high" }
+  ],
+  "transcription": { "command": "whisper --file {{file}}" },
+  "session": { "idleDays": 7, "retentionDays": 30 },
   "workspaces": {
     "agent": {
       "path": "~/my/agent-repo",
@@ -53,10 +54,27 @@ Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for y
           "type": "telegram",
           "name": "main",
           "token": "$TELEGRAM_BOT_TOKEN",
-          "allowedUsers": [123456789]
+          "users": { "123456789": { "name": "me" } },
+          "groupAllowedUsers": [123456789],
+          "groups": {
+            "-1001234567890": {
+              "requireMention": true,
+              "topics": { "42": { "title": "ops", "models": [{ "model": "claude-code/sonnet" }] } }
+            }
+          }
         }
       ]
     }
   }
 }
 ```
+
+`models` is an ordered sequence: the first entry leads every turn, the rest are
+fallbacks tried in order when it fails. Any scope — workspace, group, topic —
+may carry its own `models` sequence, and the most specific one replaces the
+inherited sequence outright. `tools` narrows capabilities (`read`, `bash`,
+`edit`, `write`, and `web`/`agent` on the Claude Code runtime); a workspace's
+list is always intersected with the running model's. `users` and `groups` are
+the allowlists — empty means deny, and pairing fills them in from the
+dashboard. Values written as `"$VAR"` are read from the environment at load
+time.

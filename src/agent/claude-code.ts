@@ -359,11 +359,17 @@ export const CLAUDE_CODE_MODELS: readonly Model<Api>[] = [
   { ...MODEL_BASE, id: "haiku", name: "Claude Code · Haiku", contextWindow: 200_000 },
 ];
 
+// The provider serves both `stream()` and `streamSimple()` from this one
+// implementation. `stream()` hands us the per-API options union, whose
+// `toolChoice` is wider than the provider-neutral one — and we ignore tool
+// choice entirely, so drop the field instead of narrowing the caller.
+type ClaudeCodeStreamOptions = Omit<SimpleStreamOptions, "toolChoice">;
+
 function streamClaudeCode(
   deps: ClaudeProviderDeps,
   model: Model<Api>,
   context: Context,
-  options?: SimpleStreamOptions,
+  options?: ClaudeCodeStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   void consumeClaudeQuery(deps, model, context, options, stream);
@@ -374,7 +380,7 @@ async function consumeClaudeQuery(
   deps: ClaudeProviderDeps,
   model: Model<Api>,
   context: Context,
-  options: SimpleStreamOptions | undefined,
+  options: ClaudeCodeStreamOptions | undefined,
   stream: AssistantMessageEventStream,
 ): Promise<void> {
   const output = emptyAssistant(model);

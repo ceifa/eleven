@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatTelegramInboundPrompt, syncTelegramCommands } from "../src/channels/telegram/bot.ts";
+import { splitRich } from "../src/channels/telegram/rich.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
 test("Telegram command sync removes stale group-scoped commands", async () => {
@@ -243,4 +244,67 @@ test("media replies identify the bot as you without copying ids", () => {
     formatTelegramInboundPrompt(ctx as never, "This one."),
     "[Gabriel]\n[Replying to your photo]\nThis one.",
   );
+});
+
+// --- rich message splitting: a chunk boundary must not corrupt what it cuts ---
+
+/** True when a UTF-16 surrogate has lost its other half — the Bot API rejects
+ *  the whole message when one appears. */
+function hasLoneSurrogate(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+test("rich splitting never cuts a surrogate pair in half", () => {
+  // One oversized paragraph of astral-plane characters, offset by a single BMP
+  // char so the fixed 32000 cut lands *between* the halves of an emoji. Slicing
+  // by UTF-16 code units used to hand Telegram a lone surrogate.
+  const paragraph = `x${"😀".repeat(20_000)}`;
+  const chunks = splitRich(paragraph);
+
+  assert.ok(chunks.length > 1, "the paragraph must actually be split");
+  assert.equal(chunks.join(""), paragraph, "splitting must not lose or alter a character");
+  for (const chunk of chunks) {
+    assert.equal(hasLoneSurrogate(chunk), false, "a chunk must never end or start mid-pair");
+    assert.ok(chunk.length <= 32_768, "a chunk must fit the Bot API limit");
+  }
+});
+
+test("rich splitting prefers a line break over cutting mid-line", () => {
+  // A long table: cutting at a fixed offset lands inside a row and leaves both
+  // messages with a half-rendered line.
+  const row = `| ${"x".repeat(78)} |`;
+  const paragraph = Array.from({ length: 500 }, () => row).join("\n");
+  const chunks = splitRich(paragraph);
+
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.join(""), paragraph);
+  for (const chunk of chunks) {
+    for (const line of chunk.split("\n").filter(Boolean)) assert.equal(line, row);
+  }
+});
+
+test("rich splitting closes and reopens a code fence that spans chunks", () => {
+  const body = Array.from({ length: 2_000 }, (_, i) => `const line${i} = ${i};`).join("\n");
+  const chunks = splitRich(`Here you go:\n\n\`\`\`ts\n${body}\n\`\`\``);
+
+  assert.ok(chunks.length > 2);
+  // Every chunk must render on its own: an odd number of fence lines means one
+  // message ends inside a code block and the next one starts with orphan code.
+  for (const chunk of chunks) {
+    const fences = chunk.split("\n").filter((line) => line.startsWith("```")).length;
+    assert.equal(fences % 2, 0, `unbalanced fences in chunk: ${JSON.stringify(chunk.slice(0, 40))}`);
+  }
+  assert.ok(chunks[1].startsWith("```ts\n"), "the block keeps its opening line");
+  assert.ok(chunks[1].endsWith("\n```"), "a chunk ending inside the block closes it");
+  assert.ok(chunks[2].startsWith("```ts\n"), "the next chunk reopens it with the same language hint");
 });

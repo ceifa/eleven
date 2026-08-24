@@ -64,6 +64,18 @@ const NOOP_RESULT_GRACE_MS = 60_000;
 // user with the literal string and closed the stream on a prompt still queued.
 const SYNTHETIC_RESULT_TEXT = new Set(["No response requested.", "(no content)"]);
 
+/** Overrides CLAUDE_CODE_RESUME_PROMPT for sessions eleven resumes (see claudeChildEnv). */
+export const RESUME_PROMPT =
+  "[This session was resumed after its previous turn was cut off. Your output is delivered as a chat message,"
+  + " so ending the turn silently reads to the user as being ignored: if you had already finished a reply that"
+  + " never went out, send it again — otherwise carry on and answer. No need to mention the interruption unless"
+  + " it changes your answer.]";
+
+// How long a stop waits for the CLI to acknowledge the interrupt before the
+// transport is killed anyway. A stop must never hang on a child that stopped
+// listening, and it must never be so eager that the child gets no chance.
+const INTERRUPT_DEADLINE_MS = 2_000;
+
 /** True when `text` carries something a model actually produced. */
 function hasModelProse(text: string | undefined): boolean {
   const trimmed = text?.trim();
@@ -410,7 +422,37 @@ async function consumeClaudeQuery(
   // conversational Claude lineage.
   const isolated = requestSessionId !== ownerSessionId;
   const abortController = new AbortController();
-  const onAbort = () => abortController.abort();
+  /**
+   * Stop the turn. Killing the transport outright is what eleven used to do,
+   * and it leaves the child holding whatever it was running: the next resume
+   * inherits those background jobs and reports them as orphans, which is the
+   * wedge MAX_NOOP_RESULT_SKIPS exists to absorb. Ask the CLI to stop first and
+   * let it tear its own work down — then abort regardless, on a deadline, so a
+   * child that stopped listening can never make /stop hang.
+   */
+  const onAbort = () => {
+    const query = sdk;
+    if (!query) return abortController.abort();
+    const deadline = setTimeout(() => abortController.abort(), INTERRUPT_DEADLINE_MS);
+    deadline.unref();
+    void query
+      .interrupt()
+      .then(
+        (receipt) => {
+          // Async user messages that outlive the interrupt and WILL still run.
+          // Query.interrupt() takes no cancel_queued flag in this SDK, so eleven
+          // cannot ask for them to be dropped — report it rather than let a
+          // stopped conversation answer again out of nowhere.
+          const queued = receipt?.still_queued ?? [];
+          if (queued.length) log.warn(`stop left ${queued.length} queued message(s) that will still run: ${queued.join(", ")}`);
+        },
+        (error) => log.warn(`interrupt failed, falling back to a hard abort: ${error}`),
+      )
+      .finally(() => {
+        clearTimeout(deadline);
+        abortController.abort();
+      });
+  };
   if (options?.signal?.aborted) onAbort();
   else options?.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -1029,6 +1071,12 @@ function claudeChildEnv(): Record<string, string | undefined> {
     ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_AGENT_SDK_CLIENT_APP: "eleven",
+    // Resuming a session whose turn never finished, Claude Code injects its own
+    // "Continue from where you left off." — written for a terminal, where the
+    // user is watching the work. Here the turn's output *is* a chat message, so
+    // a resumed turn that ends quietly reads as being ignored. Say that, and
+    // stop the CLI's default from colliding with eleven's own wake prompt.
+    CLAUDE_CODE_RESUME_PROMPT: RESUME_PROMPT,
   };
 }
 

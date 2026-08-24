@@ -11,6 +11,7 @@ import {
   createClaudeCodeProvider,
   nativeToolsForPolicy,
   registerClaudeSession,
+  RESUME_PROMPT,
   runWithClaudeSession,
   setClaudeTaskListener,
   steerClaudeSession,
@@ -629,6 +630,91 @@ test("a zero-turn result carrying Claude's synthetic placeholder is not taken as
     assert.deepEqual(deltas, ["done"]);
     assert.equal(events.find((event) => event.type === "done")?.message.stopReason, "stop");
   } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("the child is told how a resumed turn reaches the user", async () => {
+  const piSessionId = "dddddddd-1111-4111-8111-111111111111";
+  let captured: { options: { env?: Record<string, string> } } | undefined;
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages, (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+
+    // Left unset, Claude Code resumes an interrupted turn with its own
+    // terminal-shaped "Continue from where you left off." — which says nothing
+    // about the reply being a chat message nobody will see if the turn ends quiet.
+    assert.equal(captured?.options.env?.CLAUDE_CODE_RESUME_PROMPT, RESUME_PROMPT);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("stopping a turn interrupts the CLI instead of only killing its transport", async () => {
+  const piSessionId = "eeeeeeee-1111-4111-8111-111111111111";
+  const controller = new AbortController();
+  let interrupts = 0;
+  let queried: (() => void) | undefined;
+  const queryCalled = new Promise<void>((resolve) => { queried = resolve; });
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+
+  // A CLI that keeps the stream open until it is asked to stop.
+  const query = ((_input: unknown) => {
+    queried?.();
+    const iterator = (async function* () { await held; })();
+    return Object.assign(iterator, {
+      close() {},
+      interrupt: async () => {
+        interrupts++;
+        release?.();
+        return { still_queued: ["queued-1"] };
+      },
+      initializationResult: async () => ({ account: {} }),
+    }) as unknown as Query;
+  }) as never;
+
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query,
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    const events: { type: string }[] = [];
+    const drained = (async () => {
+      for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId, signal: controller.signal })) {
+        events.push(event);
+      }
+    })();
+
+    await queryCalled;
+    // Bound the test: the stream ends on the stop whether or not the CLI is
+    // interrupted, so a regression fails the assertion instead of hanging.
+    controller.signal.addEventListener("abort", () => release?.(), { once: true });
+    controller.abort();
+    await drained;
+
+    assert.equal(interrupts, 1, "a stop must reach the CLI, not just kill the pipe under it");
+    assert.equal(events.at(-1)?.type, "error", "the turn still ends aborted");
+    // still_queued survives the interrupt and will run; Query.interrupt() has no
+    // cancel_queued flag, so the least eleven can do is not hide it.
+    assert.ok(
+      warnings.some((line) => line.includes("queued-1")),
+      `a queued message surviving the stop must be reported, got ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = realWarn;
     unregisterClaudeSession(piSessionId);
   }
 });

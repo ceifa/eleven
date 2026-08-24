@@ -748,7 +748,13 @@ function workspaceResources(root: string, depth = 3): WorkspaceResources {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
+    } catch (error: unknown) {
+      // A directory we cannot enumerate drops every skill pack beneath it, and
+      // the result is cached — so the loss outlives the fault while `/skills`
+      // just looks short. Say so instead of pretending the subtree is empty.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        log.warn(`skill scan: cannot enumerate ${dir} — skills below it are missing: ${error}`);
+      }
       return;
     }
     for (const entry of entries) {

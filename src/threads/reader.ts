@@ -95,8 +95,12 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
   let size: number;
   try {
     size = (await stat(sessionFile)).size;
-  } catch {
-    return null;
+  } catch (error: unknown) {
+    // A deleted session legitimately renders as an empty thread. An unreadable
+    // one must not: answering "no history" to a permission or I/O failure hides
+    // the fault, and reads as a transcript that failed to record.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`Could not read session ${sessionFile}: ${error}`);
   }
   let cached = lruTouch(cache, sessionFile);
   if (cached && cached.size > size) cached = undefined; // truncated/replaced — start over

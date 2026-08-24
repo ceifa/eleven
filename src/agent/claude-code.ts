@@ -57,6 +57,18 @@ const DEFAULT_NATIVE_TOOLS = [
 const MAX_NOOP_RESULT_SKIPS = 3;
 // If the real turn never follows a skipped result, stop waiting on the child.
 const NOOP_RESULT_GRACE_MS = 60_000;
+// Such a turn does not always settle with empty prose: the CLI fills it with a
+// synthetic placeholder of its own. These are constants in the Claude Code
+// binary, sitting next to "<synthetic>", and neither is ever something a model
+// said. Recognizing only emptiness let them through, so eleven answered the
+// user with the literal string and closed the stream on a prompt still queued.
+const SYNTHETIC_RESULT_TEXT = new Set(["No response requested.", "(no content)"]);
+
+/** True when `text` carries something a model actually produced. */
+function hasModelProse(text: string | undefined): boolean {
+  const trimmed = text?.trim();
+  return !!trimmed && !SYNTHETIC_RESULT_TEXT.has(trimmed);
+}
 
 const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
   read: ["Read", "Glob", "Grep"],
@@ -573,7 +585,8 @@ async function consumeClaudeQuery(
         // A turn that queried no model and produced no prose answered someone
         // else's injected message, not this prompt (see MAX_NOOP_RESULT_SKIPS).
         if (
-          message.subtype === "success" && message.num_turns === 0 && !message.result && !lastTopLevelText
+          message.subtype === "success" && message.num_turns === 0
+          && !hasModelProse(message.result) && !hasModelProse(lastTopLevelText)
           && noopSkips++ < MAX_NOOP_RESULT_SKIPS
         ) {
           log.info(`ignoring a ${message.origin?.kind ?? "zero-turn"} result: this turn's prompt is still queued`);
@@ -599,7 +612,11 @@ async function consumeClaudeQuery(
     if (!result || result.type !== "result") throw new Error("Claude Code ended without a result");
     const error = sdkResultError(result);
     if (error) throw new Error(error);
-    const text = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
+    // Past the skip budget the loop falls back to the skipped result itself, so
+    // the placeholder gets one more chance to pose as the answer here. Drop it:
+    // an empty turn is what the runner knows how to fail over.
+    const settled = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
+    const text = hasModelProse(settled) ? settled : undefined;
     applyUsage(output, result);
     if (text) {
       output.content.push({ type: "text", text });

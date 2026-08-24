@@ -587,3 +587,48 @@ test("a message steered into a live turn is answered inside that same turn", { t
     unregisterClaudeSession(piSessionId);
   }
 });
+
+test("a zero-turn result carrying Claude's synthetic placeholder is not taken as the answer", async () => {
+  const piSessionId = "cccccccc-1111-4111-8111-111111111111";
+  // The same resume path as the orphaned-jobs case above, except the CLI does
+  // not settle the injected report with empty prose: it attaches its own
+  // synthetic placeholder. "No response requested." is a constant in the Claude
+  // Code binary, next to "(no content)" and "<synthetic>" — it is what the CLI
+  // says for a turn it never sent to a model, not something a model produced.
+  // Treating it as prose makes eleven answer the user with that literal string
+  // and close the stream while their real prompt is still queued.
+  const messages = [
+    {
+      type: "result", subtype: "success", is_error: false, result: "No response requested.",
+      session_id: "session", duration_ms: 12, duration_api_ms: 0, num_turns: 0, total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {}, permission_denials: [],
+      origin: { kind: "task-notification" }, uuid: "synthetic-noop-result",
+    },
+    ...successfulMessages,
+  ] as unknown as SDKMessage[];
+
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(messages, () => {}),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      events.push(event);
+    }
+
+    const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
+    assert.ok(
+      !deltas.includes("No response requested."),
+      `the placeholder must never reach the user, got ${JSON.stringify(deltas)}`,
+    );
+    // The real turn is the one that follows the skipped no-op.
+    assert.deepEqual(deltas, ["done"]);
+    assert.equal(events.find((event) => event.type === "done")?.message.stopReason, "stop");
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});

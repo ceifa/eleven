@@ -2,7 +2,6 @@
 import { startDaemon } from "./daemon.ts";
 import { runDoctor } from "./doctor.ts";
 import { controlService, installService, serviceInstalled } from "./service.ts";
-import { importOpenclaw } from "./import-openclaw.ts";
 import { runClientCommand } from "./cli-client.ts";
 
 const [, , command, ...args] = process.argv;
@@ -37,14 +36,6 @@ if (!clientHandled) switch (command) {
   case "doctor":
     process.exitCode = (await runDoctor()) ? 0 : 1;
     break;
-  case "import":
-    if (args[0] === "openclaw") {
-      await importOpenclaw();
-      break;
-    }
-    console.error(`unknown import source: ${args[0] ?? "(none)"} — supported: openclaw`);
-    process.exitCode = 1;
-    break;
   default:
     console.log(`eleven — a featherweight personal AI gateway
 
@@ -53,7 +44,6 @@ usage:
   eleven restart                       restart the daemon
   eleven init                          install and start the background service
   eleven doctor                        check config, providers, channels and workspaces
-  eleven import openclaw               import an OpenClaw install
 
   eleven status [--json]               show live gateway health
   eleven workspaces [name] [--json]    list workspaces or show resolved detail

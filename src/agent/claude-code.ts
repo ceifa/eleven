@@ -128,6 +128,13 @@ class InputQueue {
   private readonly buffer: SDKUserMessage[] = [];
   private waiting: ((message: SDKUserMessage | undefined) => void) | undefined;
   private open = true;
+  private accepted = false;
+
+  /** Whether a live follow-up was handed to the child during this turn. Claude
+   * may queue it behind the seed's own answer, so its result can arrive after. */
+  get steered(): boolean {
+    return this.accepted;
+  }
 
   /** The message this turn was created for; it answers the caller's own prompt. */
   seed(message: SDKUserMessage): void {
@@ -143,6 +150,7 @@ class InputQueue {
   push(message: SDKUserMessage): boolean {
     if (!this.open) return false;
     this.open = false;
+    this.accepted = true;
     const resume = this.waiting;
     this.waiting = undefined;
     if (resume) resume(message);
@@ -550,6 +558,10 @@ async function consumeClaudeQuery(
     const prompt = input.drain();
     let result: SDKMessage | undefined;
     let lastTopLevelText = "";
+    // One Pi turn can settle several SDK results (a steered message answered in
+    // a turn of its own); every answer they carry belongs to this Pi message.
+    const answers: string[] = [];
+    let steerSettled = false;
 
     const logicalPayload = {
       runtime: "claude-code",
@@ -638,6 +650,24 @@ async function consumeClaudeQuery(
           continue;
         }
         result = message;
+        if (sdkResultError(message)) {
+          input.seal();
+          break;
+        }
+        applyUsage(output, message);
+        const settled = message.subtype === "success" ? message.result || lastTopLevelText : lastTopLevelText;
+        if (hasModelProse(settled)) answers.push(settled.trim());
+        lastTopLevelText = "";
+        // A steered message that arrived with no tool boundary left to inject it
+        // at is queued behind the seed's own answer: Claude settles the seed
+        // first, then dequeues the steered prompt and runs it as another turn.
+        // Breaking here killed the child with that prompt already dequeued — it
+        // was recorded in the transcript, looked delivered, and never ran.
+        if (input.steered && !steerSettled) {
+          steerSettled = true;
+          log.info("a steered message is still queued — reading past the seed's result for its answer");
+          continue;
+        }
         // A result closes this query. With live steering, InputQueue already
         // reached EOF after accepting its one follow-up; without steering the
         // SDK can emit the seed result while input remains open, so seal here to
@@ -647,19 +677,25 @@ async function consumeClaudeQuery(
       }
     }
     if (grace) clearTimeout(grace);
-    // The stream ended (or the grace above aborted it) without the real turn
-    // ever starting — fall back to the empty result the runner knows how to fail.
-    result ??= skippedResult;
+    if (!result) {
+      // The stream ended (or the grace above aborted it) without the real turn
+      // ever starting — fall back to the empty result the runner knows how to
+      // fail. Nothing counted its usage or prose inside the loop.
+      result = skippedResult;
+      if (result?.type === "result") {
+        applyUsage(output, result);
+        // Past the skip budget the fallback is the skipped result itself, so the
+        // placeholder gets one more chance to pose as the answer here. Drop it:
+        // an empty turn is what the runner knows how to fail over.
+        const settled = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
+        if (hasModelProse(settled)) answers.push(settled.trim());
+      }
+    }
 
     if (!result || result.type !== "result") throw new Error("Claude Code ended without a result");
     const error = sdkResultError(result);
     if (error) throw new Error(error);
-    // Past the skip budget the loop falls back to the skipped result itself, so
-    // the placeholder gets one more chance to pose as the answer here. Drop it:
-    // an empty turn is what the runner knows how to fail over.
-    const settled = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
-    const text = hasModelProse(settled) ? settled : undefined;
-    applyUsage(output, result);
+    const text = answers.join("\n\n") || undefined;
     if (text) {
       output.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: output });

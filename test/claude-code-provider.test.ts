@@ -101,6 +101,38 @@ function steerableQuery(steer: () => void, seen: string[]) {
   }) as never;
 }
 
+/**
+ * The other ordering the real CLI produces, observed on 2026-08-25: the steered
+ * message lands while the model is already writing its last text block, so there
+ * is no tool boundary left to inject it at. The CLI reads it off the iterable
+ * into its own queue, settles the seed with a result of its own, and only then
+ * dequeues the steered prompt and runs it as a second turn.
+ */
+function lateSteerQuery(steer: () => void, seen: string[]) {
+  return ((input: { prompt: AsyncIterable<SDKUserMessage> }) => {
+    const stream = input.prompt[Symbol.asyncIterator]();
+    const iterator = (async function* () {
+      const seed = await stream.next();
+      seen.push(promptText(seed.value));
+      steer();
+      const steered = await stream.next();
+      seen.push(promptText(steered.value));
+      const end = await stream.next();
+      assert.equal(end.done, true);
+      // The seed's answer settles first, with the steered prompt still queued.
+      yield resultMessage("answer to the seed", "result-1");
+      // Production broke out of the loop above and killed the child right here,
+      // with the steered prompt already dequeued into Claude's transcript.
+      yield resultMessage("answer to the steered message", "result-2");
+    })();
+    return Object.assign(iterator, {
+      close() {},
+      interrupt: async () => {},
+      initializationResult: async () => ({ account: {} }),
+    }) as unknown as Query;
+  }) as never;
+}
+
 function promptText(message: SDKUserMessage | undefined): string {
   const content = message?.message.content;
   if (!Array.isArray(content)) return "";
@@ -584,6 +616,36 @@ test("a message steered into a live turn is answered inside that same turn", { t
     assert.equal(done?.message.usage.totalTokens, 6);
     // The turn is over: a late steer must find no live stream and fall back to Pi.
     assert.equal(steerClaudeSession(piSessionId, "too late"), false);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("a steered message queued behind the seed's own result is still answered", { timeout: 1_000 }, async () => {
+  const piSessionId = "cccccccc-2222-4222-8222-222222222222";
+  const seen: string[] = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: lateSteerQuery(() => {
+        assert.equal(steerClaudeSession(piSessionId, "use the writing-skills skill"), true);
+      }, seen),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("open the PR")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      events.push(event);
+    }
+
+    assert.deepEqual(seen, ["open the PR", "use the writing-skills skill"]);
+    const done = events.find((event) => event.type === "done");
+    const text = done?.message.content[0]?.type === "text" ? done.message.content[0].text : undefined;
+    // Both results belong to this Pi turn, so both answers reach the user.
+    assert.equal(text, "answer to the seed\n\nanswer to the steered message");
+    // The Pi message the results collapse into owns their summed usage.
+    assert.equal(done?.message.usage.totalTokens, 12);
   } finally {
     unregisterClaudeSession(piSessionId);
   }

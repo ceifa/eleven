@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, extname, normalize, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -17,6 +17,17 @@ import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
+// Newest mtime among the app-shell files, read once: new assets arrive with a
+// new daemon, and a stat per socket would buy nothing.
+const SHELL_VERSION = Math.max(
+  ...["index.html", "app.js", "style.css"].map((name) => {
+    try {
+      return statSync(join(PUBLIC_DIR, name)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }),
+);
 // One Telegram rich-message request: avoids ambiguous partial delivery and
 // duplicate prefixes when a multi-chunk send fails midway.
 const MAX_OUTBOUND_MESSAGE_CHARS = 32_000;
@@ -84,6 +95,11 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   wss.on("error", (error) => log.warn(`websocket server error: ${error}`));
   wss.on("connection", (socket) => {
     socket.on("error", (error) => log.warn(`websocket client error: ${error}`));
+    // Which app shell this daemon serves. A tab left open across a restart keeps
+    // running the old html/js against the new API, and a field renamed on one
+    // side throws mid-render on the other; the page compares this across
+    // reconnects and reloads itself when it changed.
+    socket.send(JSON.stringify({ type: "hello", shell: SHELL_VERSION }));
     heartbeat ??= setInterval(() => broadcast({ type: "ping" }), 20_000);
     socket.on("close", () => {
       if (wss.clients.size === 0) {

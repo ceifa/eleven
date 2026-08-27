@@ -112,6 +112,12 @@ function flare(el, cls) {
 /* ---------- live updates ---------- */
 
 let liveTimer;
+// The app shell this page is running, as the server stamped it on the first
+// socket. A daemon restart drops the socket, and the reconnect brings the
+// current stamp — if it moved, the code in this tab is older than the API it
+// talks to and the next render throws on a field that was renamed under it.
+// Reload rather than limp along.
+let shellVersion;
 function connectWs() {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${scheme}//${location.host}/ws`);
@@ -134,6 +140,11 @@ function connectWs() {
     alive();
     const message = JSON.parse(event.data);
     if (message.type === "ping") return;
+    if (message.type === "hello") {
+      if (shellVersion !== undefined && message.shell !== shellVersion) return location.reload();
+      shellVersion = message.shell;
+      return;
+    }
     pulse();
     stripFlash();
     const active = message.threadId && message.threadId === state.activeThread?.id;

@@ -13,6 +13,15 @@ const state = {
    *  from here, or just arrived from a channel. */
   pending: [],
   workspaceFilter: "",
+  /** Free-text search over titles, conversations and transcripts. */
+  query: "",
+  /** Channel type ("telegram", "dashboard", …), "" for all. */
+  filterSource: "",
+  filterRunning: false,
+  /** Age window in ms, 0 for all time. */
+  filterSince: 0,
+  /** Channel types seen this session — what the source chips offer. */
+  sources: new Set(),
   overview: null,
   config: null,
   catalog: null,
@@ -49,15 +58,20 @@ function toast(message, isError = false) {
 }
 
 const TELEGRAM_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Telegram"><circle cx="12" cy="12" r="12" fill="#54A9EB"/><path fill="#fff" d="M17.6 7.2 15.7 16.4c-.14.63-.52.78-1.05.49l-2.9-2.14-1.4 1.35c-.16.16-.29.29-.59.29l.21-2.95 5.37-4.85c.23-.2-.05-.32-.36-.11l-6.64 4.18-2.86-.9c-.62-.2-.63-.62.13-.92l11.18-4.31c.52-.19.97.13.8.87z"/></svg>`;
-const CHANNEL_ICONS = { telegram: TELEGRAM_ICON };
+// Local origins get a glyph too — not for decoration: it keeps every name in
+// the list starting at the same x, however the thread was born.
+const DASHBOARD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Dashboard" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9.5h18"/></svg>`;
+const CLI_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="CLI" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7.5 10 2.4 2.3-2.4 2.3M13 14.6h3.6"/></svg>`;
+const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
 
 // A thread's origin — the sessionKey's prefix is the channel type
-// (telegram:…, dashboard:…). Show the channel glyph when we have one, else the
-// bare type; the title keeps the source readable either way.
+// (telegram:…, dashboard:…). The glyph sits next to the conversation name, so
+// a type we have no icon for renders nothing: the name already says "Dashboard"
+// or "CLI", and a bare word there would only stutter it.
 function channelSource(sessionKey) {
   const type = sessionKey.split(":")[0];
   const icon = CHANNEL_ICONS[type];
-  return icon ? h("span", { class: "channel-glyph", title: type, html: icon }) : h("span", {}, type);
+  return icon ? h("span", { class: "channel-glyph", title: type, html: icon }) : null;
 }
 
 // Escapes text for both element and attribute contexts. The quote escape
@@ -282,31 +296,66 @@ function stripError() {
   }
 }
 
-// Which threads have a turn running right now, reflected as the breathing amber
-// halo on their list cards. delta/provider-request light a thread;
-// turn-done/turn-error clear it. A per-thread safety timer clears a thread whose
-// end event we miss (e.g. a dropped socket) — each new event refreshes it.
-// A thread is live iff it has a safety timer — the Map is the single source of
-// truth (renderThreadList reads it too).
+// Which threads have a turn running right now — the breathing amber halo on the
+// list cards, and whether the open thread offers a stop button. Two sources,
+// and both are needed:
+//   · the server's `running` flag, which rides along with every thread list. It
+//     is the only thing a page opened (or reloaded) mid-turn can learn from —
+//     WS events only reach pages that were already connected.
+//   · the live events, which light a thread the instant it speaks, without
+//     waiting for a list read.
+// The event half carries a safety timer, so a thread whose end event we miss
+// (a dropped socket) doesn't stay lit forever; each new event refreshes it.
+// turn-done/turn-error clear both halves at once.
 const threadLiveTimers = new Map();
+const serverRunning = new Set();
+// When each thread last went idle. A read of /threads issued before a turn
+// ended can land after it, carrying a snapshot that still says "running" — this
+// is what keeps such an answer from relighting a thread we already know is done
+// (and from bringing its stop button back for another twelve seconds).
+const wentIdleAt = new Map();
+const isThreadLive = (threadId) => threadLiveTimers.has(threadId) || serverRunning.has(threadId);
+
 function markThreadLive(threadId) {
   if (!threadId) return;
-  const wasLive = threadLiveTimers.has(threadId);
+  const wasLive = isThreadLive(threadId);
+  wentIdleAt.delete(threadId);
   clearTimeout(threadLiveTimers.get(threadId));
   threadLiveTimers.set(threadId, setTimeout(() => markThreadIdle(threadId), 12_000));
   if (!wasLive) applyThreadLive(threadId); // already-lit card: skip the DOM query per delta
 }
 function markThreadIdle(threadId) {
-  if (!threadId || !threadLiveTimers.has(threadId)) return;
+  if (!threadId) return;
+  wentIdleAt.set(threadId, Date.now());
+  if (!isThreadLive(threadId)) return;
   clearTimeout(threadLiveTimers.get(threadId));
   threadLiveTimers.delete(threadId);
+  serverRunning.delete(threadId);
   applyThreadLive(threadId);
 }
+function setServerRunning(threadId, running) {
+  const wasLive = isThreadLive(threadId);
+  running ? serverRunning.add(threadId) : serverRunning.delete(threadId);
+  if (wasLive !== isThreadLive(threadId)) applyThreadLive(threadId);
+}
+/** Adopt the server's view of what is running, from a list read issued at
+ *  `readAt` — anything we learned after that read left is newer, and wins. */
+function seedRunning(threads, readAt) {
+  const running = new Set(threads.filter((thread) => thread.running).map((thread) => thread.id));
+  for (const id of serverRunning) if (!running.has(id)) setServerRunning(id, false);
+  for (const id of running) if ((wentIdleAt.get(id) ?? 0) < readAt) setServerRunning(id, true);
+}
 // Toggle the class on the card directly so a burst of deltas doesn't re-render
-// the whole list; renderThreadList re-applies from the map on any full rebuild.
+// the whole list; renderThreadList re-applies the state on any full rebuild.
 function applyThreadLive(threadId) {
+  const live = isThreadLive(threadId);
   const card = document.querySelector(`#thread-list [data-thread-id="${threadId}"]`);
-  if (card) card.classList.toggle("is-live", threadLiveTimers.has(threadId));
+  if (card) card.classList.toggle("is-live", live);
+  // The open thread's stop button appears and disappears with the same truth.
+  if (threadId === state.activeThread?.id) {
+    const stop = document.getElementById("stop-turn");
+    if (stop) stop.hidden = !live;
+  }
 }
 
 // Paint the sidebar badge from whatever overview we already have in state.
@@ -328,8 +377,35 @@ async function updatePairingBadge() {
 
 const onThreadsView = () => location.hash.startsWith("#/threads") || location.hash === "" || location.hash === "#/";
 
+const DAY = 24 * 60 * 60 * 1000;
+
+/** Every narrowing the list is showing, as the API's own query string — the
+ *  server filters and searches, so a filtered view costs a smaller response
+ *  rather than a full one the browser throws most of away. */
+function threadsQuery() {
+  const params = new URLSearchParams();
+  if (state.workspaceFilter) params.set("workspace", state.workspaceFilter);
+  if (state.filterSource) params.set("channel", state.filterSource);
+  if (state.filterRunning) params.set("running", "1");
+  if (state.filterSince) params.set("since", String(Date.now() - state.filterSince));
+  if (state.query) params.set("q", state.query);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+// Reads can overlap (a keystroke, a turn ending, an arriving message) and they
+// don't come back in order — an older answer landing last would paint a list
+// the filters no longer describe, and reinstate "running" for a turn that has
+// since ended. Only the newest read is allowed to touch state.
+let threadsSeq = 0;
 async function refreshThreads() {
-  state.threads = await api.get(`/threads${state.workspaceFilter ? `?workspace=${encodeURIComponent(state.workspaceFilter)}` : ""}`);
+  const seq = ++threadsSeq;
+  const readAt = Date.now();
+  const threads = await api.get(`/threads${threadsQuery()}`).catch((error) => (toast(error.message, true), null));
+  if (!threads || seq !== threadsSeq) return;
+  state.threads = threads;
+  for (const thread of threads) state.sources.add(thread.source);
+  seedRunning(threads, readAt);
   if (onThreadsView()) renderThreadList();
 }
 
@@ -352,28 +428,119 @@ async function onConfigChanged() {
   if (fresh && JSON.stringify(fresh) !== JSON.stringify(state.config)) render();
 }
 
-function renderThreadList() {
-  const list = document.getElementById("thread-list");
-  if (!list) return;
-  list.replaceChildren(
-    ...state.threads.map((thread) =>
-      h(
-        "button",
-        {
-          "data-thread-id": thread.id,
-          class: `card card-sm w-full bg-base-200 ${thread.id === state.activeThread?.id ? "is-active" : ""} ${threadLiveTimers.has(thread.id) ? "is-live" : ""}`,
-          onclick: () => { openThread(thread.id); openPaneMobile(); },
-        },
-        h("div", { class: "card-body py-3 px-4" },
-          h("div", { class: "truncate text-sm" }, thread.title ?? "(untitled)"),
-          h("div", { class: "flex items-center gap-2 text-xs thread-meta font-mono" },
-            h("span", { class: "text-warning" }, thread.workspace),
-            channelSource(thread.sessionKey),
-            h("span", { class: "ml-auto", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
-          ),
+/** Wrap the query's occurrences in <mark>. Plain case-insensitive matching, not
+ *  the accent-folding the server searches with: folding changes lengths, so its
+ *  offsets don't map back onto the text being displayed. A snippet the server
+ *  found through an accent simply shows unhighlighted instead of highlighting
+ *  the wrong span. */
+function highlight(text, query) {
+  if (!query) return [text];
+  const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig"));
+  return parts.map((part, index) => (index % 2 ? h("mark", {}, part) : part));
+}
+
+function threadCard(thread, older = false) {
+  return h(
+    "button",
+    {
+      "data-thread-id": thread.id,
+      class: `card card-sm w-full bg-base-200 ${older ? "is-older" : ""} ${thread.id === state.activeThread?.id ? "is-active" : ""} ${isThreadLive(thread.id) ? "is-live" : ""}`,
+      // The full reading (channel · group · topic) is one hover away; the card
+      // itself only has room for the part that identifies it.
+      title: thread.conversation,
+      onclick: () => { openThread(thread.id); openPaneMobile(); },
+    },
+    h("div", { class: "card-body py-3 px-4" },
+      // What you recognize a thread by: the forum topic, the group, or the
+      // person in the DM — not the first 80 characters they happened to type.
+      h("div", { class: "flex items-center gap-2 text-sm" },
+        channelSource(thread.sessionKey),
+        h("span", { class: "truncate min-w-0" }, thread.conversationName ?? thread.sessionKey),
+        h("span", { class: "ml-auto shrink-0 text-xs thread-meta font-mono", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
+      ),
+      h("div", { class: "flex items-center gap-2 text-xs thread-meta font-mono" },
+        h("span", { class: "text-warning shrink-0" }, thread.workspace),
+        h("span", { class: "truncate min-w-0" }, thread.title ?? "(untitled)"),
+      ),
+      // Why this thread is in the results: what was said, where it was said.
+      ...(thread.matches ?? []).map((match) =>
+        h("div", { class: "thread-match text-xs" },
+          h("span", { class: "thread-match-role font-mono" }, match.role === "user" ? "you" : "agent"),
+          h("span", {}, highlight(match.snippet, state.query)),
         ),
       ),
     ),
+  );
+}
+
+/** One row per conversation. A conversation outlives its threads — /new and the
+ *  idle window both rotate a fresh one — so the newest generation leads and the
+ *  older ones fold underneath instead of filling the list with cards that all
+ *  say the same topic.
+ *
+ *  Search results are not grouped: every row there is a hit the query earned,
+ *  and folding one under another would hide the answer someone asked for. */
+function groupThreads(threads) {
+  if (state.query) return threads.map((thread) => [thread]);
+  const groups = new Map();
+  for (const thread of threads) {
+    const group = groups.get(thread.sessionKey);
+    if (group) group.push(thread);
+    else groups.set(thread.sessionKey, [thread]);
+  }
+  return [...groups.values()];
+}
+
+const expandedGroups = new Set();
+function toggleGroup(sessionKey) {
+  if (!expandedGroups.delete(sessionKey)) expandedGroups.add(sessionKey);
+  renderThreadList();
+}
+
+function renderThreadList() {
+  const list = document.getElementById("thread-list");
+  if (!list) return;
+  renderThreadFilters();
+  const rows = [];
+  for (const group of groupThreads(state.threads)) {
+    const [head, ...older] = group;
+    // The generation you are reading is why its conversation is on screen —
+    // never leave it folded away behind a click.
+    if (older.some((thread) => thread.id === state.activeThread?.id)) expandedGroups.add(head.sessionKey);
+    rows.push(threadCard(head));
+    if (!older.length) continue;
+    const open = expandedGroups.has(head.sessionKey);
+    rows.push(
+      h("button", { class: "older-toggle text-xs font-mono", onclick: () => toggleGroup(head.sessionKey) },
+        `${open ? "▾" : "▸"} ${older.length} older`),
+    );
+    if (open) rows.push(...older.map((thread) => threadCard(thread, true)));
+  }
+  if (!rows.length) {
+    rows.push(h("div", { class: "text-xs opacity-60 px-2 py-4 text-center" },
+      state.query || state.filterSource || state.filterRunning || state.filterSince ? "Nothing matches." : "No threads yet."));
+  }
+  list.replaceChildren(...rows);
+}
+
+/** Filter chips, rebuilt with the list so a newly seen channel gets one. Each
+ *  chip is a server-side narrowing, not a client-side hide. */
+function renderThreadFilters() {
+  const row = document.getElementById("thread-filters");
+  if (!row) return;
+  const chip = (label, active, onclick, title) =>
+    h("button", { class: `chip ${active ? "is-on" : ""}`, title, onclick }, label);
+  const setSince = (window) => { state.filterSince = state.filterSince === window ? 0 : window; refreshThreads(); };
+  row.replaceChildren(
+    chip("running", state.filterRunning, () => { state.filterRunning = !state.filterRunning; refreshThreads(); }, "only threads with a turn in flight"),
+    ...[...state.sources].sort().map((source) =>
+      chip(source, state.filterSource === source, () => {
+        state.filterSource = state.filterSource === source ? "" : source;
+        refreshThreads();
+      }, `only threads that came in over ${source}`),
+    ),
+    chip("24h", state.filterSince === DAY, () => setSince(DAY), "active in the last 24 hours"),
+    chip("7d", state.filterSince === 7 * DAY, () => setSince(7 * DAY), "active in the last 7 days"),
   );
 }
 
@@ -405,6 +572,9 @@ async function openThread(id) {
   const data = await api.get(`/threads/${id}`).catch(() => null);
   if (!data || seq !== openSeq) return;
   state.activeThread = data.thread;
+  // This read is fresher than the last list read — let it correct the halo (and
+  // the stop button) for the thread being opened.
+  setServerRunning(data.thread.id, data.thread.running);
   state.timeline = data.timeline ?? [];
   state.requests = data.requests ?? [];
   state.pending = state.pending.filter((message) => !landed(message));
@@ -614,9 +784,13 @@ function renderThreadPane() {
     h("div", { class: "flex items-center gap-3 px-4 py-3 border-b border-base-300" },
       backButton(),
       h("strong", { class: "truncate min-w-0" }, thread.title ?? "(untitled)"),
-      h("span", { class: "text-xs opacity-50 font-mono truncate min-w-0" }, thread.sessionKey),
+      // The conversation in words; the raw session key stays one hover away.
+      h("span", { class: "text-xs opacity-50 truncate min-w-0", title: thread.sessionKey }, thread.conversation),
       thread.model ? h("span", { class: "badge badge-ghost badge-sm font-mono" }, thread.model) : null,
-      deleteThreadButton(thread.id),
+      h("div", { class: "ml-auto flex items-center gap-2 shrink-0" },
+        stopTurnButton(thread.id),
+        deleteThreadButton(thread.id),
+      ),
     ),
     messages,
     composer,
@@ -842,10 +1016,35 @@ async function openToolCallModal(name, args, callId) {
 // Deletion is irreversible (history, request logs, and referenced media all
 // go), so it takes two clicks: the first arms the button, the second commits.
 // No native confirm() — a modal dialog would block scripted browsers.
+// Abort the running turn — the dashboard's /stop. Hidden while nothing runs,
+// and shown or hidden by applyThreadLive as the thread starts and stops
+// speaking, so it never needs the whole pane re-rendered to appear.
+function stopTurnButton(id) {
+  return h("button", {
+    id: "stop-turn",
+    class: "btn btn-ghost btn-xs text-warning",
+    hidden: !isThreadLive(id),
+    title: "abort the running turn (and drop input still waiting to start one)",
+    onclick: () => stopTurn(id),
+  }, "⏹ stop");
+}
+
+async function stopTurn(id) {
+  let result;
+  try {
+    result = await api.send("POST", `/threads/${id}/interrupt`, {});
+  } catch (error) {
+    return toast(error.message, true);
+  }
+  // "Stopping" rather than "stopped": the abort has to unwind the turn, which
+  // settles a moment later as the usual turn-done.
+  toast(result.stopped || result.dropped ? "Stopping…" : "Nothing was running.");
+}
+
 function deleteThreadButton(id) {
   let armed;
   const button = h("button", {
-    class: "btn btn-ghost btn-xs ml-auto text-error",
+    class: "btn btn-ghost btn-xs text-error",
     title: "delete this thread and all its files (history, requests, media)",
     onclick: () => {
       if (!armed) {
@@ -919,6 +1118,8 @@ async function viewThreads() {
           ),
           h("button", { class: "btn btn-sm btn-primary", onclick: () => { newThreadDialog(); openPaneMobile(); } }, "New"),
         ),
+        searchBox(),
+        h("div", { class: "flex flex-wrap gap-1", id: "thread-filters" }),
         h("div", { class: "flex flex-col gap-2 overflow-y-auto pr-2 pt-1", id: "thread-list" }),
       ),
       h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),
@@ -927,6 +1128,25 @@ async function viewThreads() {
   renderThreadList();
   renderThreadPane();
   if (state.activeThread) openThread(state.activeThread.id);
+}
+
+// One box, searching titles, conversation names and everything ever said in a
+// transcript. Debounced: a keystroke is not worth a round trip, and the server
+// answers a query by opening session files.
+let searchTimer;
+function searchBox() {
+  return h("input", {
+    class: "input input-sm w-full",
+    type: "search",
+    id: "thread-search",
+    placeholder: "Search threads…",
+    value: state.query,
+    oninput: (event) => {
+      state.query = event.target.value.trim();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(refreshThreads, 250);
+    },
+  });
 }
 
 function newThreadDialog() {
@@ -1744,3 +1964,4 @@ matchMedia("(max-width: 768px)").addEventListener("change", (e) => { if (!e.matc
 initStringLights();
 connectWs();
 render(); // fetches /overview once and paints the pairing badge from it
+

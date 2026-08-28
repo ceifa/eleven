@@ -89,13 +89,16 @@ export interface BotHandle {
   lastPollAt: number;
   /** Re-prompt a conversation (by session key) that a restart interrupted. */
   wake(sessionKey: string): Promise<void>;
+  /** Drop a conversation's buffered input before it becomes a turn (a stop
+   *  issued from outside Telegram — the dashboard — needs this too). */
+  discardBurst(sessionKey: string): boolean;
   stop(): Promise<void>;
 }
 
 export function startTelegramBot(name: string, token: string, deps: BotDeps): BotHandle {
   const log = logger(`telegram/${name}`);
   const bot = new Bot(token);
-  const handle: BotHandle = { bot, name, lastPollAt: Date.now(), wake, stop };
+  const handle: BotHandle = { bot, name, lastPollAt: Date.now(), wake, discardBurst, stop };
 
   const sessionKeyFor = (chatId: number, topic?: number) =>
     `telegram:${name}:${chatId}${topic !== undefined ? `:topic:${topic}` : ""}`;

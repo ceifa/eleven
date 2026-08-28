@@ -6,6 +6,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { listWorkspaceSkills, Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
+import { conversationIdentity } from "../src/threads/conversation.ts";
 import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
 import { readJsonFile } from "../src/util.ts";
@@ -214,6 +215,60 @@ test("Telegram delivery resolves bot, chat and forum topic from a session key", 
   assert.deepEqual(sent[0].rich_message, { markdown: "**hello**" });
   await assert.rejects(() => telegram.sendToSession("dashboard:agent:123", "hello"), /no Telegram delivery target/);
   await assert.rejects(() => telegram.sendToSession("telegram:missing:123", "hello"), /not running/);
+});
+
+test("a conversation is named by its topic, then its group, then the person", () => {
+  const channels = [
+    {
+      type: "telegram" as const,
+      name: "main",
+      token: "t",
+      users: { "42": { name: "Gabriel" }, "43": { username: "ceifa" } },
+      groups: {
+        "-100": { title: "Sesh", topics: { "7": { title: "eleven" } } },
+        "-200": {},
+      },
+    },
+  ];
+
+  assert.deepEqual(conversationIdentity("telegram:main:-100:topic:7", channels), {
+    name: "eleven",
+    context: "Sesh",
+    label: "Telegram · Sesh · eleven",
+  });
+  assert.deepEqual(conversationIdentity("telegram:main:-100", channels), {
+    name: "Sesh",
+    context: "Telegram",
+    label: "Telegram · Sesh",
+  });
+  assert.equal(conversationIdentity("telegram:main:42", channels).name, "Gabriel");
+  assert.equal(conversationIdentity("telegram:main:43", channels).name, "@ceifa");
+  assert.equal(conversationIdentity("dashboard:agent:uuid", channels).name, "Dashboard");
+  assert.equal(conversationIdentity("cli:agent:uuid", channels).name, "CLI");
+
+  // Nothing is invented when the registry hasn't learned a name yet: the raw id
+  // still identifies the chat, "unknown" would not.
+  assert.equal(conversationIdentity("telegram:main:-100:topic:9", channels).name, "topic 9");
+  assert.equal(conversationIdentity("telegram:main:-200", channels).name, "-200");
+  assert.equal(conversationIdentity("telegram:main:44", channels).name, "44");
+  assert.equal(conversationIdentity("telegram:gone:-100:topic:7", channels).name, "topic 7");
+});
+
+test("stopping a thread from outside Telegram also drops its buffered input", () => {
+  const config = { on() {}, channels: () => [] };
+  const telegram = new TelegramChannel(config as never, {} as never);
+  const discarded: string[] = [];
+  (telegram as unknown as { bots: Map<string, unknown> }).bots.set("main", {
+    token: "test",
+    handle: { discardBurst: (sessionKey: string) => (discarded.push(sessionKey), true) },
+  });
+
+  assert.equal(telegram.discardPending("telegram:main:-123:topic:45"), true);
+  assert.deepEqual(discarded, ["telegram:main:-123:topic:45"]);
+  // A thread with no Telegram bot behind it has nothing buffered to drop.
+  assert.equal(telegram.discardPending("dashboard:agent:123"), false);
+  assert.equal(telegram.discardPending("telegram:missing:1"), false);
+  assert.equal(discarded.length, 1);
 });
 
 // --- silent-failure regressions: a read that fails is not a read that found nothing ---

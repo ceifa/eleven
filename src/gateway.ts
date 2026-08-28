@@ -253,9 +253,16 @@ export class Gateway extends EventEmitter {
     return true;
   }
 
+  /** Abort the in-flight turn of a conversation (the /new and /stop commands). */
   async interrupt(sessionKey: string): Promise<boolean> {
     const thread = this.threads.current(sessionKey);
-    return thread ? this.runner.interrupt(thread.id) : false;
+    return thread ? this.interruptThread(thread.id) : false;
+  }
+
+  /** Abort the in-flight turn of one specific thread. The dashboard stops the
+   *  thread on screen, which is not necessarily its conversation's current one. */
+  async interruptThread(id: string): Promise<boolean> {
+    return this.runner.interrupt(id);
   }
 
   isThreadRunning(id: string): boolean {

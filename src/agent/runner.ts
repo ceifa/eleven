@@ -25,7 +25,13 @@ import {
   unregisterClaudeSession,
 } from "./claude-code.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
-import { TOOL_CALLS_ENTRY_TYPE, type RecordedToolCall, type ToolCallsEntryData } from "../threads/reader.ts";
+import {
+  TOOL_CALLS_ENTRY_TYPE,
+  TURN_ERROR_ENTRY_TYPE,
+  type RecordedToolCall,
+  type ToolCallsEntryData,
+  type TurnErrorEntryData,
+} from "../threads/reader.ts";
 import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
@@ -164,6 +170,9 @@ export interface RunnerHooks {
   /** Fired when that turn settles — after its channel delivery, still inside
    * the turn lane, so begin/end pairs of consecutive turns never overlap. */
   onTurnEnd?: (threadId: string) => void;
+  /** Fired when a turn gives up, once the failure is in the transcript, with
+   * the file it was written to. */
+  onTurnFailed?: (threadId: string, sessionFile: string | undefined, message: string) => void;
 }
 
 /**
@@ -501,6 +510,27 @@ export class Runner {
       }
       throw lastError ?? new Error("all models failed");
     } catch (error) {
+      // pi persists what a provider produced, and a turn that gave up produced
+      // nothing — so without this the transcript reads as if the message was
+      // simply ignored. Record the failure where it happened, then tell the
+      // gateway which file it landed in: a first turn that never got a reply is
+      // the one case where the thread doesn't know its session file yet.
+      const message = error instanceof Error ? error.message : String(error);
+      let sessionFile: string | undefined;
+      try {
+        sessionManager.appendCustomEntry(TURN_ERROR_ENTRY_TYPE, { message } satisfies TurnErrorEntryData);
+        // pi holds a session in memory until its first assistant message, so a
+        // first turn that failed before any reply has no file at all — and
+        // writing one here would collide with pi's own exclusive first flush.
+        // getSessionFile() still hands back the path it *would* use, so check
+        // the disk: pinning a thread to a file that isn't there breaks the next
+        // turn's resume. In that case the toast is the only report there is.
+        const file = sessionManager.getSessionFile();
+        if (file && existsSync(file)) sessionFile = file;
+      } catch (writeError) {
+        log.warn(`failed to record the failed turn of ${threadId}: ${writeError}`);
+      }
+      this.hooks.onTurnFailed?.(threadId, sessionFile, message);
       // A failed turn may leave the session in a dubious state — rebuild next time.
       this.dropSession(threadId);
       throw error;

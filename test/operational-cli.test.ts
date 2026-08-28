@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { listWorkspaceSkills, Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
-import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE } from "../src/threads/reader.ts";
+import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE, TURN_ERROR_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
 import { readJsonFile } from "../src/util.ts";
 
@@ -182,6 +182,47 @@ test("the transcript renders tool calls as their own rows, in the order they hap
     const again = await readThreadTimeline(file);
     assert.deepEqual(again.map((item) => item.kind), running.map((item) => item.kind));
     assert.equal(again[1].kind === "tool-calls" && again[1].calls.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a turn that failed stays in the transcript, where it failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eleven-turn-error-"));
+  try {
+    const manager = SessionManager.create(dir, dir);
+    manager.appendMessage({ role: "user", content: "how did it go?", timestamp: Date.now() });
+    manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "fine" }],
+      api: "claude-code",
+      provider: "claude-code",
+      model: "fable",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    manager.appendMessage({ role: "user", content: "summarize the deploy", timestamp: Date.now() });
+    manager.appendCustomEntry(TURN_ERROR_ENTRY_TYPE, { message: "provider error on openai/gpt-5.5: 429 rate limited" });
+    const file = manager.getSessionFile()!;
+
+    const timeline = await readThreadTimeline(file);
+    assert.deepEqual(timeline.map((item) => item.kind), ["message", "message", "message", "error"]);
+    const failure = timeline.at(-1)!;
+    assert.equal(failure.kind, "error");
+    if (failure.kind !== "error") return;
+    assert.equal(failure.text, "provider error on openai/gpt-5.5: 429 rate limited");
+    assert.ok(failure.timestamp);
+
+    // The next turn goes on top of it: a failure ends a turn, not a thread.
+    manager.appendMessage({ role: "user", content: "try again", timestamp: Date.now() });
+    const retried = await readThreadTimeline(file);
+    assert.deepEqual(retried.map((item) => item.kind), ["message", "message", "message", "error", "message"]);
+
+    // An entry with no message is a record of nothing — it must not render as
+    // an empty red row.
+    manager.appendCustomEntry(TURN_ERROR_ENTRY_TYPE, {});
+    assert.deepEqual((await readThreadTimeline(file)).map((item) => item.kind), retried.map((item) => item.kind));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

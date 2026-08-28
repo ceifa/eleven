@@ -104,6 +104,11 @@ export class Gateway extends EventEmitter {
       this.pending.end(threadId);
       this.liveTurns.delete(threadId);
     },
+    // The failure is already in the transcript; pin the thread to the file it
+    // went into, so a first turn that never got a reply still has one to read.
+    onTurnFailed: (threadId, sessionFile) => {
+      if (sessionFile) this.threads.update(threadId, { sessionFile, lastActivityAt: Date.now() });
+    },
   });
 
   private config: ConfigStore;

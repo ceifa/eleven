@@ -124,6 +124,14 @@ export class TelegramChannel {
     return { bot: channel, chatId, topic };
   }
 
+  /** Drop input a conversation has buffered but not yet turned into a turn.
+   * Part of stopping from outside Telegram: aborting the running turn alone
+   * would leave a pending burst free to start the next one. */
+  discardPending(sessionKey: string): boolean {
+    const owner = [...this.bots].find(([name]) => sessionKey.startsWith(`telegram:${name}:`));
+    return owner ? owner[1].handle.discardBurst(sessionKey) : false;
+  }
+
   /** Re-prompt conversations whose turn was interrupted by a restart, routing
    * each to the bot that owns its session key. Unknown/removed bots are skipped. */
   wakeInterrupted(turns: { sessionKey: string }[]) {

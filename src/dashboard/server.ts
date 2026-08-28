@@ -12,6 +12,8 @@ import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
+import { conversationIdentity } from "../threads/conversation.ts";
+import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
 import { logger } from "../log.ts";
 
@@ -34,6 +36,13 @@ const MAX_OUTBOUND_MESSAGE_CHARS = 32_000;
 // How much of a message the activity broadcast carries. Enough to read the
 // bubble; the transcript refetch that follows replaces it with the real thing.
 const ACTIVITY_PREVIEW_CHARS = 4_000;
+// Search bounds. A query answers with the newest matching threads and stops
+// there; snippets are capped per thread so the response stays a few kilobytes
+// however long the conversations are.
+const SEARCH_THREAD_LIMIT = 40;
+const SEARCH_SNIPPETS = 3;
+const SEARCH_SCAN_LIMIT = 400;
+const SEARCH_BATCH = 8;
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -142,24 +151,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return matches[0];
   }
 
-  function conversationLabel(sessionKey: string): string {
-    const target = parseTelegramSessionKey(sessionKey);
-    if (!target) {
-      const source = sessionKey.split(":", 1)[0];
-      return source === "dashboard" ? "Dashboard" : source === "cli" ? "CLI" : source;
-    }
-    const route = config.channels().find(({ channel }) => channel.name === target.channel);
-    const chatKey = String(target.chatId);
-    if (target.chatId > 0) {
-      const user = route?.channel.users?.[chatKey];
-      const identity = user?.name || (user?.username ? `@${user.username}` : chatKey);
-      return `Telegram DM · ${identity}`;
-    }
-    const group = route?.channel.groups?.[chatKey];
-    const groupName = group?.title || chatKey;
-    const topic = target.topic !== undefined ? group?.topics?.[String(target.topic)]?.title || `topic ${target.topic}` : undefined;
-    return `Telegram · ${groupName}${topic ? ` · ${topic}` : ""}`;
-  }
+  const identityOf = (sessionKey: string) => conversationIdentity(sessionKey, config.channels().map(({ channel }) => channel));
 
   /** The group/topic model scopes a Telegram conversation would run with. */
   function channelModelScopes(sessionKey: string) {
@@ -173,17 +165,22 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   function threadView(thread: ReturnType<typeof gateway.threads.list>[number]) {
     const current = gateway.threads.isCurrent(thread.id);
     const running = gateway.isThreadRunning(thread.id);
+    const identity = identityOf(thread.sessionKey);
     return {
       ...thread,
       current,
       running,
       state: running ? "running" : current ? "current" : "old",
       source: thread.sessionKey.split(":", 1)[0],
-      conversation: conversationLabel(thread.sessionKey),
+      conversation: identity.label,
+      // What the list puts on the card: the topic, group or person, which is
+      // how you actually recognize a thread — the label is the tooltip.
+      conversationName: identity.name,
+      conversationContext: identity.context,
     };
   }
 
-  function listThreadViews(url: URL) {
+  async function listThreadViews(url: URL) {
     const workspace = url.searchParams.get("workspace") ?? undefined;
     const channel = url.searchParams.get("channel");
     const currentOnly = url.searchParams.get("current") === "1";
@@ -200,7 +197,38 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     if (currentOnly) threads = threads.filter((thread) => thread.current);
     if (runningOnly) threads = threads.filter((thread) => thread.running);
     if (since !== undefined) threads = threads.filter((thread) => thread.lastActivityAt >= since);
+    const query = url.searchParams.get("q")?.trim();
+    if (query) return searchThreads(threads, query, limit ?? SEARCH_THREAD_LIMIT);
     return limit ? threads.slice(0, limit) : threads;
+  }
+
+  /**
+   * Threads whose title, conversation or transcript contains the query, newest
+   * first, each carrying the snippets that matched.
+   *
+   * The scan stops the moment `limit` threads have matched. Since the list
+   * arrives ordered by last activity, that answer is exactly the top of the
+   * result the user is looking at, and the rest of the archive is never opened —
+   * which is what keeps a search over hundreds of sessions cheap.
+   */
+  async function searchThreads(threads: ReturnType<typeof threadView>[], query: string, limit: number) {
+    const matcher = queryMatcher(query);
+    if (!matcher) return threads.slice(0, limit);
+    const found: (ReturnType<typeof threadView> & { matches: TranscriptMatch[] })[] = [];
+    const pool = threads.slice(0, SEARCH_SCAN_LIMIT);
+    for (let index = 0; index < pool.length && found.length < limit; index += SEARCH_BATCH) {
+      // A batch at a time: local files answer in parallel, but overshooting the
+      // limit by a few reads is far cheaper than scanning the whole archive.
+      const batch = await Promise.all(
+        pool.slice(index, index + SEARCH_BATCH).map(async (thread) => {
+          const named = matcher.test(`${thread.title ?? ""}\n${thread.conversation}\n${thread.workspace}`);
+          const matches = thread.sessionFile ? await searchTranscript(thread.sessionFile, matcher, SEARCH_SNIPPETS) : [];
+          return matches.length || named ? { ...thread, matches } : undefined;
+        }),
+      );
+      for (const thread of batch) if (thread) found.push(thread);
+    }
+    return found.slice(0, limit);
   }
 
   async function workspaceView(name: string, includeSkills: boolean) {
@@ -339,7 +367,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, redactTokens(config.raw));
       }
       if (method === "GET" && path === "/threads") {
-        return send(200, listThreadViews(url));
+        return send(200, await listThreadViews(url));
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
@@ -422,6 +450,15 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         }
         void runLocalTurn(sessionKey, text, source).catch(() => {});
         return send(201, thread);
+      }
+      // The dashboard's stop button — Telegram's /stop for the thread you are
+      // looking at. Buffered input goes with it: a burst still waiting out its
+      // quiet window would otherwise start a turn a second after the stop.
+      if (method === "POST" && path.match(/^\/threads\/[^/]+\/interrupt$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        const dropped = gateway.threads.isCurrent(thread.id) && telegram.discardPending(thread.sessionKey);
+        const stopped = await gateway.interruptThread(thread.id);
+        return send(200, { stopped, dropped });
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);

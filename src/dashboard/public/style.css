@@ -237,13 +237,60 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   button.card.is-live { animation: none;
     box-shadow: 0 0 8px -3px color-mix(in oklab, var(--color-warning) 45%, transparent), 0 0 0 1px color-mix(in oklab, var(--color-warning) 60%, transparent); }
 }
-/* channel origin glyph in the thread-list meta row — sized down to sit inline
-   with the mono metadata; inherits the row's dimming. */
-/* Dim the thread-list meta via TEXT color, not row opacity: the channel glyph's
-   fills are hardcoded, so alpha-dimming the row would just muddy it. Colour
-   dimming leaves the SVG at full strength while the mono text stays muted. */
+/* Dim the thread-list meta via TEXT color, not row opacity: a glyph with
+   hardcoded fills sitting in the row would only muddy under alpha dimming. */
 .thread-meta { color: color-mix(in oklab, var(--color-base-content) 58%, transparent); }
+/* Channel origin glyph, leading the conversation name on a thread card — sized
+   down to sit inline with the name it introduces. */
 .channel-glyph { display: inline-flex; align-items: center; opacity: 0.8; }
+
+/* ---------- thread list: groups, search hits, filters ---------- */
+
+/* A previous generation of the same conversation, folded under its current
+   one. Indented and dimmed: still readable, visibly subordinate. */
+.card.is-older { margin-left: 0.9rem; opacity: 0.72; }
+.card.is-older:hover { opacity: 1; }
+/* The disclosure between a conversation and its older threads. Aligned with
+   the indent it opens, so the fold reads as a hierarchy and not as a stray row. */
+.older-toggle {
+  align-self: flex-start;
+  margin-left: 0.9rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-field);
+  color: color-mix(in oklab, var(--color-base-content) 52%, transparent);
+  background: none;
+}
+.older-toggle:hover { color: var(--color-base-content); background: var(--color-base-200); }
+/* A line of transcript that matched the search, under the card it belongs to. */
+.thread-match {
+  display: flex;
+  gap: 0.4rem;
+  line-height: 1.35;
+  color: color-mix(in oklab, var(--color-base-content) 66%, transparent);
+}
+.thread-match-role { flex-shrink: 0; opacity: 0.6; }
+.thread-match mark {
+  background: color-mix(in oklab, var(--color-warning) 30%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+/* Filter chips: a toggle, not a button — flat until it is doing something. */
+.chip {
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.28rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-base-300);
+  color: color-mix(in oklab, var(--color-base-content) 62%, transparent);
+  background: none;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+.chip:hover { color: var(--color-base-content); border-color: color-mix(in oklab, var(--color-base-content) 30%, transparent); }
+.chip.is-on {
+  color: var(--color-warning);
+  border-color: color-mix(in oklab, var(--color-warning) 55%, transparent);
+  background: color-mix(in oklab, var(--color-warning) 12%, transparent);
+}
 /* Integer px (1rem = 16px) keeps the small icon's edges crisp. */
 .channel-glyph svg { display: block; width: 1rem; height: 1rem; }
 

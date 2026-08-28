@@ -646,6 +646,25 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 }
 .toolcall-result.is-error { color: var(--color-error); }
 
+/* A turn that failed, sitting in the transcript where it failed. Deliberately
+   not a chat bubble: nobody said this — it is the gateway reporting that the
+   conversation stopped here. */
+.turn-error {
+  display: flex;
+  gap: 0.5rem;
+  max-width: 80%;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-box);
+  border: 1px solid color-mix(in oklab, var(--color-error) 40%, transparent);
+  background: color-mix(in oklab, var(--color-error) 10%, transparent);
+  color: color-mix(in oklab, var(--color-error) 75%, var(--color-base-content));
+  font-size: 0.8rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.turn-error-mark { flex: 0 0 auto; }
+
 /* ---------- JSON viewer ---------- */
 
 .json-raw { white-space: pre; line-height: 1.55; }

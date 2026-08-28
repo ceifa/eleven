@@ -644,6 +644,15 @@ function toolCallRow({ name, summary, args, id }) {
 /** A run of consecutive tool calls, as its own transcript row. */
 const toolCallsBlock = (calls) => h("div", { class: "tool-calls" }, calls.map(toolCallRow));
 
+/** A turn that gave up, in the place it gave up. The toast that fires at the
+ *  same moment is the notification; this is the record — it is still here
+ *  tomorrow, which is what makes "it never answered me" a debuggable claim. */
+const turnErrorRow = (text) =>
+  h("div", { class: "turn-error" },
+    h("span", { class: "turn-error-mark" }, "⚠"),
+    h("span", { class: "min-w-0" }, text),
+  );
+
 function messageBubble(message, streaming = false) {
   const isUser = message.role === "user";
   return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}` },
@@ -683,6 +692,7 @@ function durableRows() {
     // sort to the top of the transcript.
     at = Date.parse(item.timestamp) || at;
     if (item.kind === "message") rows.push({ at, tie: 0, node: () => messageBubble(item) });
+    else if (item.kind === "error") rows.push({ at, tie: 0, node: () => turnErrorRow(item.text) });
     else {
       const calls = item.calls.filter((call) => !liveIds.has(call.id));
       if (calls.length) rows.push({ at, tie: 0, node: () => toolCallsBlock(calls) });

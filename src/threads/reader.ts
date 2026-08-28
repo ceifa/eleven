@@ -11,6 +11,19 @@ import { contentText, keyedLane, lruTouch, readFileSlice, summarizeToolArgs } fr
  *  won't re-execute these. */
 export const TOOL_CALLS_ENTRY_TYPE = "eleven:tool-calls";
 
+/** Custom session entry recording a turn that ended in failure. Pi persists
+ *  what a provider produced, so a turn that produced nothing leaves no trace at
+ *  all — and a failure nobody can see after a reload is a failure that gets
+ *  reported as "it just didn't answer". The Runner writes one of these when a
+ *  turn gives up, at the point in the transcript where it gave up. Display-only,
+ *  like the tool-call entries: pi ignores plain custom entries when it builds
+ *  LLM context, so the model is never told about its own past failures. */
+export const TURN_ERROR_ENTRY_TYPE = "eleven:turn-error";
+
+export interface TurnErrorEntryData {
+  message: string;
+}
+
 export interface RecordedToolCall {
   id: string;
   name: string;
@@ -40,7 +53,8 @@ export interface ToolCallView {
  */
 export type ThreadItem =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestamp?: string }
-  | { kind: "tool-calls"; calls: ToolCallView[]; timestamp?: string };
+  | { kind: "tool-calls"; calls: ToolCallView[]; timestamp?: string }
+  | { kind: "error"; text: string; timestamp?: string };
 
 /** A tool call's recorded output, fetched on demand (results can be large, so
  *  they're kept out of the thread payload and its turn-done refreshes). */
@@ -58,6 +72,7 @@ interface Node {
   timestamp?: string;
   message?: { role: "user" | "assistant"; text: string };
   calls?: ToolCallView[];
+  error?: string;
   result?: ToolResult & { toolCallId: string };
 }
 
@@ -123,6 +138,7 @@ async function ensureParsed(sessionFile: string): Promise<{ nodes: Node[]; byId:
         timestamp: entry.timestamp,
         ...renderMessage(entry),
         ...(renderRecordedToolCalls(entry) ?? {}),
+        ...(renderTurnError(entry) ?? {}),
         result: renderResult(entry),
       };
       nodes.push(node);
@@ -144,7 +160,7 @@ async function buildTimeline(sessionFile: string): Promise<ThreadItem[]> {
   const branch: Node[] = [];
   let hops = nodes.length;
   for (let node = nodes.at(-1); node && hops-- > 0; node = node.parentId ? byId.get(node.parentId) : undefined) {
-    if (node.message || node.calls) branch.push(node);
+    if (node.message || node.calls || node.error) branch.push(node);
   }
   branch.reverse();
 
@@ -162,6 +178,7 @@ async function buildTimeline(sessionFile: string): Promise<ThreadItem[]> {
   for (const node of branch) {
     if (node.message?.text) items.push({ kind: "message", ...node.message, timestamp: node.timestamp });
     if (node.calls?.length) pushCalls(node.calls, node.timestamp);
+    if (node.error) items.push({ kind: "error", text: node.error, timestamp: node.timestamp });
   }
   return items;
 }
@@ -187,6 +204,12 @@ function renderRecordedToolCalls(entry: SessionEntry): Pick<Node, "calls"> | und
   const calls = ((entry as CustomEntry<ToolCallsEntryData>).data?.calls ?? []).filter((call) => call?.id && call.name);
   if (!calls.length) return undefined;
   return { calls: calls.map((call) => ({ id: call.id, name: call.name, summary: summarizeToolArgs(call.args ?? {}, 160), args: call.args })) };
+}
+
+function renderTurnError(entry: SessionEntry): Pick<Node, "error"> | undefined {
+  if (entry.type !== "custom" || entry.customType !== TURN_ERROR_ENTRY_TYPE) return undefined;
+  const message = (entry as CustomEntry<TurnErrorEntryData>).data?.message;
+  return message ? { error: message } : undefined;
 }
 
 // toolResult entries aren't shown as their own messages — their output is

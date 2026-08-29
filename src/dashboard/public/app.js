@@ -17,10 +17,7 @@ const state = {
   query: "",
   /** Channel type ("telegram", "dashboard", …), "" for all. */
   filterSource: "",
-  filterRunning: false,
-  /** Age window in ms, 0 for all time. */
-  filterSince: 0,
-  /** Channel types seen this session — what the source chips offer. */
+  /** Channel types seen this session — what the channel filter offers. */
   sources: new Set(),
   overview: null,
   config: null,
@@ -377,8 +374,6 @@ async function updatePairingBadge() {
 
 const onThreadsView = () => location.hash.startsWith("#/threads") || location.hash === "" || location.hash === "#/";
 
-const DAY = 24 * 60 * 60 * 1000;
-
 /** Every narrowing the list is showing, as the API's own query string — the
  *  server filters and searches, so a filtered view costs a smaller response
  *  rather than a full one the browser throws most of away. */
@@ -386,8 +381,6 @@ function threadsQuery() {
   const params = new URLSearchParams();
   if (state.workspaceFilter) params.set("workspace", state.workspaceFilter);
   if (state.filterSource) params.set("channel", state.filterSource);
-  if (state.filterRunning) params.set("running", "1");
-  if (state.filterSince) params.set("since", String(Date.now() - state.filterSince));
   if (state.query) params.set("q", state.query);
   const query = params.toString();
   return query ? `?${query}` : "";
@@ -500,7 +493,7 @@ function toggleGroup(sessionKey) {
 function renderThreadList() {
   const list = document.getElementById("thread-list");
   if (!list) return;
-  renderThreadFilters();
+  renderChannelFilter();
   const rows = [];
   for (const group of groupThreads(state.threads)) {
     const [head, ...older] = group;
@@ -518,29 +511,39 @@ function renderThreadList() {
   }
   if (!rows.length) {
     rows.push(h("div", { class: "text-xs opacity-60 px-2 py-4 text-center" },
-      state.query || state.filterSource || state.filterRunning || state.filterSince ? "Nothing matches." : "No threads yet."));
+      state.query || state.filterSource || state.workspaceFilter ? "Nothing matches." : "No threads yet."));
   }
   list.replaceChildren(...rows);
 }
 
-/** Filter chips, rebuilt with the list so a newly seen channel gets one. Each
- *  chip is a server-side narrowing, not a client-side hide. */
-function renderThreadFilters() {
-  const row = document.getElementById("thread-filters");
-  if (!row) return;
-  const chip = (label, active, onclick, title) =>
-    h("button", { class: `chip ${active ? "is-on" : ""}`, title, onclick }, label);
-  const setSince = (window) => { state.filterSince = state.filterSince === window ? 0 : window; refreshThreads(); };
-  row.replaceChildren(
-    chip("running", state.filterRunning, () => { state.filterRunning = !state.filterRunning; refreshThreads(); }, "only threads with a turn in flight"),
-    ...[...state.sources].sort().map((source) =>
-      chip(source, state.filterSource === source, () => {
-        state.filterSource = state.filterSource === source ? "" : source;
-        refreshThreads();
-      }, `only threads that came in over ${source}`),
-    ),
-    chip("24h", state.filterSince === DAY, () => setSince(DAY), "active in the last 24 hours"),
-    chip("7d", state.filterSince === 7 * DAY, () => setSince(7 * DAY), "active in the last 7 days"),
+/**
+ * The channel filter rides on the search row rather than taking one of its own:
+ * a second select stacked under the workspace one would spend a chunk of a
+ * narrow column on something you change once a week. It only appears when there
+ * is more than one kind of channel to choose between — with a single bot and no
+ * dashboard threads, the control would be a dropdown with one real option.
+ */
+let renderedSources = "";
+function renderChannelFilter() {
+  const slot = document.getElementById("channel-filter");
+  if (!slot) return;
+  const sources = [...state.sources].sort();
+  const signature = sources.join(",");
+  if (signature === renderedSources) return; // never rebuild a select under an open menu
+  renderedSources = signature;
+  slot.replaceChildren(
+    ...(sources.length > 1
+      ? [
+          h("select", {
+            class: "select select-sm channel-select",
+            title: "filter by channel",
+            onchange: (event) => { state.filterSource = event.target.value; refreshThreads(); },
+          },
+            h("option", { value: "" }, "all channels"),
+            sources.map((source) => h("option", { value: source, selected: state.filterSource === source }, source)),
+          ),
+        ]
+      : []),
   );
 }
 
@@ -1116,6 +1119,7 @@ async function sendMessage(event) {
 
 async function viewThreads() {
   await refreshThreads();
+  renderedSources = ""; // the markup below is a fresh DOM — the filter has to be built into it again
   const workspaces = Object.keys(state.overview?.workspaces ?? {});
   view.replaceChildren(
     pageTitle("Threads"),
@@ -1128,8 +1132,7 @@ async function viewThreads() {
           ),
           h("button", { class: "btn btn-sm btn-primary", onclick: () => { newThreadDialog(); openPaneMobile(); } }, "New"),
         ),
-        searchBox(),
-        h("div", { class: "flex flex-wrap gap-1", id: "thread-filters" }),
+        h("div", { class: "flex gap-2" }, searchBox(), h("div", { id: "channel-filter" })),
         h("div", { class: "flex flex-col gap-2 overflow-y-auto pr-2 pt-1", id: "thread-list" }),
       ),
       h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),

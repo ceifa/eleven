@@ -274,22 +274,16 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   color: inherit;
   border-radius: 2px;
 }
-/* Filter chips: a toggle, not a button — flat until it is doing something. */
-.chip {
-  font-size: 0.72rem;
-  line-height: 1;
-  padding: 0.28rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid var(--color-base-300);
-  color: color-mix(in oklab, var(--color-base-content) 62%, transparent);
-  background: none;
-  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
-}
-.chip:hover { color: var(--color-base-content); border-color: color-mix(in oklab, var(--color-base-content) 30%, transparent); }
-.chip.is-on {
-  color: var(--color-warning);
-  border-color: color-mix(in oklab, var(--color-warning) 55%, transparent);
-  background: color-mix(in oklab, var(--color-warning) 12%, transparent);
+/* The channel filter sits beside the search box, so it takes only the width its
+   longest option needs and leaves the rest of the row to the query. The wrapper
+   is display:contents — it exists to be replaced by script, not to lay out. */
+#channel-filter { display: contents; }
+.channel-select {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 45%;
+  font-size: 0.78rem;
+  color: color-mix(in oklab, var(--color-base-content) 75%, transparent);
 }
 /* Integer px (1rem = 16px) keeps the small icon's edges crisp. */
 .channel-glyph svg { display: block; width: 1rem; height: 1rem; }

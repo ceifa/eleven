@@ -8,6 +8,8 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='8.2' y='13' font-size='14' font-family='Georgia,serif' font-weight='bold' fill='none' stroke='%23e7000b' stroke-width='0.9' text-anchor='middle'>E</text></svg>" />
 </head>
 <body class="h-screen flex bg-base-100 text-base-content">
+  <!-- the route loading bar: dark until app.js decides a load is slow enough to be worth saying out loud -->
+  <div class="route-progress" aria-hidden="true"></div>
   <header class="topbar">
     <button id="nav-toggle" class="nav-toggle btn btn-ghost" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>

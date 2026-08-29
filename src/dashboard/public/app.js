@@ -63,6 +63,7 @@ const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, dashboard: DASHBOARD_ICON, cli:
 
 const SEARCH_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="m10.3 10.3 3.2 3.2"/></svg>`;
 const PLUS_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>`;
+const FILTER_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>`;
 
 // A thread's origin — the sessionKey's prefix is the channel type
 // (telegram:…, dashboard:…). The glyph sits next to the conversation name, so
@@ -520,18 +521,51 @@ function renderThreadList() {
 }
 
 /**
- * Workspace and channel filters, on one quiet line under the search box. Each
- * appears only when it has more than one thing to choose between: with a single
- * workspace and a single bot, both would be dropdowns with one real option, and
- * an empty filter line collapses (`.threads-filters:empty`) rather than spending
- * a row of a narrow column on nothing.
+ * Workspace and channel filters. They are not part of the resting page: the head
+ * of the column is one search row, and the filter line only unfolds under it
+ * when the reader asks for it with the toolbar glyph — or when a filter is on,
+ * because a list that is quietly hiding threads has to say so.
+ *
+ * Each select appears only when it has more than one thing to choose between,
+ * and the glyph itself stays hidden while there is nothing worth filtering: with
+ * a single workspace and a single bot, both would be dropdowns with one real
+ * option.
  */
 let renderedFilters = "";
+let filtersOpen = false;
+
+function toggleFilters() {
+  // The line refuses to fold away while a filter is on, so there the glyph takes
+  // its other meaning — clear the filters — instead of becoming a dead click.
+  if (state.workspaceFilter || state.filterSource) {
+    state.workspaceFilter = "";
+    state.filterSource = "";
+    filtersOpen = false;
+    for (const select of document.querySelectorAll("#thread-filters .bare-select")) select.value = "";
+    refreshThreads(); // repaints the list, and with it the filter line
+    return;
+  }
+  filtersOpen = !filtersOpen;
+  renderThreadFilters();
+  if (filtersOpen) document.querySelector("#thread-filters .bare-select")?.focus();
+}
+
 function renderThreadFilters() {
   const slot = document.getElementById("thread-filters");
   if (!slot) return;
   const sources = [...state.sources].sort();
   const workspaces = Object.keys(state.overview?.workspaces ?? {});
+  const offered = (workspaces.length > 1 ? 1 : 0) + (sources.length > 1 ? 1 : 0);
+  const active = Boolean(state.workspaceFilter || state.filterSource);
+  const toggle = document.getElementById("filter-toggle");
+  if (toggle) {
+    toggle.hidden = !offered;
+    toggle.classList.toggle("is-active", active);
+    toggle.title = active ? "clear filters" : "filters";
+    toggle.setAttribute("aria-label", active ? "Clear filters" : "Filters");
+    toggle.setAttribute("aria-expanded", String(Boolean(offered) && (filtersOpen || active)));
+  }
+  slot.hidden = !offered || !(filtersOpen || active);
   const signature = `${workspaces.join(",")}|${sources.join(",")}`;
   if (signature === renderedFilters) return; // never rebuild a select under an open menu
   renderedFilters = signature;
@@ -575,7 +609,7 @@ async function openThread(id) {
     state.live = [];
     state.pending = [];
   }
-  const data = await api.get(`/threads/${id}`).catch(() => null);
+  const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
   if (!data || seq !== openSeq) return;
   state.activeThread = data.thread;
   // This read is fresher than the last list read — let it correct the halo (and
@@ -1132,14 +1166,25 @@ async function viewThreads() {
         h("div", { class: "threads-toolbar" },
           searchBox(),
           h("button", {
-            class: "toolbar-add",
+            class: "toolbar-icon",
+            id: "filter-toggle",
+            title: "filters",
+            "aria-label": "Filters",
+            "aria-controls": "thread-filters",
+            "aria-expanded": "false",
+            hidden: true, // renderThreadFilters decides whether there is anything to filter
+            onclick: toggleFilters,
+            html: FILTER_ICON,
+          }),
+          h("button", {
+            class: "toolbar-icon",
             title: "new thread",
             "aria-label": "New thread",
             onclick: () => { newThreadDialog(); openPaneMobile(); },
             html: PLUS_ICON,
           }),
         ),
-        h("div", { class: "threads-filters", id: "thread-filters" }),
+        h("div", { class: "threads-filters", id: "thread-filters", hidden: true }),
         h("div", { class: "flex flex-col gap-2 overflow-y-auto pr-2 pt-1", id: "thread-list" }),
       ),
       h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),
@@ -1933,6 +1978,44 @@ function labeled(label, control, tip) {
   );
 }
 
+/* ---------- route loading indicator ---------- */
+
+// Painting a view means fetching first, so a sidebar click can spend a few
+// hundred milliseconds looking like nothing happened. The bar (styled in
+// style.css) says "heard you" — after a short delay, because a route that
+// resolves quickly would flash it and read as a glitch rather than as feedback.
+// Loads can overlap (a config poll landing mid-navigation), so a depth counter
+// owns the state: the bar clears when the last one finishes, not the first.
+const LOADING_DELAY_MS = 150;
+let loadingDepth = 0;
+let loadingTimer;
+
+function beginLoading(swap) {
+  if (++loadingDepth > 1) return;
+  loadingTimer = setTimeout(() => {
+    document.body.classList.add("is-loading");
+    // Only a whole-page swap fades the view out. A load that replaces one part
+    // of the page (opening a thread) leaves the rest at full strength — it is
+    // still the current, clickable page.
+    if (swap) document.body.classList.add("is-swapping");
+  }, LOADING_DELAY_MS);
+  view.setAttribute("aria-busy", "true");
+}
+
+function endLoading() {
+  if (--loadingDepth > 0) return;
+  loadingDepth = 0;
+  clearTimeout(loadingTimer);
+  document.body.classList.remove("is-loading", "is-swapping");
+  view.removeAttribute("aria-busy");
+}
+
+/** Runs `work` with the loading bar armed, whatever it does or throws. */
+async function withLoading(work, { swap = false } = {}) {
+  beginLoading(swap);
+  try { return await work(); } finally { endLoading(); }
+}
+
 /* ---------- router ---------- */
 
 const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, settings: viewSettings, channels: viewWorkspaces };
@@ -1954,9 +2037,11 @@ async function render() {
     .filter((el) => el.querySelector(":scope > input:checked"))
     .map((el) => el.dataset.collapse);
   try {
-    state.overview = await api.get("/overview");
-    applyPairingBadge();
-    await route();
+    await withLoading(async () => {
+      state.overview = await api.get("/overview");
+      applyPairingBadge();
+      await route();
+    }, { swap: true });
   } catch (error) {
     view.replaceChildren(h("div", { class: "alert alert-error" }, `Could not load: ${error.message}`));
   }

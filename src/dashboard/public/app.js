@@ -1086,7 +1086,8 @@ function renderThreadPane() {
   // scrolled up where they were; switching threads or sitting at the bottom
   // jumps to the latest message.
   const prev = scroller();
-  const keepScroll = renderedThreadId === thread.id && prev && !atBottom(prev) ? prev.scrollTop : null;
+  const opened = renderedThreadId !== thread.id;
+  const keepScroll = !opened && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
   // The scroller is full-width (its scrollbar belongs to the pane edge) but the
   // transcript inside it is capped at a readable measure: a bubble stretched
@@ -1115,7 +1116,18 @@ function renderThreadPane() {
   renderLive(true);
   messages.scrollTop = keepScroll ?? messages.scrollHeight;
   updateJumpButton();
+  // Opening a thread is almost always the first half of answering in it, so the
+  // caret lands in the composer. Only on an actual open: this pane re-renders
+  // whenever a turn ends or the ⚡ toggle flips, and stealing focus there would
+  // yank it out from under whatever the reader was doing. Not on a phone, where
+  // it would slide the keyboard over the conversation you just tapped into.
+  if (opened && !isPhone()) document.getElementById("composer-text")?.focus();
 }
+
+// Mirrors the `max-width: 768px` breakpoint in style.css — no build step here
+// to share a constant, so the two have to be kept in sync by hand.
+const phoneQuery = matchMedia("(max-width: 768px)");
+const isPhone = () => phoneQuery.matches;
 
 /* The "↓ Latest" pill. It exists because the transcript follows a running turn
    only while the reader is at the bottom — scroll up to read something and the
@@ -2446,10 +2458,9 @@ document.getElementById("nav-backdrop")?.addEventListener("click", () => setNav(
 // Any navigation from inside the drawer (nav links or the wordmark) closes it.
 document.getElementById("sidebar")?.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
 // Escape closes the drawer; growing past the mobile breakpoint clears any open
-// state. The query mirrors the `max-width: 768px` breakpoint in style.css — keep
-// the two in sync (no build step here to share a constant).
+// state.
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
-matchMedia("(max-width: 768px)").addEventListener("change", (e) => { if (!e.matches) setNav(false); });
+phoneQuery.addEventListener("change", (e) => { if (!e.matches) setNav(false); });
 
 initStringLights();
 connectWs();

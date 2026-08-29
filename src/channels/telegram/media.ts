@@ -1,7 +1,5 @@
 import type { Context } from "grammy";
-import type { ImageContent } from "@earendil-works/pi-ai";
-import { execFile } from "node:child_process";
-import { saveInboundMedia } from "../../media-store.ts";
+import { type InboundMedia, mediaNote, sanitizeNoteValue, saveInboundMedia, transcribeMedia } from "../../media-store.ts";
 import { logger } from "../../log.ts";
 
 const log = logger("telegram/media");
@@ -9,28 +7,7 @@ const log = logger("telegram/media");
 /** Bot API cannot download files larger than 20 MB. */
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
-export interface InboundMedia {
-  /** Machine-generated voice transcript. */
-  transcript?: string;
-  /** Bracketed status notes (stored-file references, failures). */
-  notes: string[];
-  images: ImageContent[];
-}
-
-export function formatInboundBody(userText: string, media: InboundMedia): string {
-  const { transcript, notes } = media;
-  const sections: string[] = [];
-  if (transcript === undefined) {
-    sections.push(userText);
-  } else {
-    const lines = [];
-    if (userText) lines.push(`[User text]\n${userText}`);
-    lines.push(`[Transcript]\n${transcript}`);
-    sections.push(lines.join("\n"));
-  }
-  sections.push(...notes);
-  return sections.filter(Boolean).join("\n\n");
-}
+export { formatInboundBody, type InboundMedia } from "../../media-store.ts";
 
 /**
  * Download inbound attachments into the media store and reference them in the
@@ -71,7 +48,7 @@ export async function collectInboundMedia(ctx: Context, token: string, transcrib
         const path = await saveInboundMedia(buffer, audio.name);
         result.notes.push(mediaNote(path, audio.mime));
         if (transcribeCommand) {
-          result.transcript = await transcribe(path, transcribeCommand);
+          result.transcript = await transcribeMedia(path, transcribeCommand);
         } else {
           result.notes.push("[voice message not transcribed; transcription is not configured]");
         }
@@ -110,32 +87,10 @@ export async function collectInboundMedia(ctx: Context, token: string, transcrib
   return result;
 }
 
-function mediaNote(path: string, mime: string): string {
-  return `[media attached: ${path} (${sanitizeNoteValue(mime)})]`;
-}
-
-/** External strings (filenames, mime types) get control chars and `]` stripped
- * so they can't break out of a bracketed prompt note. Stored paths are already
- * safe — the media store generates them. */
-function sanitizeNoteValue(value: string): string {
-  return value.replaceAll(/[\p{Cc}\]]+/gu, " ").replaceAll(/\s+/g, " ").trim();
-}
-
 async function download(ctx: Context, token: string, fileId: string): Promise<Buffer> {
   const file = await ctx.api.getFile(fileId);
   if (!file.file_path) throw new Error("file has no path");
   const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
   if (!response.ok) throw new Error(`file download failed: ${response.status}`);
   return Buffer.from(await response.arrayBuffer());
-}
-
-/** Run the configured transcription command ({{file}} placeholder) on a stored audio file. */
-async function transcribe(path: string, command: string): Promise<string> {
-  const rendered = command.replaceAll("{{file}}", path);
-  return await new Promise<string>((resolve, reject) => {
-    execFile("bash", ["-c", rendered], { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout.trim() || "(empty transcript)");
-    });
-  });
 }

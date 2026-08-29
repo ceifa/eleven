@@ -21,7 +21,7 @@ import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
-const SHELL_FILES = ["index.html", "app.js", "dom.js", "style.css"];
+const SHELL_FILES = ["index.html", "app.js", "dom.js", "markdown.js", "style.css"];
 // Newest mtime among the app-shell files, read once: new assets arrive with a
 // new daemon, and a stat per socket would buy nothing.
 const SHELL_VERSION = Math.max(

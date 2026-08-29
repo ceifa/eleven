@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>eleven</title>
   <link rel="stylesheet" href="/style.css" />
+  <!-- the wordmark's weight, which is on screen before anything is fetched: without
+       this the browser only discovers it after parsing the stylesheet, and the sign
+       spends a round trip rendered in the fallback serif -->
+  <link rel="preload" href="/fonts/grenze-800.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='8.2' y='13' font-size='14' font-family='Georgia,serif' font-weight='bold' fill='none' stroke='%23e7000b' stroke-width='0.9' text-anchor='middle'>E</text></svg>" />
 </head>
 <body class="h-screen flex bg-base-100 text-base-content">

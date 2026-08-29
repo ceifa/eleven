@@ -37,6 +37,31 @@ async function ok(response) {
   return data;
 }
 
+// Reads that describe the daemon rather than the conversation — /overview and
+// /config — answer the same thing until something changes them, and every view
+// wants them. Fetching both on every navigation spent two round trips redrawing
+// what the page already held, so they're kept here instead and the daemon's own
+// events (a config save, a pairing request) throw them away. The TTL is only a
+// backstop for what no event announces, like a bot dropping offline.
+const CACHE_TTL_MS = 30_000;
+const reads = new Map();
+
+function cachedGet(path, { force = false } = {}) {
+  const hit = reads.get(path);
+  if (!force && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+  // The promise is what's cached, so overlapping callers share one round trip.
+  const value = api.get(path).catch((error) => {
+    reads.delete(path);
+    throw error;
+  });
+  reads.set(path, { at: Date.now(), value });
+  return value;
+}
+
+/** Remember a value we already know is current (a PUT's own response). */
+const seedCache = (path, value) => reads.set(path, { at: Date.now(), value });
+const invalidate = (...paths) => { for (const path of paths) reads.delete(path); };
+
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -232,8 +257,12 @@ function connectWs() {
       }
       scheduleThreadRefresh(message.workspace);
     }
-    if (message.type === "config-changed") onConfigChanged();
+    if (message.type === "config-changed") {
+      invalidate("/config", "/overview");
+      onConfigChanged();
+    }
     if (message.type === "pairing") {
+      invalidate("/overview");
       toast(`pairing request: ${message.request.chatTitle ?? message.request.name ?? message.request.userId}`);
       // render() refetches /overview and repaints the badge itself — don't double-fetch.
       location.hash.startsWith("#/workspaces") ? render() : updatePairingBadge();
@@ -369,7 +398,7 @@ function applyPairingBadge() {
 // Fetch a fresh overview, then repaint the badge (used when only the badge,
 // not the whole view, needs to react — e.g. an incoming pairing request).
 async function updatePairingBadge() {
-  const overview = await api.get("/overview").catch(() => null);
+  const overview = await cachedGet("/overview").catch(() => null);
   if (overview) state.overview = overview;
   applyPairingBadge();
 }
@@ -421,7 +450,7 @@ async function onConfigChanged() {
   if (savesInFlight > 0) return;
   // Every view but the threads one renders from config.
   if (onThreadsView()) return;
-  const fresh = await api.get("/config").catch(() => null);
+  const fresh = await cachedGet("/config").catch(() => null);
   if (fresh && JSON.stringify(fresh) !== JSON.stringify(state.config)) render();
 }
 
@@ -554,7 +583,7 @@ function renderThreadFilters() {
   const slot = document.getElementById("thread-filters");
   if (!slot) return;
   const sources = [...state.sources].sort();
-  const workspaces = Object.keys(state.overview?.workspaces ?? {});
+  const workspaces = state.overview?.workspaces ?? [];
   const offered = (workspaces.length > 1 ? 1 : 0) + (sources.length > 1 ? 1 : 0);
   const active = Boolean(state.workspaceFilter || state.filterSource);
   const toggle = document.getElementById("filter-toggle");
@@ -589,6 +618,7 @@ function renderThreadFilters() {
 // wrong. Retick just the label text — rebuilding the cards would restart the
 // live-halo animations.
 setInterval(() => {
+  if (!onThreadsView()) return; // no list on screen, nothing to retick
   for (const label of document.querySelectorAll("#thread-list [data-since]")) {
     label.textContent = timeAgo(Number(label.dataset.since));
   }
@@ -1218,7 +1248,7 @@ function searchBox() {
 }
 
 function newThreadDialog() {
-  const workspaces = Object.keys(state.overview?.workspaces ?? {});
+  const workspaces = state.overview?.workspaces ?? [];
   const pane = document.getElementById("thread-pane");
   state.activeThread = null;
   const select = h("select", { class: "select w-full" }, workspaces.map((w) => h("option", { value: w }, w)));
@@ -1254,7 +1284,7 @@ async function viewWorkspaces() {
   // Scope sequence editors complete against the catalog (models-list datalist)
   // and flag unauthenticated providers; both barely change, so cache them.
   const [config, catalog, auth] = await Promise.all([
-    api.get("/config"),
+    cachedGet("/config"),
     state.catalog ?? api.get("/models").catch(() => []),
     state.auth ?? api.get("/providers").catch(() => []),
   ]);
@@ -1604,6 +1634,10 @@ function queueSave(build, { structural = false } = {}) {
     .then(async () => {
       const next = build(structuredClone(state.config));
       state.config = await api.send("PUT", "/config", next);
+      // The save's own answer is the freshest config there is; the overview
+      // describes the same file, so it has to go.
+      seedCache("/config", state.config);
+      invalidate("/overview");
       toast("Saved — applied live.");
       if (structural) await render();
     })
@@ -1628,7 +1662,8 @@ async function pairingAction(code, action) {
   } catch (error) {
     toast(error.message, true);
   }
-  render(); // refetches /overview and repaints the badge — no separate fetch needed
+  invalidate("/overview"); // the queue this request was in just changed
+  render(); // re-reads /overview and repaints the badge — no separate fetch needed
 }
 
 /* ---------- models view (the sequence) ---------- */
@@ -1826,7 +1861,7 @@ async function viewModels() {
   // The catalog and auth statuses barely change — fetch them once per session,
   // not on every structural re-render.
   const [config, catalog, auth] = await Promise.all([
-    api.get("/config"),
+    cachedGet("/config"),
     state.catalog ?? api.get("/models"),
     state.auth ?? api.get("/providers"),
   ]);
@@ -1909,7 +1944,7 @@ function providersSection() {
 /* ---------- settings view ---------- */
 
 async function viewSettings() {
-  state.config = await api.get("/config");
+  state.config = await cachedGet("/config");
   const c = state.config;
 
   const saveField = (mutate) => (e) =>
@@ -2038,7 +2073,7 @@ async function render() {
     .map((el) => el.dataset.collapse);
   try {
     await withLoading(async () => {
-      state.overview = await api.get("/overview");
+      state.overview = await cachedGet("/overview");
       applyPairingBadge();
       await route();
     }, { swap: true });

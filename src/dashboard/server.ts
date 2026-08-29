@@ -21,10 +21,11 @@ import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
+const SHELL_FILES = ["index.html", "app.js", "dom.js", "style.css"];
 // Newest mtime among the app-shell files, read once: new assets arrive with a
 // new daemon, and a stat per socket would buy nothing.
 const SHELL_VERSION = Math.max(
-  ...["index.html", "app.js", "style.css"].map((name) => {
+  ...SHELL_FILES.map((name) => {
     try {
       return statSync(join(PUBLIC_DIR, name)).mtimeMs;
     } catch {
@@ -597,7 +598,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   const { host, port } = config.resolved.dashboard;
   // Read, hash and compress the shell while the daemon boots, so the first
   // browser to arrive doesn't wait on brotli.
-  for (const file of ["/index.html", "/app.js", "/style.css"]) void loadAsset(file);
+  for (const file of SHELL_FILES) void loadAsset(`/${file}`);
   server.listen(port, host, () => log.info(`dashboard on http://${host}:${port}`));
   return {
     close: () =>

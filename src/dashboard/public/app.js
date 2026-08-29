@@ -1,5 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
+import { syncChildren } from "./dom.js";
+
 const view = document.getElementById("view");
 const state = {
   threads: [],
@@ -465,12 +467,50 @@ function highlight(text, query) {
   return parts.map((part, index) => (index % 2 ? h("mark", {}, part) : part));
 }
 
+/* The list is rebuilt on every event that could have touched it — a message
+   arriving, a turn ending, a filter changing — and there are hundreds of cards.
+   Building them all again to move one row means thousands of DOM nodes for a
+   change you can point at, so a card is kept and reused until the data it
+   renders actually changes, and the column is reconciled by moving the nodes
+   that are already there. */
+const cardCache = new Map(); // thread id → { node, signature }
+const toggleCache = new Map(); // sessionKey → { node, signature }
+
+/** Everything the card paints, so an unchanged reading reuses its node. Live
+ *  and active state are deliberately absent: they are classes toggled on the
+ *  node, and rebuilding the card for them would restart the halo animation. */
+const cardSignature = (thread, older) =>
+  JSON.stringify([
+    older, thread.sessionKey, thread.conversationName, thread.conversation,
+    thread.title, thread.workspace, thread.lastActivityAt, thread.matches ?? null, state.query,
+  ]);
+
 function threadCard(thread, older = false) {
+  const signature = cardSignature(thread, older);
+  const cached = cardCache.get(thread.id);
+  let node;
+  if (cached?.signature === signature) {
+    node = cached.node;
+    // The one thing that drifts on a node nobody rebuilt: "5m" becomes "6m"
+    // whether or not the thread said anything.
+    const label = node.querySelector("[data-since]");
+    const since = timeAgo(thread.lastActivityAt);
+    if (label && label.textContent !== since) label.textContent = since;
+  } else {
+    node = buildThreadCard(thread, older);
+    cardCache.set(thread.id, { node, signature });
+  }
+  node.classList.toggle("is-active", thread.id === state.activeThread?.id);
+  node.classList.toggle("is-live", isThreadLive(thread.id));
+  return node;
+}
+
+function buildThreadCard(thread, older) {
   return h(
     "button",
     {
       "data-thread-id": thread.id,
-      class: `card card-sm w-full bg-base-200 ${older ? "is-older" : ""} ${thread.id === state.activeThread?.id ? "is-active" : ""} ${isThreadLive(thread.id) ? "is-live" : ""}`,
+      class: `card card-sm w-full bg-base-200 ${older ? "is-older" : ""}`,
       // The full reading (channel · group · topic) is one hover away; the card
       // itself only has room for the part that identifies it.
       title: thread.conversation,
@@ -523,30 +563,50 @@ function toggleGroup(sessionKey) {
   renderThreadList();
 }
 
+function olderToggle(sessionKey, count, open) {
+  const signature = `${count}:${open}`;
+  const cached = toggleCache.get(sessionKey);
+  if (cached?.signature === signature) return cached.node;
+  const node = h("button", { class: "older-toggle text-xs font-mono", onclick: () => toggleGroup(sessionKey) },
+    `${open ? "▾" : "▸"} ${count} older`);
+  toggleCache.set(sessionKey, { node, signature });
+  return node;
+}
+
 function renderThreadList() {
   const list = document.getElementById("thread-list");
   if (!list) return;
   renderThreadFilters();
   const rows = [];
+  const shown = new Set();
+  const groups = new Set();
   for (const group of groupThreads(state.threads)) {
     const [head, ...older] = group;
     // The generation you are reading is why its conversation is on screen —
     // never leave it folded away behind a click.
     if (older.some((thread) => thread.id === state.activeThread?.id)) expandedGroups.add(head.sessionKey);
     rows.push(threadCard(head));
+    shown.add(head.id);
     if (!older.length) continue;
     const open = expandedGroups.has(head.sessionKey);
-    rows.push(
-      h("button", { class: "older-toggle text-xs font-mono", onclick: () => toggleGroup(head.sessionKey) },
-        `${open ? "▾" : "▸"} ${older.length} older`),
-    );
-    if (open) rows.push(...older.map((thread) => threadCard(thread, true)));
+    groups.add(head.sessionKey);
+    rows.push(olderToggle(head.sessionKey, older.length, open));
+    if (open) {
+      for (const thread of older) {
+        rows.push(threadCard(thread, true));
+        shown.add(thread.id);
+      }
+    }
   }
+  // Cards for threads that left the list (deleted, filtered out, folded away)
+  // have no reader and would otherwise pin their nodes forever.
+  for (const id of cardCache.keys()) if (!shown.has(id)) cardCache.delete(id);
+  for (const key of toggleCache.keys()) if (!groups.has(key)) toggleCache.delete(key);
   if (!rows.length) {
     rows.push(h("div", { class: "text-xs opacity-60 px-2 py-4 text-center" },
       state.query || state.filterSource || state.workspaceFilter ? "Nothing matches." : "No threads yet."));
   }
-  list.replaceChildren(...rows);
+  syncChildren(list, rows);
 }
 
 /**

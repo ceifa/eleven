@@ -626,7 +626,9 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 /* -- the ⋯ overflow -- */
 
 .thread-menu { position: relative; }
-.thread-menu > summary { list-style: none; font-size: 1rem; line-height: 1; }
+/* A <summary> is not a <button>, so it inherits neither the button reset's
+   pointer nor its non-selectable text — and read as an input to click into. */
+.thread-menu > summary { list-style: none; font-size: 1rem; line-height: 1; cursor: pointer; user-select: none; }
 .thread-menu > summary::-webkit-details-marker { display: none; }
 .thread-menu[open] > summary { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
 .thread-menu-body {

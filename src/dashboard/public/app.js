@@ -1071,6 +1071,20 @@ function emptyPane() {
 }
 
 let renderedThreadId;
+// Everything the head paints. A thread gets its title after the first turn and
+// can change model mid-conversation, but neither happens on most re-renders —
+// and rebuilding the head for nothing would snap a menu shut under the pointer.
+let renderedHead;
+const headSignature = (thread) =>
+  `${thread.title}|${thread.conversation}|${thread.workspace}|${thread.effectiveModel ?? thread.model}|${state.showRequests}`;
+
+/**
+ * The pane is re-rendered by a great many things — a turn ending, a message
+ * arriving, the reconcile that follows one. Only an actual thread switch
+ * rebuilds it: everything else patches the parts that changed, because a
+ * rebuild takes the composer with it, and with it the caret and whatever draft
+ * was half-typed into it while the agent was still talking.
+ */
 function renderThreadPane() {
   const pane = document.getElementById("thread-pane");
   if (!pane) return;
@@ -1078,49 +1092,58 @@ function renderThreadPane() {
   pane.classList.remove("is-composing");
   if (!thread) {
     renderedThreadId = undefined;
+    renderedHead = undefined;
     pane.classList.remove("is-running");
     pane.replaceChildren(emptyPane());
     return;
   }
-  // Re-rendering the same thread (a turn finished) should leave a reader who
-  // scrolled up where they were; switching threads or sitting at the bottom
-  // jumps to the latest message.
+  // Re-rendering the same thread should leave a reader who scrolled up where
+  // they were; switching threads or sitting at the bottom jumps to the latest.
   const prev = scroller();
-  const opened = renderedThreadId !== thread.id;
+  const opened = renderedThreadId !== thread.id || !pane.querySelector("#composer-text");
   const keepScroll = !opened && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
-  // The scroller is full-width (its scrollbar belongs to the pane edge) but the
-  // transcript inside it is capped at a readable measure: a bubble stretched
-  // across a 1400px pane is a paragraph nobody can track a line in.
-  const messages = h("div", { class: "messages", id: "messages", onscroll: onTranscriptScroll },
-    h("div", { class: "msg-col" },
-      h("div", { id: "transcript" }, durableRows()),
-      h("div", { id: "pending" }),
-      h("div", { id: "live" }),
-      // Shown by CSS only while a turn runs and has produced nothing yet —
-      // the gap between "sent" and the first token used to look like a hang.
-      h("div", { class: "typing" }, h("i"), h("i"), h("i")),
-    ),
-  );
   pane.classList.toggle("is-running", isThreadLive(thread.id));
-  pane.replaceChildren(
-    threadHeader(thread),
-    messages,
-    h("button", { class: "jump-bottom", id: "jump-bottom", hidden: true, title: "Jump to the newest message", onclick: () => scrollToBottom(true) },
-      h("span", { html: ARROW_DOWN_ICON }), "Latest"),
-    threadComposer(thread),
-  );
+
+  if (opened) {
+    // The scroller is full-width (its scrollbar belongs to the pane edge) but
+    // the transcript inside it is capped at a readable measure: a bubble
+    // stretched across a 1400px pane is a paragraph nobody can track a line in.
+    pane.replaceChildren(
+      threadHeader(thread),
+      h("div", { class: "messages", id: "messages", onscroll: onTranscriptScroll },
+        h("div", { class: "msg-col" },
+          h("div", { id: "transcript" }, durableRows()),
+          h("div", { id: "pending" }),
+          h("div", { id: "live" }),
+          // Shown by CSS only while a turn runs and has produced nothing yet —
+          // the gap between "sent" and the first token used to look like a hang.
+          h("div", { class: "typing" }, h("i"), h("i"), h("i")),
+        ),
+      ),
+      h("button", { class: "jump-bottom", id: "jump-bottom", hidden: true, title: "Jump to the newest message", onclick: () => scrollToBottom(true) },
+        h("span", { html: ARROW_DOWN_ICON }), "Latest"),
+      threadComposer(thread),
+    );
+    renderedHead = headSignature(thread);
+  } else {
+    if (renderedHead !== headSignature(thread)) {
+      pane.querySelector(".thread-head")?.replaceWith(threadHeader(thread));
+      renderedHead = headSignature(thread);
+    }
+    document.getElementById("transcript")?.replaceChildren(...durableRows());
+  }
+
   // Both regions live inside the pane, so they can only be filled once it's
   // attached; the scroll position is applied after, over the finished height.
   renderPending();
   renderLive(true);
-  messages.scrollTop = keepScroll ?? messages.scrollHeight;
+  const messages = scroller();
+  if (messages) messages.scrollTop = keepScroll ?? messages.scrollHeight;
   updateJumpButton();
   // Opening a thread is almost always the first half of answering in it, so the
-  // caret lands in the composer. Only on an actual open: this pane re-renders
-  // whenever a turn ends or the ⚡ toggle flips, and stealing focus there would
-  // yank it out from under whatever the reader was doing. Not on a phone, where
-  // it would slide the keyboard over the conversation you just tapped into.
+  // caret lands in the composer. Not on a phone, where it would slide the
+  // keyboard over the conversation you just tapped into.
   if (opened && !isPhone()) document.getElementById("composer-text")?.focus();
 }
 

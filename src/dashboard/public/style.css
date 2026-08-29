@@ -158,6 +158,41 @@ h1, h2 { font-weight: 700; line-height: 1.2; }
   .string-lights .bulb, .string-lights .bulb.lit, .string-lights .bulb.err { animation: none; opacity: 0.3; }
 }
 
+/* ---------- route loading bar ---------- */
+
+/* Switching views is a fetch, so a sidebar click can sit there looking ignored.
+   A thin bar sweeping across the top of the window answers the click. It only
+   shows once body.is-loading is set, and app.js waits a beat before setting it —
+   a fast route that flashed a bar would read as a glitch, not as feedback.
+   Fixed to the viewport top and above the mobile top bar, so it looks the same
+   on both layouts. */
+.route-progress {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 2px;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background-image: linear-gradient(90deg, transparent, oklch(68% 0.24 27), oklch(82% 0.16 70), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-position: -45% 0;
+}
+body.is-loading .route-progress { opacity: 1; animation: e11-sweep 1s ease-in-out infinite; }
+@keyframes e11-sweep { from { background-position: -45% 0; } to { background-position: 145% 0; } }
+
+/* The outgoing view stays where it is — swapping it for a skeleton would jump
+   the layout to say what the bar already says — but it fades back and stops
+   taking clicks, so an impatient second click can't land on content that is on
+   its way out. */
+#view { transition: opacity 0.2s ease; }
+body.is-swapping #view { opacity: 0.5; pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  body.is-loading .route-progress { animation: none; background-image: none; background-color: var(--color-primary); }
+}
+
 .page-title {
   font-family: "Grenze", serif;
   font-weight: 700;
@@ -283,9 +318,9 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 }
 /* ---------- threads toolbar ---------- */
 
-/* The whole head of the list column: a search field and a + . No card, no
-   panel, no boxed controls — the chrome is a single hairline under the row,
-   and everything else is the list. */
+/* The whole head of the list column: a search field and two glyphs. No card, no
+   panel, no boxed controls — the chrome is a single hairline under the row, and
+   everything else is the list. */
 .threads-toolbar {
   display: flex;
   align-items: center;
@@ -313,7 +348,9 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 .search-input:focus { outline: none; }
 .search-field:focus-within .search-glyph { color: var(--color-primary); }
 .search-input::-webkit-search-cancel-button { filter: grayscale(1) opacity(0.5); }
-.toolbar-add {
+/* The row's two glyphs — filters and new thread. Icon-only and unboxed; they
+   read as marks in the margin of the search field, not as buttons. */
+.toolbar-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -324,16 +361,19 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   border: 0;
   border-radius: var(--radius-field);
   background: none;
-  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
   transition: color 0.15s, background-color 0.15s;
 }
-.toolbar-add:hover { color: var(--color-primary); background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+.toolbar-icon:hover { color: var(--color-primary); background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+/* A filter is on and the list is hiding threads because of it — the glyph is
+   the only thing on screen that can admit that. */
+.toolbar-icon.is-active { color: var(--color-primary); }
 
 /* Filters read as text, not as form controls: dim mono words with a caret,
-   spending no vertical rhythm on borders. The row disappears entirely when
-   there is nothing worth filtering. */
-.threads-filters { display: flex; align-items: center; gap: 0.9rem; padding: 0 0.1rem; }
-.threads-filters:empty { display: none; }
+   spending no vertical rhythm on borders. The line is folded away until the
+   glyph asks for it (app.js sets [hidden]), so the resting head of the column
+   is one row. */
+.threads-filters { display: flex; align-items: center; gap: 0.9rem; padding: 0.15rem 0.1rem 0; }
 .bare-select {
   appearance: none;
   max-width: 48%;
@@ -966,7 +1006,7 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   /* The bare toolbar controls carry no .btn padding — give them a thumb. */
   .threads-toolbar { padding-bottom: 0.5rem; }
   .search-input { padding: 0.4rem 0; }
-  .toolbar-add { width: 2.25rem; height: 2.25rem; }
+  .toolbar-icon { width: 2.25rem; height: 2.25rem; }
   .bare-select { font-size: 0.8rem; padding-block: 0.25rem; }
   .btn { min-height: 2.5rem; }
   .btn-sm { min-height: 2.25rem; }

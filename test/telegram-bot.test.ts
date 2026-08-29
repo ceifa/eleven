@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { InputFile } from "grammy";
 import { formatTelegramInboundPrompt, syncTelegramCommands } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { DraftStream } from "../src/channels/telegram/stream.ts";
-import { disableKeyboard } from "../src/channels/telegram/tool.ts";
+import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
 test("Telegram command sync removes stale group-scoped commands", async () => {
@@ -265,6 +266,72 @@ test("a draft says it is thinking before it has prose, and never overwrites pros
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   assert.equal(calls.length, 2);
   stream.cancel();
+});
+
+/** Fake API for the channel tool: records rich sends and the classic media
+ * methods. `rejectRich` plays a chat where embedded media isn't accepted. */
+function fakeToolApi(options: { rejectRich?: boolean } = {}) {
+  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  const api = {
+    raw: {
+      sendRichMessage: async (payload: Record<string, unknown>) => {
+        calls.push({ method: "rich", payload });
+        if (options.rejectRich) throw new Error("Bad Request: MEDIA_INVALID");
+        return { message_id: 12 };
+      },
+    },
+    sendPhoto: async (_chat: number, file: unknown, rest: Record<string, unknown>) => {
+      calls.push({ method: "photo", payload: { file, ...rest } });
+      return { message_id: 13 };
+    },
+    sendVoice: async (_chat: number, file: unknown, rest: Record<string, unknown>) => {
+      calls.push({ method: "voice", payload: { file, ...rest } });
+      return { message_id: 14 };
+    },
+  };
+  return { calls, tool: telegramTool(api as never, 5) };
+}
+
+test("media rides inside the message, so the text is not cut down to a caption", async () => {
+  const { calls, tool } = fakeToolApi();
+  const text = "x".repeat(2_000);
+
+  const result = await tool.execute("1", { action: "send", media: "/tmp/chart.png", text });
+
+  assert.deepEqual(calls.map((call) => call.method), ["rich"]);
+  const rich = calls[0]?.payload.rich_message as { markdown: string; media: Array<{ id: string; media: { type: string; media: unknown } }> };
+  assert.match(rich.markdown, /^!\[\]\(tg:\/\/photo\?id=m0\)\n\n/);
+  assert.equal(rich.markdown.length, text.length + "![](tg://photo?id=m0)\n\n".length);
+  assert.equal(rich.media[0]?.media.type, "photo");
+  assert.ok(rich.media[0]?.media.media instanceof InputFile);
+  assert.match(String(result.content[0]?.text), /message_id 12/);
+});
+
+test("several files become one collage", async () => {
+  const { calls, tool } = fakeToolApi();
+
+  await tool.execute("1", { action: "send", media: ["/tmp/a.png", "/tmp/b.mp4"], text: "Both" });
+
+  const rich = calls[0]?.payload.rich_message as { markdown: string; media: Array<{ id: string }> };
+  assert.match(rich.markdown, /<tg-collage>\n\n!\[\]\(tg:\/\/photo\?id=m0\)\n!\[\]\(tg:\/\/video\?id=m1\)\n\n<\/tg-collage>/);
+  assert.deepEqual(rich.media.map((entry) => entry.id), ["m0", "m1"]);
+});
+
+test("a chat that refuses embedded media still gets the file, with a caption", async () => {
+  const { calls, tool } = fakeToolApi({ rejectRich: true });
+
+  await tool.execute("1", { action: "send", media: "/tmp/chart.png", text: "y".repeat(2_000) });
+
+  assert.deepEqual(calls.map((call) => call.method), ["rich", "photo"]);
+  assert.equal(String(calls[1]?.payload.caption).length, 1_024);
+});
+
+test("a voice note is never embedded — it has no block of its own", async () => {
+  const { calls, tool } = fakeToolApi();
+
+  await tool.execute("1", { action: "send", media: "/tmp/note.ogg", text: "Listen", asVoice: true });
+
+  assert.deepEqual(calls.map((call) => call.method), ["voice"]);
 });
 
 test("a pressed keyboard is disabled, ticked, and keeps its links", () => {

@@ -3,15 +3,22 @@ import type { InlineKeyboardButton } from "@grammyjs/types";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { extname } from "node:path";
-import { sendRich } from "./rich.ts";
+import { fitsOneRichMessage, sendRich, type RichMedia } from "./rich.ts";
 import { withRetry, isNoop } from "./retry.ts";
+import { logger } from "../../log.ts";
+
+const log = logger("telegram/tool");
 
 const parameters = Type.Object({
   action: Type.Union([Type.Literal("send"), Type.Literal("react"), Type.Literal("delete")], {
     description: "send a message/media, react to a message, or delete one of your messages",
   }),
-  text: Type.Optional(Type.String({ description: "Markdown text (send). Used as caption when media is given." })),
-  media: Type.Optional(Type.String({ description: "Absolute path of a local file to send (photo/video/audio/document)" })),
+  text: Type.Optional(Type.String({ description: "Markdown text (send). Sent with the media, in the same message, when media is given." })),
+  media: Type.Optional(
+    Type.Union([Type.String(), Type.Array(Type.String())], {
+      description: "Absolute path of a local file to send (photo/video/audio/document), or several paths to send them as one collage",
+    }),
+  ),
   asVoice: Type.Optional(Type.Boolean({ description: "Send audio as a voice note" })),
   buttons: Type.Optional(
     Type.Array(
@@ -58,8 +65,12 @@ export function telegramTool(api: Api, chatId: number, messageThreadId?: number,
       try {
         switch (params.action) {
           case "send": {
-            if (params.media) {
-              const message = await sendMedia(api, chatId, params, messageThreadId);
+            const paths = typeof params.media === "string" ? [params.media] : (params.media ?? []);
+            if (paths.length) {
+              const message = await sendWithMedia(api, chatId, paths, params, messageThreadId);
+              // The text rode inside the message, so the caller must not deliver
+              // it a second time as the model's answer.
+              if (message.embedded && params.text) onSent?.(params.text.trim());
               return ok(`sent (message_id ${message.message_id})`);
             }
             if (!params.text) return ok("nothing to send: provide text or media");
@@ -130,11 +141,70 @@ function truncateBytes(text: string, maxBytes: number): string {
   return buf.toString("utf8", 0, end);
 }
 
-async function sendMedia(api: Api, chatId: number, params: { media?: string; text?: string; asVoice?: boolean; silent?: boolean }, threadId?: number) {
-  const file = new InputFile(params.media!);
+interface SendParams {
+  text?: string;
+  asVoice?: boolean;
+  silent?: boolean;
+  buttons?: { label: string; url?: string; data?: string }[][];
+}
+
+/**
+ * Send files with their text. Bot API 10.2 lets the files ride inside the
+ * message body, which is the difference between a 1024-character caption and a
+ * whole answer — so that path is tried first, and anything Telegram refuses
+ * falls back to the classic one file + caption send.
+ */
+async function sendWithMedia(
+  api: Api,
+  chatId: number,
+  paths: string[],
+  params: SendParams,
+  threadId?: number,
+): Promise<{ message_id: number; embedded: boolean }> {
+  const text = params.text ?? "";
+  const media = params.asVoice ? undefined : embeddable(paths);
+  // A body that needs splitting would leave the media on one message and most
+  // of the text on another; the caption path handles that shape better.
+  if (media && fitsOneRichMessage(text)) {
+    try {
+      const message = await sendRich(api, chatId, text, {
+        messageThreadId: threadId,
+        replyMarkup: keyboard(params.buttons),
+        silent: params.silent,
+        media,
+      });
+      return { message_id: message?.message_id ?? 0, embedded: true };
+    } catch (error) {
+      log.warn(`embedded media rejected, sending as a caption instead: ${error}`);
+    }
+  }
+  let first: { message_id: number } | undefined;
+  for (const [index, path] of paths.entries()) {
+    // The caption belongs to the first file; the rest follow bare.
+    const message = await sendMedia(api, chatId, path, { ...params, text: index === 0 ? params.text : undefined }, threadId);
+    first ??= message;
+  }
+  return { message_id: first?.message_id ?? 0, embedded: false };
+}
+
+/** Every path embeddable in a message body, or nothing — a mixed batch would
+ * split the message in two, which is exactly what embedding avoids. */
+function embeddable(paths: string[]): RichMedia[] | undefined {
+  const media: RichMedia[] = [];
+  for (const path of paths) {
+    const kind = MEDIA_KIND[extname(path).toLowerCase()];
+    // Animated GIFs go out as photos today; embedded they would freeze.
+    if (!kind || extname(path).toLowerCase() === ".gif") return undefined;
+    media.push({ path, kind });
+  }
+  return media.length ? media : undefined;
+}
+
+async function sendMedia(api: Api, chatId: number, path: string, params: SendParams, threadId?: number) {
+  const file = new InputFile(path);
   const caption = params.text?.slice(0, CAPTION_LIMIT);
   const common = { caption, disable_notification: params.silent, message_thread_id: threadId };
-  const kind = params.asVoice ? "voice" : (MEDIA_KIND[extname(params.media!).toLowerCase()] ?? "document");
+  const kind = params.asVoice ? "voice" : (MEDIA_KIND[extname(path).toLowerCase()] ?? "document");
   return withRetry("send", `send ${kind}`, (): Promise<{ message_id: number }> => {
     switch (kind) {
       case "voice": return api.sendVoice(chatId, file, common);

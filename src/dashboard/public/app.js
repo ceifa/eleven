@@ -1,6 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
 import { syncChildren } from "./dom.js";
+import { md } from "./markdown.js";
 
 const view = document.getElementById("view");
 const state = {
@@ -24,7 +25,23 @@ const state = {
   overview: null,
   config: null,
   catalog: null,
+  /** Provider-request chips in the transcript. Off by default: they are
+   *  debugging detail, and interleaved with every message they were the loudest
+   *  thing on a page whose subject is the conversation. */
+  showRequests: false,
 };
+
+/** Small UI preferences that should survive a reload (they describe how this
+ *  browser likes to read, not anything the daemon owns). */
+const prefs = {
+  get: (key, fallback) => {
+    try { return localStorage.getItem(`eleven.${key}`) ?? fallback; } catch { return fallback; }
+  },
+  set: (key, value) => {
+    try { localStorage.setItem(`eleven.${key}`, value); } catch { /* private mode */ }
+  },
+};
+state.showRequests = prefs.get("requests", "0") === "1";
 
 /* ---------- helpers ---------- */
 
@@ -91,39 +108,28 @@ const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, dashboard: DASHBOARD_ICON, cli:
 const SEARCH_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="m10.3 10.3 3.2 3.2"/></svg>`;
 const PLUS_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>`;
 const FILTER_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3"/></svg>`;
+const SEND_ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.2V3.4M4 7.2 8 3.2l4 4"/></svg>`;
+const ARROW_DOWN_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.2v9.4M4.2 8.8 8 12.6l3.8-3.8"/></svg>`;
 
 // A thread's origin — the sessionKey's prefix is the channel type
 // (telegram:…, dashboard:…). The glyph sits next to the conversation name, so
 // a type we have no icon for renders nothing: the name already says "Dashboard"
 // or "CLI", and a bare word there would only stutter it.
+/** The conversation label without the channel type it opens with — the glyph
+ *  next to it already says "telegram", and the word after it only stutters. */
+function withoutChannelPrefix(label, sessionKey) {
+  const type = sessionKey.split(":")[0];
+  if (!CHANNEL_ICONS[type]) return label;
+  const [first, ...rest] = label.split(" · ");
+  // "Telegram DM · Gabriel" loses its first segment; a bare "Dashboard" keeps
+  // it, because there it is the whole name.
+  return rest.length && first.toLowerCase().startsWith(type) ? rest.join(" · ") : label;
+}
+
 function channelSource(sessionKey) {
   const type = sessionKey.split(":")[0];
   const icon = CHANNEL_ICONS[type];
   return icon ? h("span", { class: "channel-glyph", title: type, html: icon }) : null;
-}
-
-// Escapes text for both element and attribute contexts. The quote escape
-// matters for links: md() drops the captured URL into an href="…", and without
-// it a message like [x](https://a" onerror=…) could break out of the attribute.
-const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-
-/** Minimal markdown for transcripts: fences, inline code, bold, italics, links, headings. */
-function md(text) {
-  const parts = text.split(/```(\w*)\n?([\s\S]*?)```/g);
-  let out = "";
-  for (let i = 0; i < parts.length; i += 3) {
-    out += inline(parts[i]);
-    if (parts[i + 2] !== undefined) out += `<pre><code>${esc(parts[i + 2])}</code></pre>`;
-  }
-  return out;
-}
-function inline(text) {
-  return esc(text)
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
-    .replace(/(^|\s)\*([^*\n]+)\*/g, "$1<i>$2</i>")
-    .replace(/^#{1,4} (.+)$/gm, "<b>$1</b>")
-    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a class="link" href="$2" target="_blank" rel="noopener">$1</a>');
 }
 
 const timeAgo = (ts) => {
@@ -133,6 +139,21 @@ const timeAgo = (ts) => {
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
 };
+
+const startOfDay = (ts) => new Date(ts).setHours(0, 0, 0, 0);
+const DAY_MS = 86_400_000;
+
+/** "Today" / "Yesterday" / a date — the label on a transcript's day separator. */
+function dayLabel(ts) {
+  const days = Math.round((startOfDay(Date.now()) - startOfDay(ts)) / DAY_MS);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  const date = new Date(ts);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return date.toLocaleDateString([], { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) });
+}
+
+const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 // Is the scroll container within a hair of the bottom? Used to decide whether
 // live updates should follow along or leave the reader where they scrolled to.
@@ -383,10 +404,11 @@ function applyThreadLive(threadId) {
   const live = isThreadLive(threadId);
   const card = document.querySelector(`#thread-list [data-thread-id="${threadId}"]`);
   if (card) card.classList.toggle("is-live", live);
-  // The open thread's stop button appears and disappears with the same truth.
+  // The open thread wears the same truth: the header's running pill, the
+  // "working" dots, and the composer's send button becoming a stop button all
+  // hang off this one class, so none of them needs the pane re-rendered.
   if (threadId === state.activeThread?.id) {
-    const stop = document.getElementById("stop-turn");
-    if (stop) stop.hidden = !live;
+    document.getElementById("thread-pane")?.classList.toggle("is-running", live);
   }
 }
 
@@ -766,8 +788,9 @@ function toolCallRow({ name, summary, args, id }) {
     class: `tool-call${id ? " is-clickable" : ""}`,
     ...(id ? { title: "view arguments and result", onclick: () => openToolCallModal(name, args, id) } : {}),
   },
-    h("span", { class: "tool-call-name" }, `⚙ ${name}`),
+    h("span", { class: "tool-call-name" }, name),
     summary ? h("span", { class: "tool-call-arg" }, summary) : null,
+    id ? h("span", { class: "tool-call-open", "aria-hidden": "true" }, "›") : null,
   );
 }
 
@@ -783,12 +806,20 @@ const turnErrorRow = (text) =>
     h("span", { class: "min-w-0" }, text),
   );
 
-function messageBubble(message, streaming = false) {
+/**
+ * One message. `grouped` means the previous row was the same speaker moments
+ * ago, so the bubble tucks under it instead of opening a new block; the
+ * timestamp is rendered on every message and CSS hides the ones a grouped
+ * follower makes redundant, which keeps the time visible exactly once per run
+ * of messages without the builder having to look ahead.
+ */
+function messageBubble(message, { streaming = false, grouped = false, at } = {}) {
   const isUser = message.role === "user";
-  return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}` },
-    h("div", { class: `chat-bubble ${isUser ? "chat-bubble-primary" : "bg-base-200 text-base-content"} ${streaming ? "msg-streaming" : ""}` },
+  return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}${grouped ? " is-grouped" : ""}` },
+    h("div", { class: `chat-bubble${streaming ? " msg-streaming" : ""}` },
       h("div", { class: "msg-body", html: md(message.text) }),
     ),
+    at ? h("time", { class: "msg-time", datetime: new Date(at).toISOString() }, clock(at)) : null,
   );
 }
 
@@ -808,7 +839,11 @@ function sticky(mutate) {
   const stick = el ? atBottom(el) : false;
   mutate();
   if (el && stick) el.scrollTop = el.scrollHeight;
+  else markUnreadBelow();
 }
+
+/** Messages closer together than this, from the same speaker, read as one block. */
+const GROUP_WINDOW_MS = 4 * 60_000;
 
 /** The durable rows in the order they happened. Tool calls and requests already
  *  rendered in the live region are skipped: they're the running turn's, and the
@@ -821,7 +856,7 @@ function durableRows() {
     // Undated rows (older sessions) inherit the last known time so they can't
     // sort to the top of the transcript.
     at = Date.parse(item.timestamp) || at;
-    if (item.kind === "message") rows.push({ at, tie: 0, node: () => messageBubble(item) });
+    if (item.kind === "message") rows.push({ at, tie: 0, message: item });
     else if (item.kind === "error") rows.push({ at, tie: 0, node: () => turnErrorRow(item.text) });
     else {
       const calls = item.calls.filter((call) => !liveIds.has(call.id));
@@ -830,11 +865,40 @@ function durableRows() {
   }
   // The exact moments eleven called an AI provider, interleaved by time — a
   // request precedes the message it produced, hence the tiebreak.
-  for (const request of state.requests) {
-    if (!liveIds.has(request.id)) rows.push({ at: request.at, tie: 1, node: () => requestChip(request) });
+  if (state.showRequests) {
+    for (const request of state.requests) {
+      if (!liveIds.has(request.id)) rows.push({ at: request.at, tie: 1, node: () => requestChip(request) });
+    }
   }
-  return rows.sort((a, b) => a.at - b.at || a.tie - b.tie).map((row) => row.node());
+  rows.sort((a, b) => a.at - b.at || a.tie - b.tie);
+
+  const nodes = [];
+  let day;
+  let lastRole;
+  let lastAt = 0;
+  for (const row of rows) {
+    // A transcript spanning days reads as one endless column without these —
+    // and "when did I ask that?" is the question a reader scrolls back with.
+    const rowDay = row.at ? startOfDay(row.at) : undefined;
+    if (rowDay && rowDay !== day) {
+      day = rowDay;
+      lastRole = undefined;
+      nodes.push(daySeparator(row.at));
+    }
+    if (!row.message) {
+      lastRole = undefined; // anything between two messages breaks the run
+      nodes.push(row.node());
+      continue;
+    }
+    const grouped = row.message.role === lastRole && row.at - lastAt < GROUP_WINDOW_MS;
+    nodes.push(messageBubble(row.message, { grouped, at: row.at }));
+    lastRole = row.message.role;
+    lastAt = row.at;
+  }
+  return nodes;
 }
+
+const daySeparator = (at) => h("div", { class: "day-sep" }, h("span", {}, dayLabel(at)));
 
 function renderPending() {
   const region = document.getElementById("pending");
@@ -872,8 +936,10 @@ function renderLive(rebuild = false) {
 
 function liveNode(item) {
   if (item.kind === "tool") return toolCallsBlock([item]);
-  if (item.kind === "request") return requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 });
-  return messageBubble({ role: "assistant", text: item.text }, true);
+  if (item.kind === "request") {
+    return state.showRequests ? requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 }) : h("div", { hidden: true });
+  }
+  return messageBubble({ role: "assistant", text: item.text }, { streaming: true });
 }
 
 // Deltas arrive dozens of times per second — coalesce to one render per frame.
@@ -885,18 +951,135 @@ function scheduleLiveRender() {
   });
 }
 
+/* The head of the conversation: what you are reading on the first line, where
+   it lives on the second, and the controls that act on it at the far end.
+   `delete` is deliberately not one of them — it hides behind the ⋯, because the
+   most destructive button on the page had been sitting one stray click away
+   from the scrollbar. */
+function threadHeader(thread) {
+  const model = thread.effectiveModel ?? thread.model;
+  return h("header", { class: "thread-head" },
+    backButton(),
+    h("div", { class: "thread-head-text min-w-0" },
+      h("div", { class: "thread-head-title truncate" }, thread.title ?? "(untitled)"),
+      h("div", { class: "thread-head-meta" },
+        channelSource(thread.sessionKey),
+        // The conversation in words; the raw session key stays one hover away.
+        h("span", { class: "truncate", title: thread.sessionKey }, withoutChannelPrefix(thread.conversation, thread.sessionKey)),
+        h("span", { class: "meta-sep" }, "·"),
+        h("span", { class: "text-warning shrink-0" }, thread.workspace),
+        model ? h("span", { class: "meta-sep" }, "·") : null,
+        model ? h("span", { class: "font-mono truncate", title: "model leading this thread" }, model) : null,
+      ),
+    ),
+    h("div", { class: "thread-head-actions" },
+      // Says the same thing the sign in the sidebar does, at the one place a
+      // reader of this thread is already looking.
+      h("span", { class: "running-pill" }, h("i", { class: "running-dot" }), "running"),
+      h("button", {
+        class: `toolbar-icon${state.showRequests ? " is-active" : ""}`,
+        title: state.showRequests ? "hide provider requests" : "show provider requests",
+        "aria-label": "Provider requests",
+        "aria-pressed": String(state.showRequests),
+        onclick: toggleRequests,
+      }, "⚡"),
+      threadMenu(thread.id),
+    ),
+  );
+}
+
+function toggleRequests() {
+  state.showRequests = !state.showRequests;
+  prefs.set("requests", state.showRequests ? "1" : "0");
+  renderThreadPane();
+}
+
+/** The ⋯ overflow. Native <details> so Escape and click-outside are the only
+ *  things left to wire up, and so it needs no focus bookkeeping of its own. */
+function threadMenu(id) {
+  const menu = h("details", { class: "thread-menu" },
+    h("summary", { class: "toolbar-icon", title: "more", "aria-label": "More actions" }, "⋯"),
+    h("div", { class: "thread-menu-body" },
+      h("button", { class: "menu-item", onclick: () => { menu.open = false; copyText(id, "Thread id copied."); } }, "Copy thread id"),
+      deleteThreadButton(id),
+    ),
+  );
+  return menu;
+}
+
+// One listener for every popover on the page: a click that isn't inside an open
+// <details> closes it, and so does Escape.
+document.addEventListener("click", (event) => {
+  for (const open of document.querySelectorAll("details.thread-menu[open]")) {
+    if (!open.contains(event.target)) open.open = false;
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  for (const open of document.querySelectorAll("details.thread-menu[open]")) open.open = false;
+});
+
+const copyText = (text, message) => navigator.clipboard.writeText(text).then(() => toast(message), () => toast("Could not copy.", true));
+
+/** Grows with what's typed instead of scrolling inside three fixed rows, and
+ *  stops at a height that still leaves the conversation visible. */
+function autoGrow(textarea) {
+  const fit = () => {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, Math.round(window.innerHeight * 0.35))}px`;
+  };
+  textarea.addEventListener("input", fit);
+  // The first fit has to wait for the element to be in the document — before
+  // that scrollHeight is 0 and the box would collapse.
+  requestAnimationFrame(fit);
+  return textarea;
+}
+
+function threadComposer(thread) {
+  const text = autoGrow(h("textarea", {
+    class: "composer-text",
+    id: "composer-text",
+    placeholder: `Message ${thread.workspace}…`,
+    rows: "1",
+    onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); } },
+  }));
+  return h("form", { class: "composer", onsubmit: sendMessage },
+    h("div", { class: "composer-box" },
+      text,
+      h("button", { class: "composer-send", type: "submit", title: "Send (Enter)", "aria-label": "Send", html: SEND_ICON }),
+      h("button", {
+        class: "composer-stop",
+        type: "button",
+        id: "stop-turn",
+        title: "abort the running turn (and drop input still waiting to start one)",
+        "aria-label": "Stop",
+        onclick: () => stopTurn(thread.id),
+      }, h("span", { class: "stop-square", "aria-hidden": "true" })),
+    ),
+    h("div", { class: "composer-hint" }, "Enter to send · Shift+Enter for a new line"),
+  );
+}
+
+/** Nothing open. An empty pane that only says so is a dead end — this one
+ *  offers the two things you can actually do from here. */
+function emptyPane() {
+  return h("div", { class: "pane-empty" },
+    h("div", { class: "pane-empty-mark display" }, "eleven"),
+    h("p", { class: "pane-empty-line" }, "Pick a thread on the left to read it, or start a new one."),
+    h("button", { class: "btn btn-primary", onclick: () => { newThreadDialog(); openPaneMobile(); } }, "New thread"),
+  );
+}
+
 let renderedThreadId;
 function renderThreadPane() {
   const pane = document.getElementById("thread-pane");
   if (!pane) return;
   const thread = state.activeThread;
+  pane.classList.remove("is-composing");
   if (!thread) {
     renderedThreadId = undefined;
-    pane.replaceChildren(
-      h("div", { class: "flex items-center justify-center h-full opacity-60" },
-        h("div", {}, "Pick a thread — or start one."),
-      ),
-    );
+    pane.classList.remove("is-running");
+    pane.replaceChildren(emptyPane());
     return;
   }
   // Re-rendering the same thread (a turn finished) should leave a reader who
@@ -905,41 +1088,59 @@ function renderThreadPane() {
   const prev = scroller();
   const keepScroll = renderedThreadId === thread.id && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
-  const messages = h("div", { class: "flex-1 overflow-y-auto p-4", id: "messages" },
-    h("div", { id: "transcript" }, durableRows()),
-    h("div", { id: "pending" }),
-    h("div", { id: "live" }),
-  );
-  const composer = h("form", { class: "flex gap-2 p-3 border-t border-base-300", onsubmit: sendMessage },
-    h("textarea", {
-      class: "textarea flex-1 min-h-10 max-h-40",
-      id: "composer-text",
-      placeholder: `Message ${thread.workspace}…`,
-      rows: "1",
-      onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); } },
-    }),
-    h("button", { class: "btn btn-primary", type: "submit" }, "Send"),
-  );
-  pane.replaceChildren(
-    h("div", { class: "flex items-center gap-3 px-4 py-3 border-b border-base-300" },
-      backButton(),
-      h("strong", { class: "truncate min-w-0" }, thread.title ?? "(untitled)"),
-      // The conversation in words; the raw session key stays one hover away.
-      h("span", { class: "text-xs opacity-50 truncate min-w-0", title: thread.sessionKey }, thread.conversation),
-      thread.model ? h("span", { class: "badge badge-ghost badge-sm font-mono" }, thread.model) : null,
-      h("div", { class: "ml-auto flex items-center gap-2 shrink-0" },
-        stopTurnButton(thread.id),
-        deleteThreadButton(thread.id),
-      ),
+  // The scroller is full-width (its scrollbar belongs to the pane edge) but the
+  // transcript inside it is capped at a readable measure: a bubble stretched
+  // across a 1400px pane is a paragraph nobody can track a line in.
+  const messages = h("div", { class: "messages", id: "messages", onscroll: onTranscriptScroll },
+    h("div", { class: "msg-col" },
+      h("div", { id: "transcript" }, durableRows()),
+      h("div", { id: "pending" }),
+      h("div", { id: "live" }),
+      // Shown by CSS only while a turn runs and has produced nothing yet —
+      // the gap between "sent" and the first token used to look like a hang.
+      h("div", { class: "typing" }, h("i"), h("i"), h("i")),
     ),
+  );
+  pane.classList.toggle("is-running", isThreadLive(thread.id));
+  pane.replaceChildren(
+    threadHeader(thread),
     messages,
-    composer,
+    h("button", { class: "jump-bottom", id: "jump-bottom", hidden: true, title: "Jump to the newest message", onclick: () => scrollToBottom(true) },
+      h("span", { html: ARROW_DOWN_ICON }), "Latest"),
+    threadComposer(thread),
   );
   // Both regions live inside the pane, so they can only be filled once it's
   // attached; the scroll position is applied after, over the finished height.
   renderPending();
   renderLive(true);
   messages.scrollTop = keepScroll ?? messages.scrollHeight;
+  updateJumpButton();
+}
+
+/* The "↓ Latest" pill. It exists because the transcript follows a running turn
+   only while the reader is at the bottom — scroll up to read something and the
+   page correctly stops moving, but then nothing on screen says the conversation
+   went on without you. */
+function updateJumpButton() {
+  const button = document.getElementById("jump-bottom");
+  const el = scroller();
+  if (!button || !el) return;
+  const away = !atBottom(el);
+  button.hidden = !away;
+  if (!away) button.classList.remove("has-new");
+}
+const onTranscriptScroll = () => updateJumpButton();
+function scrollToBottom(smooth = false) {
+  const el = scroller();
+  if (!el) return;
+  el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  updateJumpButton();
+}
+/** Something arrived while the reader was up in the history — mark the pill. */
+function markUnreadBelow() {
+  const button = document.getElementById("jump-bottom");
+  const el = scroller();
+  if (button && el && !atBottom(el)) button.classList.add("has-new");
 }
 
 const fmtBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
@@ -1153,22 +1354,9 @@ async function openToolCallModal(name, args, callId) {
   showToolCallModal(name, args, result);
 }
 
-// Deletion is irreversible (history, request logs, and referenced media all
-// go), so it takes two clicks: the first arms the button, the second commits.
-// No native confirm() — a modal dialog would block scripted browsers.
-// Abort the running turn — the dashboard's /stop. Hidden while nothing runs,
-// and shown or hidden by applyThreadLive as the thread starts and stops
-// speaking, so it never needs the whole pane re-rendered to appear.
-function stopTurnButton(id) {
-  return h("button", {
-    id: "stop-turn",
-    class: "btn btn-ghost btn-xs text-warning",
-    hidden: !isThreadLive(id),
-    title: "abort the running turn (and drop input still waiting to start one)",
-    onclick: () => stopTurn(id),
-  }, "⏹ stop");
-}
-
+// Abort the running turn — the dashboard's /stop. The button lives in the
+// composer and is shown or hidden by the pane's is-running class, so it never
+// needs the whole pane re-rendered to appear.
 async function stopTurn(id) {
   let result;
   try {
@@ -1181,26 +1369,29 @@ async function stopTurn(id) {
   toast(result.stopped || result.dropped ? "Stopping…" : "Nothing was running.");
 }
 
+// Deletion is irreversible (history, request logs, and referenced media all
+// go), so it takes two clicks: the first arms the button, the second commits.
+// No native confirm() — a modal dialog would block scripted browsers.
 function deleteThreadButton(id) {
   let armed;
   const button = h("button", {
-    class: "btn btn-ghost btn-xs text-error",
+    class: "menu-item is-danger",
     title: "delete this thread and all its files (history, requests, media)",
     onclick: () => {
       if (!armed) {
-        button.textContent = "sure?";
-        button.classList.add("btn-error", "btn-active");
+        button.textContent = "Delete — click again";
+        button.classList.add("is-armed");
         armed = setTimeout(() => {
           armed = undefined;
-          button.textContent = "delete";
-          button.classList.remove("btn-error", "btn-active");
+          button.textContent = "Delete thread";
+          button.classList.remove("is-armed");
         }, 4000);
         return;
       }
       clearTimeout(armed);
       deleteThread(id);
     },
-  }, "delete");
+  }, "Delete thread");
   return button;
 }
 
@@ -1227,11 +1418,13 @@ async function sendMessage(event) {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
+  input.dispatchEvent(new Event("input")); // shrink the grown box back to one row
   // Optimistic bubble: it stays until the transcript read finds the real one,
   // so a long turn doesn't leave the message you just sent off-screen.
   const message = { role: "user", text };
   state.pending.push(message);
   renderPending();
+  scrollToBottom(); // your own message is always worth following down to
   try {
     await api.send("POST", `/threads/${state.activeThread.id}/message`, { text });
   } catch (error) {
@@ -1240,6 +1433,7 @@ async function sendMessage(event) {
     toast(error.message, true);
     state.pending = state.pending.filter((entry) => entry !== message);
     input.value = text;
+    input.dispatchEvent(new Event("input"));
     renderPending();
   }
 }
@@ -1307,33 +1501,111 @@ function searchBox() {
   );
 }
 
+/**
+ * Starting a thread is writing the first message — so the message is the page,
+ * not a field on a form. The workspace picker sits under the box as a row of
+ * pills (it's a choice between three or four names, not a database), remembers
+ * what you chose last, and disappears entirely when there is only one
+ * workspace to pick.
+ */
 function newThreadDialog() {
-  const workspaces = state.overview?.workspaces ?? [];
   const pane = document.getElementById("thread-pane");
+  if (!pane) return;
+  const workspaces = state.overview?.workspaces ?? [];
+  const previous = state.activeThread;
   state.activeThread = null;
-  const select = h("select", { class: "select w-full" }, workspaces.map((w) => h("option", { value: w }, w)));
-  const text = h("textarea", { class: "textarea w-full", placeholder: "First message…", rows: "3" });
+  renderedThreadId = undefined;
+  pane.classList.remove("is-running");
+  pane.classList.add("is-composing");
+
+  const remembered = prefs.get("workspace", "");
+  let workspace = workspaces.includes(remembered) ? remembered : workspaces[0];
+
+  const text = autoGrow(h("textarea", {
+    class: "composer-text new-thread-text",
+    placeholder: "What do you need?",
+    rows: "3",
+    oninput: () => refreshStart(),
+    onkeydown: (event) => {
+      if (event.key === "Escape") return cancel();
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); start(); }
+    },
+  }));
+
+  const picker = h("div", { class: "ws-picker" }, workspaces.map((name) =>
+    h("button", {
+      type: "button",
+      class: `ws-pill${name === workspace ? " is-on" : ""}`,
+      "aria-pressed": String(name === workspace),
+      onclick: (event) => {
+        workspace = name;
+        for (const pill of picker.children) pill.classList.toggle("is-on", pill === event.currentTarget);
+        text.focus();
+      },
+    }, name),
+  ));
+
+  const startButton = h("button", { class: "btn btn-primary", disabled: true, onclick: () => start() }, "Start");
+  // No workspace configured yet means there is nowhere to run a turn — the
+  // button says so by staying off rather than by swallowing the click.
+  const refreshStart = () => { startButton.disabled = !text.value.trim() || !workspace || starting; };
+
+  let starting = false;
+  async function start() {
+    if (starting || !text.value.trim() || !workspace) return;
+    starting = true;
+    startButton.textContent = "Starting…";
+    refreshStart();
+    const thread = await api
+      .send("POST", "/threads", { workspace, text: text.value.trim() })
+      .catch((error) => (toast(error.message, true), null));
+    if (!thread) {
+      // Leave the draft exactly where it was — it is the only copy.
+      starting = false;
+      startButton.textContent = "Start";
+      refreshStart();
+      return;
+    }
+    prefs.set("workspace", workspace);
+    await refreshThreads();
+    openThread(thread.id);
+  }
+
+  function cancel() {
+    // Back to whatever was open before the launcher took the pane.
+    state.activeThread = previous;
+    renderThreadPane();
+    renderThreadList();
+    if (!previous) closePaneMobile();
+  }
+
   pane.replaceChildren(
-    h("div", { class: "flex items-center justify-center h-full" },
-      h("div", { class: "card bg-base-200 w-full max-w-md" },
-        h("div", { class: "card-body gap-3" },
-          h("div", { class: "flex items-center gap-2" },
-            backButton(),
-            h("h2", { class: "card-title text-base" }, "New thread"),
-          ),
-          labeled("Workspace", select),
-          labeled("Message", text),
-          h("div", { class: "card-actions justify-end" },
-            h("button", { class: "btn btn-primary", onclick: async () => {
-              if (!text.value.trim()) return;
-              const thread = await api.send("POST", "/threads", { workspace: select.value, text: text.value.trim() }).catch((e) => (toast(e.message, true), null));
-              if (thread) { await refreshThreads(); openThread(thread.id); }
-            } }, "Start"),
-          ),
+    h("div", { class: "new-thread" },
+      h("div", { class: "new-thread-card" },
+        h("div", { class: "new-thread-head" },
+          backButton(),
+          h("h2", { class: "page-title" }, "New thread"),
+        ),
+        h("div", { class: "composer-box is-tall" }, text),
+        workspaces.length > 1
+          ? h("div", { class: "new-thread-ws" },
+              h("span", { class: "dim-label text-xs" }, "Workspace"),
+              picker,
+            )
+          : h("div", { class: "new-thread-ws" },
+              h("span", { class: "dim-label text-xs" }, "Workspace"),
+              h("span", { class: "font-mono text-xs text-warning" }, workspace ?? "none configured"),
+            ),
+        h("div", { class: "new-thread-actions" },
+          h("span", { class: "composer-hint" }, "Enter to start · Shift+Enter for a new line"),
+          h("button", { class: "btn btn-ghost", type: "button", onclick: cancel }, "Cancel"),
+          startButton,
         ),
       ),
     ),
   );
+  renderThreadList(); // the list must stop showing a thread as open
+  text.focus();
 }
 
 /* ---------- workspaces view (agent + channels together) ---------- */

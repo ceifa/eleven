@@ -423,6 +423,11 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   transition: background-color 0.15s, border-color 0.15s, opacity 0.15s;
 }
 .btn:hover { background: color-mix(in oklab, var(--color-base-300) 70%, var(--color-base-content)); }
+/* A disabled button has to look disabled — a primary-red "Start" that ignores
+   the click reads as a broken page, not as a precondition. */
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn:disabled:hover { background: var(--color-base-300); }
+.btn-primary:disabled:hover { background: var(--color-primary); }
 .btn-sm { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
 .btn-xs { padding: 0.2rem 0.55rem; font-size: 0.75rem; }
 .btn-primary { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-primary-content); }
@@ -565,33 +570,337 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .modal-backdrop { position: fixed; inset: 0; z-index: 0; }
 .modal-backdrop button { width: 100%; height: 100%; background: transparent; border: 0; cursor: default; }
 
-/* ---------- chat bubbles ---------- */
+/* ---------- the conversation pane ---------- */
 
-.chat { display: flex; flex-direction: column; margin-bottom: 0.75rem; }
+/* The pane is a three-part column — head, transcript, composer — and the
+   position anchor for the things that float over the transcript (the jump-to-
+   latest pill). */
+#thread-pane { position: relative; }
+
+/* -- head -- */
+
+/* Two lines: what you are reading, and where it lives. The old head crammed
+   both onto one row and put `delete` at the end of it. */
+.thread-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--color-base-300);
+}
+.thread-head-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; }
+.thread-head-title { font-family: "Grenze", serif; font-weight: 700; font-size: 1.15rem; letter-spacing: 0.02em; }
+.thread-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: color-mix(in oklab, var(--color-base-content) 52%, transparent);
+}
+.thread-head-meta .channel-glyph svg { width: 0.85rem; height: 0.85rem; }
+.meta-sep { opacity: 0.45; flex-shrink: 0; }
+.thread-head-actions { display: flex; align-items: center; gap: 0.25rem; margin-left: auto; flex-shrink: 0; }
+
+/* "running" — the same news the sign in the sidebar carries, said where the
+   reader of this thread is already looking. Only present while the pane's
+   is-running class is. */
+.running-pill {
+  display: none;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.35rem;
+  padding: 0.1rem 0.5rem 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--color-warning) 40%, transparent);
+  background: color-mix(in oklab, var(--color-warning) 12%, transparent);
+  color: var(--color-warning);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+}
+#thread-pane.is-running .running-pill { display: inline-flex; }
+.running-dot { width: 0.4rem; height: 0.4rem; border-radius: 50%; background: currentColor; animation: e11-breathe 1.6s ease-in-out infinite; }
+@keyframes e11-breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+/* -- the ⋯ overflow -- */
+
+.thread-menu { position: relative; }
+.thread-menu > summary { list-style: none; font-size: 1rem; line-height: 1; }
+.thread-menu > summary::-webkit-details-marker { display: none; }
+.thread-menu[open] > summary { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+.thread-menu-body {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 40;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  border-radius: var(--radius-box);
+  border: 1px solid var(--color-base-300);
+  background: var(--color-base-200);
+  box-shadow: 0 12px 30px oklch(0% 0 0 / 0.55);
+}
+.menu-item {
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-field);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  color: color-mix(in oklab, var(--color-base-content) 85%, transparent);
+}
+.menu-item:hover { background: color-mix(in oklab, var(--color-base-content) 10%, transparent); color: var(--color-base-content); }
+.menu-item.is-danger { color: var(--color-error); }
+.menu-item.is-danger:hover { background: color-mix(in oklab, var(--color-error) 16%, transparent); }
+.menu-item.is-armed { background: var(--color-error); color: var(--color-error-content); }
+
+/* -- transcript -- */
+
+/* The scroller owns the full pane width, so its scrollbar sits at the pane's
+   edge; the column inside it is capped at a readable measure. A bubble stretched
+   across a 1400px pane is a paragraph nobody can track a line in. */
+.messages { flex: 1; min-height: 0; overflow-y: auto; padding: 1.25rem 1rem 0.5rem; display: flex; flex-direction: column; }
+/* margin-top:auto sits a short transcript on the composer instead of stranding
+   it at the top of a mostly empty pane — the first exchange of a new thread
+   should look like a conversation, not like a page that failed to fill. */
+.msg-col { width: 100%; max-width: 54rem; margin: auto auto 0; }
+
+/* A transcript spanning days reads as one endless column without these. */
+.day-sep { display: flex; align-items: center; gap: 0.75rem; margin: 1.4rem 0 1rem; }
+.day-sep::before, .day-sep::after {
+  content: ""; flex: 1; height: 1px;
+  background: color-mix(in oklab, var(--color-base-content) 12%, transparent);
+}
+.day-sep span {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
+}
+
+.chat { display: flex; flex-direction: column; margin-bottom: 0.9rem; }
 .chat-start { align-items: flex-start; }
 .chat-end { align-items: flex-end; }
+/* A message from the same speaker moments after the last one tucks under it
+   instead of opening a new block. */
+.chat.is-grouped { margin-top: -0.55rem; }
 .chat-bubble {
   position: relative;
-  max-width: 80%;
-  padding: 0.5rem 0.9rem;
+  max-width: 82%;
+  padding: 0.55rem 0.9rem;
   border-radius: 1rem;
-  background-color: var(--color-base-200);
+  border: 1px solid transparent;
   color: var(--color-base-content);
   white-space: normal;
 }
-.chat-bubble-primary { background-color: var(--color-primary); color: var(--color-primary-content); }
+/* The agent's side reads as paper on the void: a surface a shade above the pane
+   plus a hairline, because base-200 alone on base-100 was almost invisible. */
+.chat-start .chat-bubble {
+  background-color: color-mix(in oklab, var(--color-base-200) 88%, var(--color-base-300));
+  border-color: color-mix(in oklab, var(--color-base-content) 9%, transparent);
+  border-end-start-radius: 0.3rem;
+}
+.chat-end .chat-bubble {
+  background-color: var(--color-primary);
+  color: var(--color-primary-content);
+  border-end-end-radius: 0.3rem;
+}
 /* speech-bubble tail: a small triangle of the bubble's own colour tucked into
-   the bottom outer corner. It overlaps the bubble edge, so it's always flush —
-   no gap. */
-.chat-start .chat-bubble { border-end-start-radius: 0.25rem; }
-.chat-end   .chat-bubble { border-end-end-radius: 0.25rem; }
+   the bottom outer corner. Dropped on grouped followers — a run of bubbles
+   should have one tail, at the end. */
 .chat-bubble::after {
-  content: ""; position: absolute; bottom: 0;
+  content: ""; position: absolute; bottom: -1px;
   width: 0.7rem; height: 0.55rem;
   background-color: inherit;
 }
-.chat-start .chat-bubble::after { left: -0.45rem; clip-path: polygon(100% 0, 100% 100%, 0 100%); }
-.chat-end   .chat-bubble::after { right: -0.45rem; clip-path: polygon(0 0, 100% 100%, 0 100%); }
+.chat-start .chat-bubble::after { left: -0.4rem; clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+.chat-end   .chat-bubble::after { right: -0.4rem; clip-path: polygon(0 0, 100% 100%, 0 100%); }
+.chat:has(+ .chat.is-grouped) .chat-bubble::after { display: none; }
+
+/* When the message was said. Rendered on every bubble; hidden on the ones a
+   grouped follower makes redundant, so a run of messages carries exactly one
+   time — the one at its end. */
+.msg-time {
+  margin: 0.2rem 0.4rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  color: color-mix(in oklab, var(--color-base-content) 34%, transparent);
+}
+.chat:has(+ .chat.is-grouped) .msg-time { display: none; }
+
+/* The turn is running and has produced nothing yet — the gap between "sent"
+   and the first token used to look like a hang. Pure CSS: the dots appear only
+   while the pane is running AND the live region is still empty. */
+.typing { display: none; gap: 0.3rem; align-items: center; padding: 0.6rem 0.2rem; }
+#thread-pane.is-running #live:empty + .typing { display: flex; }
+.typing i {
+  width: 0.4rem; height: 0.4rem; border-radius: 50%;
+  background: var(--color-warning);
+  opacity: 0.35;
+  animation: e11-typing 1.2s ease-in-out infinite;
+}
+.typing i:nth-child(2) { animation-delay: 0.15s; }
+.typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes e11-typing { 0%, 100% { opacity: 0.25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) {
+  .typing i, .running-dot { animation: none; opacity: 0.7; }
+}
+
+/* -- jump to latest -- */
+
+/* The transcript follows a running turn only while the reader is at the bottom.
+   Scroll up and it correctly stops moving — but then nothing said the
+   conversation went on without you. This does. */
+.jump-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 6.5rem;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-base-300);
+  background: color-mix(in oklab, var(--color-base-200) 92%, transparent);
+  backdrop-filter: blur(8px);
+  color: color-mix(in oklab, var(--color-base-content) 75%, transparent);
+  font-size: 0.75rem;
+  box-shadow: 0 6px 20px oklch(0% 0 0 / 0.45);
+}
+.jump-bottom:hover { color: var(--color-base-content); border-color: color-mix(in oklab, var(--color-primary) 50%, transparent); }
+.jump-bottom svg { display: block; }
+/* something arrived while the reader was up in the history */
+.jump-bottom.has-new { border-color: var(--color-warning); color: var(--color-warning); }
+
+/* -- composer -- */
+
+.composer { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.75rem 1rem 0.9rem; }
+/* One surface holding the text and the button, rather than a bordered input
+   sitting next to a bordered button. */
+.composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 0.45rem 0.45rem 0.45rem 0.85rem;
+  border: 1px solid var(--color-base-300);
+  border-radius: 1.25rem;
+  background: var(--color-base-200);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.composer-box:focus-within {
+  border-color: color-mix(in oklab, var(--color-primary) 70%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 18%, transparent);
+}
+.composer-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0.35rem 0;
+  border: 0;
+  background: none;
+  color: var(--color-base-content);
+  resize: none;
+  line-height: 1.5;
+  max-height: 35vh;
+  overflow-y: auto;
+}
+.composer-text:focus { outline: none; }
+.composer-send, .composer-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 50%;
+  transition: background-color 0.15s, color 0.15s, opacity 0.15s;
+}
+.composer-send { background: var(--color-primary); color: var(--color-primary-content); }
+.composer-send:hover { background: color-mix(in oklab, var(--color-primary) 85%, white); }
+/* Empty box, nothing to send: the button steps back instead of promising an
+   action that does nothing. */
+.composer-box:not(:has(.composer-text:not(:placeholder-shown))) .composer-send {
+  background: var(--color-base-300);
+  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+}
+.composer-stop { display: none; background: var(--color-warning); color: var(--color-warning-content); }
+.composer-stop:hover { background: color-mix(in oklab, var(--color-warning) 85%, white); }
+.stop-square { width: 0.7rem; height: 0.7rem; border-radius: 0.15rem; background: currentColor; }
+/* While a turn runs, the one button in the composer is the one that stops it. */
+#thread-pane.is-running .composer-send { display: none; }
+#thread-pane.is-running .composer-stop { display: inline-flex; }
+.composer-hint {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding-left: 0.9rem;
+  width: 100%;
+  font-size: 0.68rem;
+  color: color-mix(in oklab, var(--color-base-content) 30%, transparent);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.composer:focus-within .composer-hint { opacity: 1; }
+
+/* -- nothing open -- */
+
+.pane-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+.pane-empty-mark {
+  font-family: "Grenze", serif;
+  font-weight: 800;
+  font-size: 2.6rem;
+  letter-spacing: 0.06em;
+  color: color-mix(in oklab, var(--color-primary) 45%, transparent);
+  text-shadow: 0 0 30px oklch(55% 0.22 27 / 0.25);
+}
+.pane-empty-line { max-width: 24rem; font-size: 0.9rem; color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
+
+/* -- new thread -- */
+
+/* Starting a thread is writing the first message, so the message is the page.
+   The old dialog was a 28rem card floating in the middle of an empty pane with
+   a select above a three-row textarea. */
+.new-thread { display: flex; align-items: center; justify-content: center; height: 100%; padding: 1.5rem; overflow-y: auto; }
+.new-thread-card { display: flex; flex-direction: column; gap: 0.9rem; width: 100%; max-width: 38rem; }
+.new-thread-head { display: flex; align-items: center; gap: 0.5rem; }
+.new-thread-card .composer-box.is-tall { align-items: stretch; padding: 0.9rem 1rem; border-radius: var(--radius-box); }
+.new-thread-text { min-height: 5.5rem; font-size: 1rem; }
+.new-thread-ws { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.new-thread-actions { display: flex; align-items: center; gap: 0.6rem; }
+.new-thread-actions .composer-hint { margin: 0; padding: 0; width: auto; opacity: 1; margin-right: auto; }
+
+/* A choice between three or four names is a row of pills, not a dropdown. */
+.ws-picker { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.ws-pill {
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--color-base-300);
+  border-radius: 999px;
+  background: var(--color-base-200);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+  transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+}
+.ws-pill:hover { color: var(--color-base-content); }
+.ws-pill.is-on {
+  border-color: color-mix(in oklab, var(--color-primary) 65%, transparent);
+  background: color-mix(in oklab, var(--color-primary) 16%, transparent);
+  color: color-mix(in oklab, var(--color-base-content) 95%, transparent);
+}
 
 /* ---------- table ---------- */
 
@@ -708,13 +1017,34 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 
 /* ---------- transcript markdown ---------- */
 
-.msg-body { white-space: pre-wrap; word-break: break-word; }
+/* md() emits real blocks now — paragraphs, lists, headings — so the body no
+   longer leans on pre-wrap to keep an agent's layout. Vertical rhythm lives
+   here instead of in the double newlines the writer happened to use. */
+.msg-body { word-break: break-word; }
+.msg-body > :first-child { margin-top: 0; }
+.msg-body > :last-child { margin-bottom: 0; }
+.msg-body p { margin: 0.5rem 0; }
+.msg-body h4 { margin: 0.9rem 0 0.35rem; font-size: 0.95rem; font-weight: 700; letter-spacing: 0.01em; }
+.msg-body ul, .msg-body ol { margin: 0.5rem 0; padding-left: 1.25rem; }
+.msg-body li { margin: 0.15rem 0; }
+.msg-body li::marker { color: color-mix(in oklab, currentColor 55%, transparent); }
+.msg-body li.task { list-style: none; margin-left: -1.1rem; display: flex; gap: 0.45rem; align-items: baseline; }
+.msg-body li.task input { accent-color: var(--color-primary); }
+.msg-body blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid color-mix(in oklab, currentColor 30%, transparent);
+  color: color-mix(in oklab, currentColor 80%, transparent);
+}
+.msg-body hr { margin: 0.75rem 0; border: 0; border-top: 1px solid color-mix(in oklab, currentColor 20%, transparent); }
 .msg-body pre { background: oklch(0% 0 0 / 0.35); border-radius: 0.5rem; padding: 0.6rem 0.8rem;
-  overflow-x: auto; white-space: pre; font-size: 0.8rem; margin: 0.4rem 0; }
+  overflow-x: auto; white-space: pre; font-size: 0.8rem; margin: 0.5rem 0; line-height: 1.5; }
 .msg-body code { font-size: 0.85em; background: oklch(0% 0 0 / 0.35); padding: 0.1em 0.35em; border-radius: 0.25rem;
   font-family: var(--font-mono); }
 .msg-body pre code { background: none; padding: 0; }
-.msg-streaming .msg-body::after { content: "▍"; color: var(--color-accent); animation: e11-blink 1s steps(1) infinite; }
+/* The caret rides the last block, not the body — after a <p> a body-level
+   ::after would drop onto a line of its own. */
+.msg-streaming .msg-body > :last-child::after { content: "▍"; color: var(--color-accent); animation: e11-blink 1s steps(1) infinite; }
 @keyframes e11-blink { 50% { opacity: 0; } }
 
 /* ---------- tool calls ---------- */
@@ -724,24 +1054,30 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
    per call, arg preview truncated to a single line; clickable rows open the
    JSON viewer with every arg. */
 .tool-calls {
-  max-width: 80%;
-  margin: 0 0 0.75rem;
-  padding-left: 0.7rem;
-  border-left: 2px solid color-mix(in oklab, var(--color-base-content) 20%, transparent);
+  max-width: 82%;
+  margin: 0 0 0.9rem;
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  border-left: 2px solid color-mix(in oklab, var(--color-warning) 35%, transparent);
 }
 .tool-call {
   display: flex; gap: 0.5rem; align-items: baseline;
-  font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;
-  opacity: 0.6;
+  padding: 0.12rem 0.35rem 0.12rem 0;
+  border-radius: var(--radius-field);
+  font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.55;
+  color: color-mix(in oklab, var(--color-base-content) 52%, transparent);
 }
 .tool-call.is-clickable { cursor: pointer; }
-.tool-call.is-clickable:hover { opacity: 0.9; }
-.tool-call-name { flex: 0 0 auto; white-space: nowrap; }
+.tool-call.is-clickable:hover { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
+/* The tool's name carries the row; the argument is the caption under it. */
+.tool-call-name { flex: 0 0 auto; white-space: nowrap; color: color-mix(in oklab, var(--color-warning) 75%, var(--color-base-content)); }
 .tool-call-arg {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  opacity: 0.85;
 }
+/* The affordance that says a row opens something — visible only under the
+   pointer, so a block of calls stays a quiet list until you go looking. */
+.tool-call-open { flex: 0 0 auto; opacity: 0; transition: opacity 0.15s; }
+.tool-call.is-clickable:hover .tool-call-open { opacity: 0.7; }
 /* Tool result body in the modal: raw text (newlines preserved), scrollable so a
    big output doesn't push the args off-screen; a red tint when the call errored. */
 .toolcall-result {
@@ -879,8 +1215,6 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .h-full { height: 100%; }
 .h-screen { height: 100vh; }
 .min-h-0 { min-height: 0; }
-.min-h-10 { min-height: 2.5rem; }
-.max-h-40 { max-height: 10rem; }
 
 .text-xs { font-size: 0.75rem; }
 .text-sm { font-size: 0.875rem; }
@@ -992,6 +1326,19 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   #thread-pane { display: none; }
   .threads-layout.pane-open .threads-list-col { display: none; }
   .threads-layout.pane-open #thread-pane { display: flex; width: 100%; }
+
+  /* The conversation gets the whole phone: less chrome, wider bubbles, and a
+     composer that sits where a thumb already is. */
+  .thread-head { padding: 0.55rem 0.6rem; gap: 0.4rem; }
+  .thread-head-title { font-size: 1.05rem; }
+  .messages { padding: 0.9rem 0.75rem 0.5rem; }
+  .chat-bubble, .tool-calls { max-width: 90%; }
+  .composer { padding: 0.5rem 0.6rem 0.7rem; }
+  .composer-hint { display: none; } /* no keyboard to explain */
+  .composer-send, .composer-stop { width: 2.3rem; height: 2.3rem; }
+  .jump-bottom { bottom: 5rem; }
+  .new-thread { padding: 0.75rem; align-items: flex-start; }
+  .new-thread-actions .composer-hint { display: none; }
 
   /* Config forms: fixed-width field rows stack into full-width columns. The
      child rule sits after the .w-28/.w-36 utilities it overrides, so it wins

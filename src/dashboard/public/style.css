@@ -281,17 +281,79 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   color: inherit;
   border-radius: 2px;
 }
-/* The channel filter sits beside the search box, so it takes only the width its
-   longest option needs and leaves the rest of the row to the query. The wrapper
-   is display:contents — it exists to be replaced by script, not to lay out. */
-#channel-filter { display: contents; }
-.channel-select {
-  flex: 0 0 auto;
-  width: auto;
-  max-width: 45%;
-  font-size: 0.78rem;
-  color: color-mix(in oklab, var(--color-base-content) 75%, transparent);
+/* ---------- threads toolbar ---------- */
+
+/* The whole head of the list column: a search field and a + . No card, no
+   panel, no boxed controls — the chrome is a single hairline under the row,
+   and everything else is the list. */
+.threads-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-base-300) 70%, transparent);
 }
+.search-field { display: flex; align-items: center; gap: 0.45rem; flex: 1; min-width: 0; }
+.search-glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+}
+/* A bare input: the row's hairline is its only edge, so focus is shown by the
+   glyph and placeholder waking up rather than by a ring appearing. */
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0;
+  border: 0;
+  background: none;
+  color: var(--color-base-content);
+  font-size: 0.85rem;
+}
+.search-input:focus { outline: none; }
+.search-field:focus-within .search-glyph { color: var(--color-primary); }
+.search-input::-webkit-search-cancel-button { filter: grayscale(1) opacity(0.5); }
+.toolbar-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-field);
+  background: none;
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  transition: color 0.15s, background-color 0.15s;
+}
+.toolbar-add:hover { color: var(--color-primary); background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+
+/* Filters read as text, not as form controls: dim mono words with a caret,
+   spending no vertical rhythm on borders. The row disappears entirely when
+   there is nothing worth filtering. */
+.threads-filters { display: flex; align-items: center; gap: 0.9rem; padding: 0 0.1rem; }
+.threads-filters:empty { display: none; }
+.bare-select {
+  appearance: none;
+  max-width: 48%;
+  padding: 0 0.85rem 0 0;
+  border: 0;
+  background: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23888' stroke-width='1.6'%3E%3Cpath d='M4 6.5l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right center;
+  background-size: 0.7rem;
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  transition: color 0.15s;
+}
+.bare-select:hover, .bare-select:focus { color: var(--color-base-content); outline: none; }
+/* The native menu inherits the control's font otherwise — and a 0.72rem popup
+   is unreadable. */
+.bare-select option { font-size: 0.85rem; color: var(--color-base-content); background: var(--color-base-100); }
 /* Integer px (1rem = 16px) keeps the small icon's edges crisp. */
 .channel-glyph svg { display: block; width: 1rem; height: 1rem; }
 
@@ -800,10 +862,11 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .bg-base-100 { background-color: var(--color-base-100); }
 .bg-base-200 { background-color: var(--color-base-200); }
 
-/* Two-pane threads layout height. The mobile block swaps this for a dvh value
-   that also accounts for the top bar; keeping it in CSS (not an inline style on
-   the element) lets that override win by source order without !important. */
-.threads-layout { height: calc(100vh - 7rem); }
+/* Two-pane threads layout height: the viewport minus #view's padding (the view
+   carries no page title). The mobile block swaps this for a dvh value that also
+   accounts for the top bar; keeping it in CSS (not an inline style on the
+   element) lets that override win by source order without !important. */
+.threads-layout { height: calc(100vh - 3rem); }
 
 /* ---------- mobile top bar + nav drawer (hidden on desktop) ---------- */
 
@@ -881,7 +944,7 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   /* Threads: swap between the list and the open conversation instead of
      showing both side by side. These rules sit after the utilities they
      override, so source order wins without !important. */
-  .threads-layout { height: calc(100dvh - 8.5rem); gap: 0; }
+  .threads-layout { height: calc(100dvh - 5.5rem); gap: 0; }
   .threads-list-col { width: 100%; }
   #thread-pane { display: none; }
   .threads-layout.pane-open .threads-list-col { display: none; }
@@ -898,8 +961,13 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 
   /* 16px inputs stop iOS from auto-zooming on focus (.input covers .input-sm,
      which always carries .input too); .input-xs stays compact. Roomier taps. */
-  .input, .select, .textarea { font-size: 16px; }
+  .input, .select, .textarea, .search-input { font-size: 16px; }
   .input-xs { font-size: 0.85rem; }
+  /* The bare toolbar controls carry no .btn padding — give them a thumb. */
+  .threads-toolbar { padding-bottom: 0.5rem; }
+  .search-input { padding: 0.4rem 0; }
+  .toolbar-add { width: 2.25rem; height: 2.25rem; }
+  .bare-select { font-size: 0.8rem; padding-block: 0.25rem; }
   .btn { min-height: 2.5rem; }
   .btn-sm { min-height: 2.25rem; }
 

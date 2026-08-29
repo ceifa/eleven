@@ -61,6 +61,9 @@ const DASHBOARD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-lab
 const CLI_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="CLI" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7.5 10 2.4 2.3-2.4 2.3M13 14.6h3.6"/></svg>`;
 const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
 
+const SEARCH_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="m10.3 10.3 3.2 3.2"/></svg>`;
+const PLUS_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>`;
+
 // A thread's origin — the sessionKey's prefix is the channel type
 // (telegram:…, dashboard:…). The glyph sits next to the conversation name, so
 // a type we have no icon for renders nothing: the name already says "Dashboard"
@@ -493,7 +496,7 @@ function toggleGroup(sessionKey) {
 function renderThreadList() {
   const list = document.getElementById("thread-list");
   if (!list) return;
-  renderChannelFilter();
+  renderThreadFilters();
   const rows = [];
   for (const group of groupThreads(state.threads)) {
     const [head, ...older] = group;
@@ -517,33 +520,33 @@ function renderThreadList() {
 }
 
 /**
- * The channel filter rides on the search row rather than taking one of its own:
- * a second select stacked under the workspace one would spend a chunk of a
- * narrow column on something you change once a week. It only appears when there
- * is more than one kind of channel to choose between — with a single bot and no
- * dashboard threads, the control would be a dropdown with one real option.
+ * Workspace and channel filters, on one quiet line under the search box. Each
+ * appears only when it has more than one thing to choose between: with a single
+ * workspace and a single bot, both would be dropdowns with one real option, and
+ * an empty filter line collapses (`.threads-filters:empty`) rather than spending
+ * a row of a narrow column on nothing.
  */
-let renderedSources = "";
-function renderChannelFilter() {
-  const slot = document.getElementById("channel-filter");
+let renderedFilters = "";
+function renderThreadFilters() {
+  const slot = document.getElementById("thread-filters");
   if (!slot) return;
   const sources = [...state.sources].sort();
-  const signature = sources.join(",");
-  if (signature === renderedSources) return; // never rebuild a select under an open menu
-  renderedSources = signature;
+  const workspaces = Object.keys(state.overview?.workspaces ?? {});
+  const signature = `${workspaces.join(",")}|${sources.join(",")}`;
+  if (signature === renderedFilters) return; // never rebuild a select under an open menu
+  renderedFilters = signature;
+  const filter = (key, all, options) =>
+    h("select", {
+      class: "bare-select",
+      title: `filter by ${key === "workspaceFilter" ? "workspace" : "channel"}`,
+      onchange: (event) => { state[key] = event.target.value; refreshThreads(); },
+    },
+      h("option", { value: "" }, all),
+      options.map((option) => h("option", { value: option, selected: state[key] === option }, option)),
+    );
   slot.replaceChildren(
-    ...(sources.length > 1
-      ? [
-          h("select", {
-            class: "select select-sm channel-select",
-            title: "filter by channel",
-            onchange: (event) => { state.filterSource = event.target.value; refreshThreads(); },
-          },
-            h("option", { value: "" }, "all channels"),
-            sources.map((source) => h("option", { value: source, selected: state.filterSource === source }, source)),
-          ),
-        ]
-      : []),
+    ...(workspaces.length > 1 ? [filter("workspaceFilter", "all workspaces", workspaces)] : []),
+    ...(sources.length > 1 ? [filter("filterSource", "all channels", sources)] : []),
   );
 }
 
@@ -1117,22 +1120,26 @@ async function sendMessage(event) {
   }
 }
 
+/** No page title here: the sidebar already says which view this is, and the
+ *  list is the whole page. What's left above the threads is one search row and,
+ *  only when there is something to choose between, a line of quiet filters. */
 async function viewThreads() {
   await refreshThreads();
-  renderedSources = ""; // the markup below is a fresh DOM — the filter has to be built into it again
-  const workspaces = Object.keys(state.overview?.workspaces ?? {});
+  renderedFilters = ""; // the markup below is a fresh DOM — the filters have to be built into it again
   view.replaceChildren(
-    pageTitle("Threads"),
     h("div", { class: "threads-layout flex gap-4", id: "threads-layout" },
       h("div", { class: "threads-list-col w-72 shrink-0 flex flex-col gap-2" },
-        h("div", { class: "flex gap-2" },
-          h("select", { class: "select select-sm flex-1", onchange: (e) => { state.workspaceFilter = e.target.value; refreshThreads(); } },
-            h("option", { value: "" }, "all workspaces"),
-            workspaces.map((w) => h("option", { value: w, selected: state.workspaceFilter === w }, w)),
-          ),
-          h("button", { class: "btn btn-sm btn-primary", onclick: () => { newThreadDialog(); openPaneMobile(); } }, "New"),
+        h("div", { class: "threads-toolbar" },
+          searchBox(),
+          h("button", {
+            class: "toolbar-add",
+            title: "new thread",
+            "aria-label": "New thread",
+            onclick: () => { newThreadDialog(); openPaneMobile(); },
+            html: PLUS_ICON,
+          }),
         ),
-        h("div", { class: "flex gap-2" }, searchBox(), h("div", { id: "channel-filter" })),
+        h("div", { class: "threads-filters", id: "thread-filters" }),
         h("div", { class: "flex flex-col gap-2 overflow-y-auto pr-2 pt-1", id: "thread-list" }),
       ),
       h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),
@@ -1148,18 +1155,21 @@ async function viewThreads() {
 // answers a query by opening session files.
 let searchTimer;
 function searchBox() {
-  return h("input", {
-    class: "input input-sm w-full",
-    type: "search",
-    id: "thread-search",
-    placeholder: "Search threads…",
-    value: state.query,
-    oninput: (event) => {
-      state.query = event.target.value.trim();
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(refreshThreads, 250);
-    },
-  });
+  return h("div", { class: "search-field" },
+    h("span", { class: "search-glyph", "aria-hidden": "true", html: SEARCH_ICON }),
+    h("input", {
+      class: "search-input",
+      type: "search",
+      id: "thread-search",
+      placeholder: "Search",
+      value: state.query,
+      oninput: (event) => {
+        state.query = event.target.value.trim();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(refreshThreads, 250);
+      },
+    }),
+  );
 }
 
 function newThreadDialog() {

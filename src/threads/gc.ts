@@ -13,11 +13,12 @@ const log = logger("threads/gc");
  * Delete thread files older than the retention window: prune the index, then
  * remove every session JSONL and request log whose mtime predates the cutoff
  * and that no surviving thread references. The mtime sweep also catches files
- * orphaned before gc existed. Files of live (current) threads are never touched.
+ * orphaned before gc existed. Files of threads that survive the prune — every
+ * live one still inside its idle window — are never touched.
  */
-export async function collectGarbage(threads: ThreadStore, retentionMs: number): Promise<number> {
+export async function collectGarbage(threads: ThreadStore, retentionMs: number, idleMs: number): Promise<number> {
   await cleanupClaudeGarbage();
-  const pruned = threads.prune(retentionMs);
+  const pruned = threads.prune(retentionMs, idleMs);
   await Promise.allSettled(pruned.flatMap((thread) => {
     if (!thread.sessionFile) return [];
     let sessionId: string | undefined;

@@ -70,7 +70,10 @@ Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for y
 ```
 
 `models` is an ordered sequence: the first entry leads every turn, the rest are
-fallbacks tried in order when it fails. Any scope — workspace, group, topic —
+fallbacks tried in order when it fails. A failed attempt that already ran tools
+is never failed over automatically — a rewound transcript cannot undo a command
+or a sent message — so the failure comes with a **Retry on …** button that runs
+the rest of the sequence on your say-so. Any scope — workspace, group, topic —
 may carry its own `models` sequence, and the most specific one replaces the
 inherited sequence outright. `tools` narrows capabilities (`read`, `bash`,
 `edit`, `write`, and `web`/`agent` on the Claude Code runtime); a workspace's

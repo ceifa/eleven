@@ -104,6 +104,21 @@ function keyboard(rows?: { label: string; url?: string; data?: string }[][]) {
   return { inline_keyboard };
 }
 
+/**
+ * The same keyboard after a press: every action greyed out (Bot API 10.3
+ * disabled buttons), with a tick on the one that was taken. URL buttons are
+ * left alone — they are links, not actions, and stay useful after the fact.
+ */
+export function disableKeyboard(rows: InlineKeyboardButton[][], pressed?: string): InlineKeyboardButton[][] {
+  return rows.map((row) =>
+    row.map((button) => {
+      if ("url" in button || "disabled" in button) return button;
+      const taken = "callback_data" in button && button.callback_data === pressed;
+      return { text: taken ? `✓ ${button.text}` : button.text, disabled: {} };
+    }),
+  );
+}
+
 /** Telegram's callback_data limit is 64 *bytes*, not characters — a naive
  * .slice(0, 64) lets multi-byte labels (emoji/CJK) through and gets the whole
  * message rejected. Trim to the byte budget without splitting a code point. */

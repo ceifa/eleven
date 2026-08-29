@@ -11,7 +11,8 @@ import { parseTelegramSessionKey } from "./session-key.ts";
 import { DraftStream } from "./stream.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
-import { telegramTool } from "./tool.ts";
+import { isNoop, withRetry } from "./retry.ts";
+import { disableKeyboard, telegramTool } from "./tool.ts";
 import { logger } from "../../log.ts";
 
 const STALL_THRESHOLD_MS = 120_000;
@@ -50,12 +51,14 @@ interface Target {
   triggerMessageId?: number;
 }
 
-/** Registered with Telegram (the client's "/" menu) and handled in handleCommand. */
+/** Registered with Telegram (the client's "/" menu) and handled in handleCommand.
+ * Every answer is for the sender alone — in groups they are delivered as
+ * ephemeral messages, which `is_ephemeral` announces up front in the menu. */
 const COMMANDS = [
-  { command: "new", description: "Start a fresh thread" },
-  { command: "skills", description: "List the skills the agent can use here" },
-  { command: "usage", description: "Show model subscription usage" },
-  { command: "stop", description: "Abort the running turn" },
+  { command: "new", description: "Start a fresh thread", is_ephemeral: true },
+  { command: "skills", description: "List the skills the agent can use here", is_ephemeral: true },
+  { command: "usage", description: "Show model subscription usage", is_ephemeral: true },
+  { command: "stop", description: "Abort the running turn", is_ephemeral: true },
 ] as const;
 
 /** Keep one canonical command list. Telegram gives group-specific scopes
@@ -186,6 +189,10 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     return true;
   }
 
+  // Live draft previews by `chatId:draftId` — the key Telegram sends back when
+  // the user presses the draft's stop button.
+  const draftStops = new Map<string, string>();
+
   // Handled (chat, message_id) pairs — insertion-ordered so eviction drops the oldest.
   const seenMessages = new Map<string, number>();
   function alreadyHandled(chatId: number, messageId: number): boolean {
@@ -244,7 +251,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     sequentialize((ctx) => {
       const chat = ctx.chat?.id;
       if (chat === undefined) return undefined;
-      if (ctx.message?.text?.trim().startsWith("/stop")) return `${chat}:control`;
+      // Stops bypass the lane: both spellings of "stop" must reach the gateway
+      // without waiting behind a slow preparation (e.g. a long transcription).
+      if (ctx.message?.text?.trim().startsWith("/stop") || ctx.update.stopped_message_generation) return `${chat}:control`;
       const topic = topicOf(ctx.message);
       return topic !== undefined ? `${chat}:topic:${topic}` : String(chat);
     }),
@@ -252,6 +261,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   bot.on("message", (ctx) => handleMessage(ctx));
   bot.on("callback_query:data", (ctx) => handleCallback(ctx));
+  bot.on("stopped_message_generation", (ctx) => handleGenerationStopped(ctx));
 
   async function handleMessage(ctx: Context) {
     const message = ctx.message;
@@ -307,9 +317,42 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (!config || !from || !ctx.chat) return;
     // Same access policy as messages, minus the mention gate (a button press is explicit).
     if (senderAccess(ctx.chat, from.id, config) !== "ok") return;
+    // A pressed keyboard has done its job: grey it out so the same action can't
+    // be fired twice (and so the chat records which option was taken).
+    void disablePressedKeyboard(ctx).catch((error) => log.warn(`disabling keyboard failed: ${error}`));
     // Fire-and-forget: holding the prep lane for the whole turn would block
     // (and un-steer) every message behind it.
     void runTurn(targetFromContext(ctx), `[inline button pressed] ${ctx.callbackQuery!.data}`, []);
+  }
+
+  /** Grey out the pressed message's keyboard so the action can't be repeated. */
+  async function disablePressedKeyboard(ctx: Context) {
+    const message = ctx.callbackQuery?.message;
+    if (!message || !("reply_markup" in message)) return;
+    const rows = message.reply_markup?.inline_keyboard;
+    if (!rows?.length) return;
+    try {
+      await withRetry("idempotent", "disable keyboard", () =>
+        ctx.api.raw.editMessageReplyMarkup({
+          chat_id: message.chat.id,
+          message_id: message.message_id,
+          reply_markup: { inline_keyboard: disableKeyboard(rows, ctx.callbackQuery!.data) },
+        }),
+      );
+    } catch (error) {
+      if (!isNoop(error)) throw error;
+    }
+  }
+
+  /** The user pressed the stop button on a streaming draft — the same thing
+   * /stop does, minus the confirmation (the client already shows it). */
+  async function handleGenerationStopped(ctx: Context) {
+    const stopped = ctx.update.stopped_message_generation!;
+    const sessionKey = draftStops.get(`${stopped.chat.id}:${stopped.draft_id}`);
+    if (!sessionKey) return;
+    log.info(`stop button pressed in ${sessionKey}`);
+    discardBurst(sessionKey);
+    await deps.gateway.interrupt(sessionKey);
   }
 
   async function runTurn(target: Target, text: string, images: InboundImage[]) {
@@ -318,8 +361,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
     void bot.api.sendChatAction(chatId, "typing", { message_thread_id: topic }).catch(() => {});
 
-    // Native draft streaming previews the reply as it generates (private chats only).
+    // Native draft streaming previews the reply as it generates, and carries the
+    // turn's stop button (private chats only).
     const stream = isPrivate ? new DraftStream(bot.api, chatId, topic) : undefined;
+    const draftKey = stream && `${chatId}:${stream.draftId}`;
+    if (draftKey) draftStops.set(draftKey, sessionKey);
+    // Say something from the start: the bubble the reply will land in appears
+    // right away, thinking, and can be stopped from there.
+    stream?.thinking();
     const blocks: string[] = [];
     let current = "";
     let flushedEarly = false;
@@ -333,12 +382,17 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
           : undefined,
     };
-    const taskProgress = new TelegramTaskProgress(
-      bot.api,
-      chatId,
+    const taskProgress = new TelegramTaskProgress(bot.api, chatId, {
       topic,
-      sendOptions.replyParameters,
-    );
+      replyParameters: sendOptions.replyParameters,
+      // In a shared chat the status belongs to whoever asked, not to everyone.
+      ephemeralTo: isPrivate ? undefined : target.userId,
+      // Where a draft is streaming, it already says "working" — in the very
+      // bubble the answer will land in. A second message would just be noise;
+      // plan/agent content and retries still earn one.
+      toolRenderDelayMs: stream ? Infinity : undefined,
+      idleRenderDelayMs: stream ? Infinity : undefined,
+    });
     // A turn that produces no event at all (a provider stalling on the first
     // request) still owes the chat a sign of life — the typing action expires in
     // five seconds and says nothing about a turn that takes minutes.
@@ -393,7 +447,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             current = "";
           },
           onTaskActivity: (activity) => taskProgress.update(activity),
-          onToolCall: (name, args) => taskProgress.tool(name, summarizeToolArgs(args)),
+          onToolCall: (name, args) => {
+            taskProgress.tool(name, summarizeToolArgs(args));
+            // The name only: arguments can carry anything the model just read.
+            stream?.thinking(`Using ${name}…`);
+          },
           onRetry: (notice) => taskProgress.retry(notice),
         },
         // The final send runs inside the turn's durable window: the pending
@@ -419,8 +477,10 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}`, { messageThreadId: topic }).catch(() => {});
     } finally {
       // The turn is over — stop the draft preview so a throttled/flood-delayed
-      // flush can't re-post a stale draft after the final reply has landed.
+      // flush can't re-post a stale draft after the final reply has landed, and
+      // retire its stop button with it.
       stream?.cancel();
+      if (draftKey) draftStops.delete(draftKey);
       taskProgress.cancel();
     }
   }
@@ -449,7 +509,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const topic = topicOf(ctx.message);
     const sessionKey = sessionKeyFor(chat.id, topic);
     const [command] = text.split(/\s+/);
-    const reply = (markdown: string) => sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic }).then(() => true);
+    // A command answers the person who typed it — in a group the rest of the
+    // chat has no use for a skill list or a "Nothing running."
+    const ephemeralTo = chat.type === "private" ? undefined : ctx.from?.id;
+    const reply = (markdown: string) =>
+      sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, ephemeralTo }).then(() => true);
 
     switch (command.replace(`@${handle.username}`, "")) {
       case "/start":

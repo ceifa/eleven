@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ConfigStore, ModelScope, WorkspaceConfig } from "./config.ts";
+import type { ConfigStore, ModelEntry, ModelScope, WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
@@ -69,6 +69,9 @@ export interface IncomingMessage {
   /** Channel-resolved model scopes, most specific first (topic, then group) —
    * they outrank the workspace's own model settings. */
   modelScopes?: (ModelScope | undefined)[];
+  /** Explicit model plan for this turn, bypassing config resolution entirely —
+   * a manual failover retries on the tail its failed turn never reached. */
+  models?: ModelEntry[];
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
@@ -202,7 +205,7 @@ export class Gateway extends EventEmitter {
           sessionDir: join(THREADS_DIR, thread.workspace),
           workspacePath: workspace.config.path,
           runtime: { ...incoming.runtime, workspace: thread.workspace, workspacePath: workspace.config.path },
-          models: this.config.turnModels(thread.model, [...(incoming.modelScopes ?? []), workspace.config]),
+          models: incoming.models ?? this.config.turnModels(thread.model, [...(incoming.modelScopes ?? []), workspace.config]),
           tools: workspace.config.tools,
           customTools: incoming.customTools,
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },

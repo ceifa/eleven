@@ -119,6 +119,38 @@ export interface TurnResult {
   status: "completed" | "stopped";
 }
 
+/**
+ * A turn that gave up with candidates still untried. The runner never fails over
+ * automatically once an attempt ran tools — a transcript rewind cannot undo a
+ * Bash command, an edit or a sent message — so the untried tail is handed to the
+ * channel, which can offer the person a manual failover instead of a dead end.
+ */
+export class TurnFailure extends Error {
+  readonly failedModel: string;
+  /** Plan entries after the one that stopped the turn, in order. */
+  readonly remaining: ModelEntry[];
+
+  constructor(message: string, failedModel: string, remaining: ModelEntry[]) {
+    super(message);
+    this.name = "TurnFailure";
+    this.failedModel = failedModel;
+    this.remaining = remaining;
+  }
+}
+
+/**
+ * The error a failed turn throws: a `TurnFailure` when the plan had candidates
+ * after the one that stopped it, the plain error when the plan is exhausted
+ * (nothing left to offer).
+ */
+export function turnFailure(error: unknown, plan: ModelEntry[], stoppedAt: number): Error {
+  const failure = error instanceof Error ? error : new Error(error ? String(error) : "all models failed");
+  const remaining = plan.slice(stoppedAt + 1);
+  const failed = plan[stoppedAt]?.model;
+  if (!remaining.length || !failed) return failure;
+  return new TurnFailure(failure.message, failed, remaining);
+}
+
 interface ActiveTurn {
   session: AgentSession;
   /** Writes the transcript a steered message must be recorded in. */
@@ -451,7 +483,11 @@ export class Runner {
       // Failover branches back to this entry instead, abandoning the failed
       // attempt (session files stay append-only; only the leaf pointer moves).
       const turnStart = sessionManager.getLeafId();
+      // Where the plan stopped — a break past a toolful attempt leaves the tail
+      // untried, and that tail is what a manual failover would run.
+      let stoppedAt = 0;
       for (const [index, { entry, model }] of models.entries()) {
+        stoppedAt = index;
         attemptHadToolActivity = false;
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
@@ -508,7 +544,7 @@ export class Runner {
         this.dropSession(threadId);
         return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: activeModel.current, status: "stopped" };
       }
-      throw lastError ?? new Error("all models failed");
+      throw turnFailure(lastError, models.map(({ entry }) => entry), stoppedAt);
     } catch (error) {
       // pi persists what a provider produced, and a turn that gave up produced
       // nothing — so without this the transcript reads as if the message was

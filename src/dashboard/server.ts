@@ -193,13 +193,16 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return conversationIdentity(sessionKey, channels);
   }
 
-  /** The group/topic model scopes a Telegram conversation would run with. */
+  /** The owner/topic model scopes a Telegram conversation would run with — the
+   * owner being the group, or the person when the conversation is a DM. */
   function channelModelScopes(sessionKey: string) {
     const target = parseTelegramSessionKey(sessionKey);
     if (!target) return [];
-    const group = config.channels().find(({ channel }) => channel.name === target.channel)?.channel.groups?.[String(target.chatId)];
-    const topic = target.topic !== undefined ? group?.topics?.[String(target.topic)] : undefined;
-    return [topic, group];
+    const channel = config.channels().find((entry) => entry.channel.name === target.channel)?.channel;
+    const key = String(target.chatId);
+    const owner = target.chatId > 0 ? channel?.users?.[key] : channel?.groups?.[key];
+    const topic = target.topic !== undefined ? owner?.topics?.[String(target.topic)] : undefined;
+    return [topic, owner];
   }
 
   /** A thread as the API describes it. `sessionFile` is an absolute path nobody

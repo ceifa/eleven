@@ -33,16 +33,22 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   const channel = channels.find((entry) => entry.name === target.channel);
   const chatKey = String(target.chatId);
   // Positive ids are people, negative ones are groups — Telegram's own split.
-  if (target.chatId > 0) {
-    const user = channel?.users?.[chatKey];
-    const name = user?.name || (user?.username ? `@${user.username}` : chatKey);
-    return { name, context: "Telegram DM", label: `Telegram DM · ${name}` };
+  const inDm = target.chatId > 0;
+  const user = inDm ? channel?.users?.[chatKey] : undefined;
+  const group = inDm ? undefined : channel?.groups?.[chatKey];
+  // Whoever holds the topics: the person in a DM, the group in a group.
+  const owner = user ?? group;
+  const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || chatKey;
+  const channelContext = inDm ? "Telegram DM" : "Telegram";
+  if (target.topic === undefined) {
+    return { name: ownerName, context: channelContext, label: `${channelContext} · ${ownerName}` };
   }
-
-  const group = channel?.groups?.[chatKey];
-  const groupName = group?.title || chatKey;
-  if (target.topic === undefined) return { name: groupName, context: "Telegram", label: `Telegram · ${groupName}` };
-  // Inside a forum the topic is the conversation; the group is where it sits.
-  const topicName = group?.topics?.[String(target.topic)]?.title || `topic ${target.topic}`;
-  return { name: topicName, context: groupName, label: `Telegram · ${groupName} · ${topicName}` };
+  // Inside a forum the topic is the conversation; the group — or, in a DM with
+  // topic mode, the person — is where it sits.
+  const topicName = owner?.topics?.[String(target.topic)]?.title || `topic ${target.topic}`;
+  return {
+    name: topicName,
+    context: inDm ? `${channelContext} · ${ownerName}` : ownerName,
+    label: `${channelContext} · ${ownerName} · ${topicName}`,
+  };
 }

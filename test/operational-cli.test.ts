@@ -278,7 +278,7 @@ test("a conversation is named by its topic, then its group, then the person", ()
       type: "telegram" as const,
       name: "main",
       token: "t",
-      users: { "42": { name: "Gabriel" }, "43": { username: "ceifa" } },
+      users: { "42": { name: "Gabriel" }, "43": { username: "ceifa" }, "45": { name: "Samara", topics: { "3": { title: "work" } } } },
       groups: {
         "-100": { title: "Sesh", topics: { "7": { title: "eleven" } } },
         "-200": {},
@@ -298,12 +298,20 @@ test("a conversation is named by its topic, then its group, then the person", ()
   });
   assert.equal(conversationIdentity("telegram:main:42", channels).name, "Gabriel");
   assert.equal(conversationIdentity("telegram:main:43", channels).name, "@ceifa");
+  // A DM is a forum too when the bot has topic mode on: the topic becomes the
+  // conversation and the person becomes the context around it.
+  assert.deepEqual(conversationIdentity("telegram:main:45:topic:3", channels), {
+    name: "work",
+    context: "Telegram DM · Samara",
+    label: "Telegram DM · Samara · work",
+  });
   assert.equal(conversationIdentity("dashboard:agent:uuid", channels).name, "Dashboard");
   assert.equal(conversationIdentity("cli:agent:uuid", channels).name, "CLI");
 
   // Nothing is invented when the registry hasn't learned a name yet: the raw id
   // still identifies the chat, "unknown" would not.
   assert.equal(conversationIdentity("telegram:main:-100:topic:9", channels).name, "topic 9");
+  assert.equal(conversationIdentity("telegram:main:42:topic:9", channels).name, "topic 9");
   assert.equal(conversationIdentity("telegram:main:-200", channels).name, "-200");
   assert.equal(conversationIdentity("telegram:main:44", channels).name, "44");
   assert.equal(conversationIdentity("telegram:gone:-100:topic:7", channels).name, "topic 7");

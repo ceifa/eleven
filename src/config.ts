@@ -52,12 +52,16 @@ export interface GroupConfig extends ModelScope {
   topics?: Record<string, TopicConfig>;
 }
 
-export interface UserConfig {
+export interface UserConfig extends ModelScope {
   /** Display name — self-heals from live traffic, like group titles. */
   name?: string;
   username?: string;
   /** Extra instructions appended to this user's DM system prompt. */
   appendSystemPrompt?: string;
+  /** Topics of the DM itself, keyed by topic id — available once the bot has
+   * topic mode enabled (BotFather). Same deal as a forum's: one thread each,
+   * with their own instructions and models. */
+  topics?: Record<string, TopicConfig>;
 }
 
 export interface ChannelConfig {
@@ -203,9 +207,9 @@ export class ConfigStore extends EventEmitter {
       ...Object.values(workspaces).flatMap((w) => [
         ...scopeRefs(w),
         ...(w.channels ?? []).flatMap((channel) =>
-          Object.values(channel.groups ?? {}).flatMap((group) => [
-            ...scopeRefs(group),
-            ...Object.values(group.topics ?? {}).flatMap((topic) => scopeRefs(topic)),
+          [...Object.values(channel.groups ?? {}), ...Object.values(channel.users ?? {})].flatMap((scope) => [
+            ...scopeRefs(scope),
+            ...Object.values(scope.topics ?? {}).flatMap((topic) => scopeRefs(topic)),
           ]),
         ),
       ]),
@@ -267,6 +271,12 @@ export function validate(config: ElevenConfig) {
       for (const group of Object.values(channel.groups ?? {})) {
         validateSequence(group.models, `group "${group.title ?? "?"}" models`);
         for (const topic of Object.values(group.topics ?? {})) {
+          validateSequence(topic.models, `topic "${topic.title ?? "?"}" models`);
+        }
+      }
+      for (const user of Object.values(channel.users ?? {})) {
+        validateSequence(user.models, `user "${user.name ?? user.username ?? "?"}" models`);
+        for (const topic of Object.values(user.topics ?? {})) {
           validateSequence(topic.models, `topic "${topic.title ?? "?"}" models`);
         }
       }

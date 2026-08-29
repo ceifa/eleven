@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -226,6 +226,20 @@ test("a turn that failed stays in the transcript, where it failed", async () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the hidden attribute outranks the component styles that would keep it on screen", () => {
+  const dir = join(import.meta.dirname, "..", "src", "dashboard", "public");
+  const app = readFileSync(join(dir, "app.js"), "utf8");
+  const css = readFileSync(join(dir, "style.css"), "utf8");
+
+  // The dashboard hides things by attribute — the stop button, the pairing badge.
+  assert.match(app, /\.hidden = /);
+  // And the browser's own [hidden] { display: none } is a *user-agent* rule, so
+  // every author rule that sets display (.btn, .badge, .card — most of this
+  // file) silently outranks it: the element stays visible and the script has no
+  // way to know. The reset is what makes hiding work at all.
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important/);
 });
 
 test("Telegram delivery resolves bot, chat and forum topic from a session key", async () => {

@@ -11,6 +11,8 @@ export interface RichSendOptions {
   replyParameters?: ReplyParameters;
   replyMarkup?: InlineKeyboardMarkup;
   silent?: boolean;
+  /** Deliver as an ephemeral message, visible only to this user (groups only). */
+  ephemeralTo?: number;
 }
 
 /**
@@ -28,6 +30,7 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
         api.raw.sendRichMessage({
           chat_id: chatId,
           message_thread_id: options.messageThreadId,
+          ephemeral_message_parameters: options.ephemeralTo ? { receiver_user_id: options.ephemeralTo } : undefined,
           rich_message: { markdown: text },
           // Reply on the first chunk, keyboard on the last.
           reply_parameters: index === 0 ? options.replyParameters : undefined,

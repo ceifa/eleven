@@ -49,7 +49,8 @@ export interface ToolCallView {
  * a footer on the nearest message: a nested runtime (Claude Code) calls its
  * tools *before* it produces prose, so folding them into the reply printed them
  * under text that came after them. Rows are emitted in file order, which is the
- * order things actually happened.
+ * order things actually happened, and each carries the timestamp of the entry
+ * it came from — the display sorts by it.
  */
 export type ThreadItem =
   | { kind: "message"; role: "user" | "assistant"; text: string; timestamp?: string }
@@ -165,19 +166,17 @@ async function buildTimeline(sessionFile: string): Promise<ThreadItem[]> {
   branch.reverse();
 
   // File order is chronological order, so the rows come out in it: text where
-  // the model wrote text, tool calls where it called tools. Consecutive tool
-  // entries (a nested runtime writes one per call) merge into a single block so
-  // the transcript reads as one list, not one row per record. Rows own fresh
-  // arrays — the parsed nodes are cached and reused across reads.
+  // the model wrote text, tool calls where it called tools. One row per entry,
+  // each keeping its own timestamp — a nested runtime writes one entry per call,
+  // and folding those into a single block here would collapse a whole turn onto
+  // the first call's clock, leaving everything that happened between them (a
+  // message steered into the turn, a provider-request chip) with nowhere
+  // truthful to sort. The display merges adjacent runs instead, after the sort.
+  // Rows own fresh arrays — the parsed nodes are cached and reused across reads.
   const items: ThreadItem[] = [];
-  const pushCalls = (calls: ToolCallView[], timestamp?: string) => {
-    const last = items.at(-1);
-    if (last?.kind === "tool-calls") last.calls.push(...calls);
-    else items.push({ kind: "tool-calls", calls: [...calls], timestamp });
-  };
   for (const node of branch) {
     if (node.message?.text) items.push({ kind: "message", ...node.message, timestamp: node.timestamp });
-    if (node.calls?.length) pushCalls(node.calls, node.timestamp);
+    if (node.calls?.length) items.push({ kind: "tool-calls", calls: [...node.calls], timestamp: node.timestamp });
     if (node.error) items.push({ kind: "error", text: node.error, timestamp: node.timestamp });
   }
   return items;

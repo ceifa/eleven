@@ -148,14 +148,17 @@ test("the transcript renders tool calls as their own rows, in the order they hap
 
     const file = manager.getSessionFile()!;
     const timeline = await readThreadTimeline(file);
-    // The calls happened before the reply, so they render before it — and the
-    // consecutive records merge into a single block.
-    assert.deepEqual(timeline.map((item) => item.kind), ["message", "tool-calls", "message"]);
-    const calls = timeline[1];
-    assert.equal(calls.kind, "tool-calls");
-    if (calls.kind !== "tool-calls") return;
-    assert.deepEqual(calls.calls.map((call) => call.name), ["Read", "Bash"]);
-    assert.ok(calls.calls[0].summary.includes("/tmp/x.ts"));
+    // The calls happened before the reply, so they render before it — one row
+    // per record, each keeping the clock of the moment it was written. Folding
+    // them together here would put a whole turn's calls on the first one's
+    // timestamp, and everything that happened between them (a provider-request
+    // chip, a message steered into the turn) would have nowhere to sort.
+    assert.deepEqual(timeline.map((item) => item.kind), ["message", "tool-calls", "tool-calls", "message"]);
+    const [read, bash] = timeline.slice(1, 3);
+    assert.equal(read.kind === "tool-calls" && read.calls[0].name, "Read");
+    assert.ok(read.kind === "tool-calls" && read.calls[0].summary.includes("/tmp/x.ts"));
+    assert.equal(bash.kind === "tool-calls" && bash.calls[0].name, "Bash");
+    assert.ok(read.timestamp && bash.timestamp && read.timestamp <= bash.timestamp);
     assert.deepEqual(timeline.at(-1), { kind: "message", role: "assistant", text: "done", timestamp: timeline.at(-1)!.timestamp });
 
     // Turn 2 — the legacy shape (one record written right after the assistant
@@ -164,8 +167,8 @@ test("the transcript renders tool calls as their own rows, in the order they hap
     manager.appendMessage(assistant("lint is clean"));
     manager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [{ id: "claude:0:9", name: "Bash", args: { command: "npm run lint" } }] });
     const legacy = await readThreadTimeline(file);
-    assert.deepEqual(legacy.slice(3).map((item) => item.kind), ["message", "message", "tool-calls"]);
-    assert.deepEqual(legacy.slice(0, 3).map((item) => item.kind), ["message", "tool-calls", "message"]); // turn 1 untouched
+    assert.deepEqual(legacy.slice(4).map((item) => item.kind), ["message", "message", "tool-calls"]);
+    assert.deepEqual(legacy.slice(0, 4).map((item) => item.kind), ["message", "tool-calls", "tool-calls", "message"]); // turn 1 untouched
 
     // Turn 3 — a running (or crashed) turn has records but no assistant message
     // yet: the calls must still show up.
@@ -181,7 +184,7 @@ test("the transcript renders tool calls as their own rows, in the order they hap
     // entries behind them are cached and shared.
     const again = await readThreadTimeline(file);
     assert.deepEqual(again.map((item) => item.kind), running.map((item) => item.kind));
-    assert.equal(again[1].kind === "tool-calls" && again[1].calls.length, 2);
+    assert.equal(again[1].kind === "tool-calls" && again[1].calls.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

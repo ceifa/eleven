@@ -1512,8 +1512,8 @@ function systemPromptField(name, workspace) {
 /** The sequence a scope inherits when it doesn't carry its own: the nearest
  * ancestor's, or the global one from the Models page. Call with no arguments
  * for what a workspace inherits. */
-function inheritedSequenceFor(workspaceName, group) {
-  if (group?.models?.length) return { entries: group.models, source: "the group" };
+function inheritedSequenceFor(workspaceName, owner, ownerSource = "the group") {
+  if (owner?.models?.length) return { entries: owner.models, source: ownerSource };
   const workspace = state.config?.workspaces?.[workspaceName];
   if (workspace?.models?.length) return { entries: workspace.models, source: "the workspace" };
   return { entries: state.config?.models ?? [], source: "the Models page" };
@@ -1566,6 +1566,47 @@ function appendField(value, onchange) {
     "Extra instructions added at the end of the system prompt, only for this scope.");
 }
 
+/**
+ * The topics of whatever owns them — a group, or a person, since a bot with
+ * topic mode enabled has topics in its DMs too. `select` picks the owner out of
+ * a draft config so the same editor can write to either place.
+ * Adding/removing a topic changes the rendered rows, so those re-render;
+ * editing a topic's title or prompt updates in place.
+ */
+function topicsSection(workspaceName, owner, inherited, select) {
+  const patchTopic = (topicId, patch, structural = false) =>
+    updateWorkspace(workspaceName, (ws) => {
+      const target = select(ws);
+      const topics = { ...target.topics };
+      if (patch === null) delete topics[topicId];
+      else topics[topicId] = { ...topics[topicId], ...patch };
+      target.topics = Object.keys(topics).length ? topics : undefined;
+    }, { structural });
+  return [
+    h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, "Topics",
+      info("Each topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them — in a forum group, or in the DM of a bot with topic mode enabled.")),
+    ...Object.entries(owner.topics ?? {}).map(([topicId, topic]) =>
+      h("div", { class: "border border-base-300 rounded-box p-3 flex flex-col gap-2" },
+        h("div", { class: "flex items-center gap-2" },
+          h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: "topic name (optional)",
+            onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
+          h("span", { class: "font-mono text-xs opacity-50" }, `topic ${topicId}`),
+          topic.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
+          modelsBadge(topic),
+          h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () => patchTopic(topicId, null, true) }, "remove"),
+        ),
+        scopeSequenceField(topic, inherited,
+          (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(select(ws).topics[topicId]), { structural })),
+        appendField(topic.appendSystemPrompt, (v) => patchTopic(topicId, { appendSystemPrompt: v })),
+      ),
+    ),
+    h("input", { class: "input input-xs w-44 font-mono", placeholder: "add topic by id", onchange: (e) => {
+      const topicId = e.target.value.trim();
+      if (/^\d+$/.test(topicId)) patchTopic(topicId, {}, true);
+    } }),
+  ];
+}
+
 function userRow(workspaceName, chIndex, id, user) {
   const patchUser = (patch) => updateWorkspace(workspaceName, (ws) => {
     const ch = ws.channels[chIndex];
@@ -1578,9 +1619,13 @@ function userRow(workspaceName, chIndex, id, user) {
       user.username ? h("span", { class: "text-xs opacity-50" }, `@${user.username}`) : null,
       h("span", { class: "font-mono text-xs opacity-50" }, id),
       user.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
+      modelsBadge(user),
     ),
     h("div", { class: "collapse-content flex flex-col gap-3" },
+      scopeSequenceField(user, inheritedSequenceFor(workspaceName),
+        (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].users[id]), { structural })),
       appendField(user.appendSystemPrompt, (v) => patchUser({ appendSystemPrompt: v })),
+      ...topicsSection(workspaceName, user, inheritedSequenceFor(workspaceName, user, "the DM"), (ws) => ws.channels[chIndex].users[id]),
       h("button", { class: "btn btn-ghost btn-xs self-start text-error", onclick: () =>
         updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[chIndex]; const users = { ...ch.users }; delete users[id]; ch.users = users; }, { structural: true }) }, "remove user"),
     ),
@@ -1592,16 +1637,6 @@ function groupRow(workspaceName, chIndex, id, group) {
     const ch = ws.channels[chIndex];
     ch.groups = { ...ch.groups, [id]: { ...ch.groups?.[id], ...patch } };
   }, opts);
-  // Adding/removing a topic changes the rendered rows, so those re-render;
-  // editing a topic's title or prompt updates in place.
-  const patchTopic = (topicId, patch, structural = false) =>
-    updateWorkspace(workspaceName, (ws) => {
-      const g = ws.channels[chIndex].groups[id];
-      const topics = { ...g.topics };
-      if (patch === null) delete topics[topicId];
-      else topics[topicId] = { ...topics[topicId], ...patch };
-      g.topics = Object.keys(topics).length ? topics : undefined;
-    }, { structural });
   return h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": `group:${workspaceName}:${chIndex}:${id}` },
     h("input", { type: "checkbox" }),
     h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
@@ -1624,27 +1659,7 @@ function groupRow(workspaceName, chIndex, id, group) {
       scopeSequenceField(group, inheritedSequenceFor(workspaceName),
         (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].groups[id]), { structural })),
       appendField(group.appendSystemPrompt, (v) => patchGroup({ appendSystemPrompt: v })),
-      h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, "Topics",
-        info("Each forum topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them.")),
-      ...Object.entries(group.topics ?? {}).map(([topicId, topic]) =>
-        h("div", { class: "border border-base-300 rounded-box p-3 flex flex-col gap-2" },
-          h("div", { class: "flex items-center gap-2" },
-            h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: "topic name (optional)",
-              onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
-            h("span", { class: "font-mono text-xs opacity-50" }, `topic ${topicId}`),
-            topic.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
-            modelsBadge(topic),
-            h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () => patchTopic(topicId, null, true) }, "remove"),
-          ),
-          scopeSequenceField(topic, inheritedSequenceFor(workspaceName, group),
-            (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].groups[id].topics[topicId]), { structural })),
-          appendField(topic.appendSystemPrompt, (v) => patchTopic(topicId, { appendSystemPrompt: v })),
-        ),
-      ),
-      h("input", { class: "input input-xs w-44 font-mono", placeholder: "add topic by id", onchange: (e) => {
-        const topicId = e.target.value.trim();
-        if (/^\d+$/.test(topicId)) patchTopic(topicId, {}, true);
-      } }),
+      ...topicsSection(workspaceName, group, inheritedSequenceFor(workspaceName, group), (ws) => ws.channels[chIndex].groups[id]),
     ),
   );
 }
@@ -1958,9 +1973,9 @@ function providersInUse() {
   for (const workspace of Object.values(state.config?.workspaces ?? {})) {
     scope(workspace);
     for (const channel of workspace.channels ?? []) {
-      for (const group of Object.values(channel.groups ?? {})) {
-        scope(group);
-        for (const topic of Object.values(group.topics ?? {})) scope(topic);
+      for (const owner of [...Object.values(channel.groups ?? {}), ...Object.values(channel.users ?? {})]) {
+        scope(owner);
+        for (const topic of Object.values(owner.topics ?? {})) scope(topic);
       }
     }
   }

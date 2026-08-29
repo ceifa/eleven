@@ -2,7 +2,7 @@ import { API_CONSTANTS, Bot, type Context } from "grammy";
 import { run, sequentialize, type RunnerHandle } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ChannelConfig, GroupConfig, UserConfig } from "../../config.ts";
+import type { ChannelConfig, GroupConfig, TopicConfig, UserConfig } from "../../config.ts";
 import { lruTouch, summarizeToolArgs } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
@@ -45,7 +45,8 @@ interface Target {
   chatId: number;
   topic?: number;
   isPrivate: boolean;
-  /** Sender whose per-user append applies (DMs). */
+  /** Sender of the message that started the turn — who an ephemeral status in a
+   * group is addressed to. (In a DM the chat id is the user id already.) */
   userId?: number;
   /** Message to ack/reply to, when a specific one triggered the turn. */
   triggerMessageId?: number;
@@ -279,6 +280,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (config.users?.[String(message.from.id)]) {
       const { id, username } = message.from;
       const name = fullName(message.from);
+      const topic = topicEntry(message);
       deps.updateUser(String(id), (user) => {
         let changed = false;
         if (name && user.name !== name) {
@@ -289,7 +291,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           user.username = username;
           changed = true;
         }
-        return changed;
+        // A bot with topic mode enabled has topics in its DMs too, and they
+        // register themselves the same way a forum's do.
+        return registerTopic(user, topic) || changed;
       });
     }
 
@@ -398,23 +402,23 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     // five seconds and says nothing about a turn that takes minutes.
     taskProgress.start();
 
-    // Appends accumulate outermost→innermost: DMs use the user's; groups use group, then topic.
+    // Whatever owns this conversation: the person in a DM, the group in a group.
+    // Both carry topics — a bot with topic mode enabled has them in its DMs too
+    // — so the scope chain is the same shape on both sides. (In a private chat
+    // the chat id is the user id, which is what wake() reconstructs from.)
     const config = deps.botConfig();
-    const group = config?.groups?.[String(chatId)];
-    const topicConfig = topic !== undefined ? group?.topics?.[String(topic)] : undefined;
-    const appends = (
-      isPrivate
-        ? [config?.users?.[String(target.userId)]?.appendSystemPrompt]
-        : [group?.appendSystemPrompt, topicConfig?.appendSystemPrompt]
-    ).filter((a): a is string => !!a);
+    const owner = isPrivate ? config?.users?.[String(chatId)] : config?.groups?.[String(chatId)];
+    const topicConfig = topic !== undefined ? owner?.topics?.[String(topic)] : undefined;
+    // Appends accumulate outermost→innermost: the owner's, then the topic's.
+    const appends = [owner?.appendSystemPrompt, topicConfig?.appendSystemPrompt].filter((a): a is string => !!a);
     try {
       await deps.gateway.handle({
         sessionKey,
         text,
         images,
         workspaceHint: deps.workspace(),
-        // Most specific first: a topic's model settings beat its group's.
-        modelScopes: [topicConfig, group],
+        // Most specific first: a topic's model settings beat its owner's.
+        modelScopes: [topicConfig, owner],
         appends,
         customTools: [tool],
         runtime: {
@@ -559,11 +563,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (!config.groups?.[chatId]) return; // unregistered → the pairing path owns it
 
     const chatTitle = (ctx.chat as { title?: string }).title;
-    const topicId = message.message_thread_id !== undefined && message.is_topic_message ? String(message.message_thread_id) : undefined;
-    const topicName =
-      message.forum_topic_created?.name ??
-      message.forum_topic_edited?.name ??
-      (message.reply_to_message as { forum_topic_created?: { name?: string } } | undefined)?.forum_topic_created?.name;
+    const topic = topicEntry(message);
 
     deps.updateGroup(chatId, (group) => {
       let changed = false;
@@ -571,18 +571,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         group.title = chatTitle;
         changed = true;
       }
-      if (!topicId) return changed;
-      const topics = (group.topics ??= {});
-      let topic = topics[topicId];
-      if (!topic) {
-        topic = topics[topicId] = {};
-        changed = true;
-      }
-      if (topicName && topic.title !== topicName) {
-        topic.title = topicName;
-        changed = true;
-      }
-      return changed;
+      return registerTopic(group, topic) || changed;
     });
   }
 
@@ -647,16 +636,18 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   }
 
   function describeConversation(target: Target, config: ChannelConfig | undefined): string {
-    if (target.isPrivate) {
-      const user = config?.users?.[String(target.userId)];
-      const name = user?.name || "user";
-      return `DM with ${name}${user?.username ? ` (@${user.username})` : ""}`;
-    }
-    const group = config?.groups?.[String(target.chatId)];
-    const title = group?.title ?? String(target.chatId);
-    if (target.topic === undefined) return `group "${title}"`;
-    const topicTitle = group?.topics?.[String(target.topic)]?.title;
-    return `group "${title}", topic ${topicTitle ? `"${topicTitle}"` : target.topic}`;
+    const topicOwner = target.isPrivate ? config?.users?.[String(target.chatId)] : config?.groups?.[String(target.chatId)];
+    const where = (() => {
+      if (target.isPrivate) {
+        const user = config?.users?.[String(target.chatId)];
+        const name = user?.name || "user";
+        return `DM with ${name}${user?.username ? ` (@${user.username})` : ""}`;
+      }
+      return `group "${config?.groups?.[String(target.chatId)]?.title ?? target.chatId}"`;
+    })();
+    if (target.topic === undefined) return where;
+    const topicTitle = topicOwner?.topics?.[String(target.topic)]?.title;
+    return `${where}, topic ${topicTitle ? `"${topicTitle}"` : target.topic}`;
   }
 
   // --- polling lifecycle: runner + stall watchdog + exponential restart backoff ---
@@ -734,10 +725,46 @@ function fullName(user?: { first_name?: string; last_name?: string }): string {
   return [user?.first_name, user?.last_name].filter(Boolean).join(" ");
 }
 
-/** A forum topic id, but only when the message truly belongs to a topic.
- * Telegram also sets message_thread_id on plain replies in non-forum
- * supergroups, so keying a session on it there would fork phantom threads and
- * send with a thread id the chat rejects. */
+/** The topic a message belongs to, plus whatever name Telegram let slip along
+ * with it (topics announce themselves through service messages). */
+export function topicEntry(message: {
+  message_thread_id?: number;
+  is_topic_message?: boolean;
+  forum_topic_created?: { name?: string };
+  forum_topic_edited?: { name?: string };
+  reply_to_message?: unknown;
+}): { id: string; name?: string } | undefined {
+  const id = topicOf(message);
+  if (id === undefined) return undefined;
+  const replied = message.reply_to_message as { forum_topic_created?: { name?: string } } | undefined;
+  return {
+    id: String(id),
+    name: message.forum_topic_created?.name ?? message.forum_topic_edited?.name ?? replied?.forum_topic_created?.name,
+  };
+}
+
+/** Register (and name) a topic under whatever owns it — a group, or the DM of
+ * a bot with topic mode enabled. Returns whether the config changed. */
+export function registerTopic(owner: { topics?: Record<string, TopicConfig> }, entry?: { id: string; name?: string }): boolean {
+  if (!entry) return false;
+  const topics = (owner.topics ??= {});
+  let changed = false;
+  if (!topics[entry.id]) {
+    topics[entry.id] = {};
+    changed = true;
+  }
+  if (entry.name && topics[entry.id].title !== entry.name) {
+    topics[entry.id].title = entry.name;
+    changed = true;
+  }
+  return changed;
+}
+
+/** A topic id, but only when the message truly belongs to a topic — a forum
+ * supergroup's, or a DM's when the bot has topic mode enabled. Telegram also
+ * sets message_thread_id on plain replies in non-forum supergroups, so keying a
+ * session on it there would fork phantom threads and send with a thread id the
+ * chat rejects; is_topic_message is the flag that tells the two apart. */
 function topicOf(message: { message_thread_id?: number; is_topic_message?: boolean } | undefined): number | undefined {
   return message?.is_topic_message ? message.message_thread_id : undefined;
 }

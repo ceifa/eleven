@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { formatTelegramInboundPrompt, syncTelegramCommands } from "../src/channels/telegram/bot.ts";
+import { formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { DraftStream } from "../src/channels/telegram/stream.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
@@ -345,6 +345,27 @@ test("a pressed keyboard is disabled, ticked, and keeps its links", () => {
       [{ text: "Docs", url: "https://x.dev" }],
     ],
   );
+});
+
+test("a topic registers and names itself under whoever owns it — a group or a DM", () => {
+  const created = { message_thread_id: 7, is_topic_message: true, forum_topic_created: { name: "eleven" } };
+
+  const user: { topics?: Record<string, { title?: string }> } = {};
+  assert.equal(registerTopic(user, topicEntry(created)), true);
+  assert.deepEqual(user.topics, { "7": { title: "eleven" } });
+  // Already known and already named: nothing to persist.
+  assert.equal(registerTopic(user, topicEntry(created)), false);
+
+  // A later message in the topic carries no name — the title has to survive it.
+  assert.equal(registerTopic(user, topicEntry({ message_thread_id: 7, is_topic_message: true })), false);
+  assert.deepEqual(user.topics, { "7": { title: "eleven" } });
+
+  // A rename lands; a plain reply in a non-forum chat is not a topic at all.
+  const renamed = { message_thread_id: 7, is_topic_message: true, forum_topic_edited: { name: "eleven v2" } };
+  assert.equal(registerTopic(user, topicEntry(renamed)), true);
+  assert.equal(user.topics?.["7"].title, "eleven v2");
+  assert.equal(topicEntry({ message_thread_id: 9 }), undefined);
+  assert.equal(registerTopic(user, undefined), false);
 });
 
 test("a command answer in a group is addressed to whoever asked", async () => {

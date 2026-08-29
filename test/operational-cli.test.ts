@@ -242,6 +242,32 @@ test("the hidden attribute outranks the component styles that would keep it on s
   assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important/);
 });
 
+test("the scrolling thread list pads every side, so the live halo is not sheared off", () => {
+  const dir = join(import.meta.dirname, "..", "src", "dashboard", "public");
+  const app = readFileSync(join(dir, "app.js"), "utf8");
+  const css = readFileSync(join(dir, "style.css"), "utf8");
+
+  // The halo of a running thread is box-shadow — it paints OUTSIDE the card's
+  // border box, so the card's own padding cannot make room for it.
+  assert.match(css, /button\.card\.is-live \{ animation:/);
+  // And the list it lives in scrolls, which clips on all four edges: overflow-y
+  // other than visible turns the visible cross axis into auto.
+  const list = app.match(/class: "([^"]*)", id: "thread-list"/);
+  assert.ok(list, "#thread-list should still be built with a class list");
+  assert.match(list[1], /overflow-y-auto/);
+  assert.match(list[1], /thread-scroll/);
+
+  // So the room has to come from the scroller. Any side left at zero shaves the
+  // halo flat against that edge — which is exactly what the left edge did.
+  const rule = css.match(/\.thread-scroll \{ padding: ([^;]+); \}/);
+  assert.ok(rule, ".thread-scroll should set padding");
+  const sides = rule[1].trim().split(/\s+/);
+  const [top, right = top, bottom = top, left = right] = sides;
+  for (const [side, value] of Object.entries({ top, right, bottom, left })) {
+    assert.ok(parseFloat(value) > 0, `.thread-scroll padding-${side} must leave room for the halo, got ${value}`);
+  }
+});
+
 test("Telegram delivery resolves bot, chat and forum topic from a session key", async () => {
   const config = { on() {}, channels: () => [] };
   const telegram = new TelegramChannel(config as never, {} as never);

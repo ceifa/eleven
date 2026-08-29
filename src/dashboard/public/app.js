@@ -1542,7 +1542,7 @@ async function viewThreads() {
           }),
         ),
         h("div", { class: "threads-filters", id: "thread-filters", hidden: true }),
-        h("div", { class: "flex flex-col gap-2 overflow-y-auto pr-2 pt-1", id: "thread-list" }),
+        h("div", { class: "flex flex-col gap-2 overflow-y-auto thread-scroll", id: "thread-list" }),
       ),
       h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),
     ),

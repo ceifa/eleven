@@ -12,9 +12,12 @@
 
 /* ---------- fonts ---------- */
 
-@font-face { font-family: "Grenze"; font-weight: 600; src: url("/fonts/grenze-600.ttf") format("truetype"); font-display: swap; }
-@font-face { font-family: "Grenze"; font-weight: 700; src: url("/fonts/grenze-700.ttf") format("truetype"); font-display: swap; }
-@font-face { font-family: "Grenze"; font-weight: 800; src: url("/fonts/grenze-800.ttf") format("truetype"); font-display: swap; }
+/* woff2, not truetype: the same glyphs in a third of the bytes (25 KB a weight
+   instead of 63), and any browser that can render the rest of this file reads
+   it. Regenerate with `wawoff2` if the sources ever change. */
+@font-face { font-family: "Grenze"; font-weight: 600; src: url("/fonts/grenze-600.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "Grenze"; font-weight: 700; src: url("/fonts/grenze-700.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "Grenze"; font-weight: 800; src: url("/fonts/grenze-800.woff2") format("woff2"); font-display: swap; }
 
 /* ---------- theme tokens ---------- */
 

@@ -2,7 +2,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, extname, normalize, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig } from "../config.ts";
 import { collectProviderUsage } from "../provider-usage.ts";
@@ -48,7 +50,32 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
 };
+// What is worth compressing: everything the dashboard serves that is text.
+// Fonts are woff2, which is brotli already — running it again costs CPU to save
+// nothing.
+const COMPRESSIBLE = /^(text\/|application\/json|image\/svg)/;
+// Below this a compressed body saves less than the headers and CPU it costs.
+const COMPRESS_MIN_BYTES = 1024;
+const gzipAsync = promisify(gzip);
+const brotliAsync = promisify(brotliCompress);
+// Static assets are compressed once per daemon, so they get the expensive
+// setting; API payloads are compressed per response, where quality 5 is the
+// knee of the curve (near-gzip cost, better than gzip ratio).
+const STATIC_BROTLI = { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 } };
+const DYNAMIC_BROTLI = { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 } };
+// The app shell is html/js/css and hundreds of kilobytes of it; over a tunnel
+// that is the whole difference between a snappy dashboard and a sluggish one.
+type Encoding = "br" | "gzip";
+interface Asset {
+  body: Buffer;
+  /** Pre-compressed variants, empty for anything already compressed. */
+  encoded: Map<Encoding, Buffer>;
+  etag: string;
+  type: string;
+  immutable: boolean;
+}
 
 class ApiError extends Error {
   readonly status: number;
@@ -151,7 +178,19 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return matches[0];
   }
 
-  const identityOf = (sessionKey: string) => conversationIdentity(sessionKey, config.channels().map(({ channel }) => channel));
+  // A list read resolves an identity per thread, and there are hundreds of
+  // them — so the channel array is derived once per config generation instead
+  // of being rebuilt for every single thread.
+  const channelsByConfig = new WeakMap<object, ReturnType<typeof config.channels>[number]["channel"][]>();
+  function identityOf(sessionKey: string) {
+    const entries = config.channels();
+    let channels = channelsByConfig.get(entries);
+    if (!channels) {
+      channels = entries.map(({ channel }) => channel);
+      channelsByConfig.set(entries, channels);
+    }
+    return conversationIdentity(sessionKey, channels);
+  }
 
   /** The group/topic model scopes a Telegram conversation would run with. */
   function channelModelScopes(sessionKey: string) {
@@ -162,12 +201,16 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return [topic, group];
   }
 
-  function threadView(thread: ReturnType<typeof gateway.threads.list>[number]) {
+  /** A thread as the API describes it. `sessionFile` is an absolute path nobody
+   *  but the detail view reads, and it is a fifth of a full list read — so the
+   *  list leaves it out (and stops handing filesystem layout to a tunnel). */
+  function threadView(thread: ReturnType<typeof gateway.threads.list>[number], { detail = false } = {}) {
     const current = gateway.threads.isCurrent(thread.id);
     const running = gateway.isThreadRunning(thread.id);
     const identity = identityOf(thread.sessionKey);
     return {
       ...thread,
+      sessionFile: detail ? thread.sessionFile : undefined,
       current,
       running,
       state: running ? "running" : current ? "current" : "old",
@@ -192,7 +235,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     const rawLimit = limitValue === null ? undefined : Number(limitValue);
     if (rawLimit !== undefined && (!Number.isInteger(rawLimit) || rawLimit <= 0)) throw new ApiError(400, "limit must be a positive integer");
     const limit = rawLimit;
-    let threads = gateway.threads.list(workspace).map(threadView);
+    let threads = gateway.threads.list(workspace).map((thread) => threadView(thread));
     if (channel) threads = threads.filter((thread) => thread.source === channel);
     if (currentOnly) threads = threads.filter((thread) => thread.current);
     if (runningOnly) threads = threads.filter((thread) => thread.running);
@@ -279,34 +322,31 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
 
     if (path.startsWith("/api/")) return api(req, res, url);
 
-    const file = path === "/" ? "/index.html" : path;
-    // Resolve then confine to PUBLIC_DIR. `replaceAll("..","")` was a fragile
-    // denylist that also mangled legitimate names containing "..".
-    const target = normalize(join(PUBLIC_DIR, file));
-    try {
-      if (target !== PUBLIC_DIR && !target.startsWith(PUBLIC_DIR + sep)) throw new Error("path escapes public dir");
-      const content = await readFile(target);
-      res.writeHead(200, {
-        "content-type": MIME[extname(file)] ?? "application/octet-stream",
-        // Fonts never change — cache them hard. The app shell (html/js/css)
-        // changes with the daemon, so that always revalidates.
-        "cache-control": file.startsWith("/fonts/") ? "public, max-age=31536000, immutable" : "no-cache",
-      });
-      res.end(content);
-    } catch {
-      // SPA fallback: unknown paths render the app shell.
-      const content = await readFile(join(PUBLIC_DIR, "index.html"));
-      res.writeHead(200, { "content-type": MIME[".html"] });
-      res.end(content);
-    }
+    // SPA fallback: unknown paths render the app shell.
+    const asset = (await loadAsset(path === "/" ? "/index.html" : path)) ?? (await loadAsset("/index.html"));
+    if (!asset) return fail(res, 404, new Error("public assets are missing"));
+    return sendAsset(req, res, asset);
   }
 
   async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
     const path = url.pathname.slice(4);
     const method = req.method ?? "GET";
     const send = (status: number, payload: unknown) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(payload));
+      const body = Buffer.from(JSON.stringify(payload) ?? "null");
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      // Reads get an ETag: the dashboard refetches the thread list on every
+      // event that could have touched it, and most of those answers are the
+      // bytes it already holds — that costs an empty 304 instead of the list.
+      if (method === "GET" && status === 200) {
+        headers.etag = etagOf(body);
+        headers["cache-control"] = "no-cache";
+        headers.vary = "accept-encoding";
+        if (isFresh(req, headers.etag)) {
+          res.writeHead(304, headers);
+          return res.end();
+        }
+      }
+      return deliver(req, res, status, headers, body);
     };
 
     // CSRF guard: state-changing requests must be same-origin. A hostile page
@@ -351,7 +391,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, {
           bots: telegram.status(),
           pairing: telegram.pairing.list(),
-          workspaces: redactTokens(config.resolved).workspaces,
+          // Names only: the pages that edit a workspace read /config for it,
+          // and the ones that merely offer a choice (the filter, the new-thread
+          // dialog) never needed anything else.
+          workspaces: Object.keys(config.resolved.workspaces),
           tools: BUILTIN_TOOLS,
           reasoningLevels: REASONING_LEVELS,
           defaultReasoning: DEFAULT_REASONING,
@@ -390,7 +433,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           : undefined;
         return send(200, {
           thread: {
-            ...threadView(thread),
+            ...threadView(thread, { detail: true }),
             effectiveModel,
             lastModel: requests.at(-1)?.model,
             messages: messages.length,
@@ -552,6 +595,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   }
 
   const { host, port } = config.resolved.dashboard;
+  // Read, hash and compress the shell while the daemon boots, so the first
+  // browser to arrive doesn't wait on brotli.
+  for (const file of ["/index.html", "/app.js", "/style.css"]) void loadAsset(file);
   server.listen(port, host, () => log.info(`dashboard on http://${host}:${port}`));
   return {
     close: () =>
@@ -563,6 +609,113 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         server.close(() => resolve());
       }),
   };
+}
+
+/* ---------- HTTP delivery: caching + compression ---------- */
+
+const etagOf = (body: Buffer) => `"${createHash("sha1").update(body).digest("base64url")}"`;
+
+/** True when the client already holds this exact body. */
+function isFresh(req: IncomingMessage, etag: string): boolean {
+  const header = req.headers["if-none-match"];
+  if (typeof header !== "string") return false;
+  return header.split(",").some((tag) => {
+    const candidate = tag.trim();
+    return candidate === etag || candidate === `W/${etag}` || candidate === "*";
+  });
+}
+
+/** The best encoding both sides accept, ignoring anything the client disabled
+ *  with `;q=0`. Brotli first: it beats gzip by ~20% on this kind of payload. */
+function negotiate(req: IncomingMessage, available: Iterable<Encoding> = ["br", "gzip"]): Encoding | undefined {
+  const accept = req.headers["accept-encoding"];
+  if (typeof accept !== "string") return undefined;
+  const offered = new Map(
+    accept.split(",").map((part) => {
+      const [name, ...params] = part.trim().split(";");
+      return [name.trim().toLowerCase(), !params.some((p) => p.replace(/\s/g, "") === "q=0")] as const;
+    }),
+  );
+  for (const encoding of available) if (offered.get(encoding) || (offered.get("*") && offered.get(encoding) !== false)) return encoding;
+  return undefined;
+}
+
+/** Write a response, compressing it when it is worth it and the client says so. */
+async function deliver(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  headers: Record<string, string>,
+  body: Buffer,
+  encoded?: Map<Encoding, Buffer>,
+) {
+  const compressible = COMPRESSIBLE.test(headers["content-type"] ?? "") && (encoded?.size || body.length >= COMPRESS_MIN_BYTES);
+  const encoding = compressible ? negotiate(req, encoded?.size ? [...encoded.keys()] : undefined) : undefined;
+  let out = body;
+  if (encoding) {
+    out = encoded?.get(encoding) ?? (encoding === "br" ? await brotliAsync(body, DYNAMIC_BROTLI) : await gzipAsync(body, { level: 6 }));
+    headers["content-encoding"] = encoding;
+  }
+  // Announced whenever the body could have been compressed, so a shared cache
+  // never hands a brotli body to a client that cannot read it.
+  if (compressible) headers.vary = "accept-encoding";
+  headers["content-length"] = String(out.length);
+  res.writeHead(status, headers);
+  res.end(req.method === "HEAD" ? undefined : out);
+}
+
+// The public dir ships with the daemon and cannot change under it — the same
+// assumption SHELL_VERSION already makes. So each file is read, hashed and
+// compressed once, and every request after that is answered from memory: no
+// disk read, no re-compression, and a revalidation costs an empty 304.
+const assets = new Map<string, Promise<Asset | undefined>>();
+
+function loadAsset(file: string): Promise<Asset | undefined> {
+  const cached = assets.get(file);
+  if (cached) return cached;
+  // Misses are not remembered: unknown paths all fall through to the app shell,
+  // and caching them would let anyone grow this map without bound.
+  const pending = readAsset(file).then((asset) => (asset ? asset : (assets.delete(file), undefined)));
+  assets.set(file, pending);
+  return pending;
+}
+
+async function readAsset(file: string): Promise<Asset | undefined> {
+  // Resolve then confine to PUBLIC_DIR. `replaceAll("..","")` was a fragile
+  // denylist that also mangled legitimate names containing "..".
+  const target = normalize(join(PUBLIC_DIR, file));
+  if (target !== PUBLIC_DIR && !target.startsWith(PUBLIC_DIR + sep)) return undefined;
+  let body: Buffer;
+  try {
+    body = await readFile(target);
+  } catch {
+    return undefined;
+  }
+  const type = MIME[extname(file)] ?? "application/octet-stream";
+  const encoded = new Map<Encoding, Buffer>();
+  if (COMPRESSIBLE.test(type) && body.length >= COMPRESS_MIN_BYTES) {
+    const [br, gz] = await Promise.all([brotliAsync(body, STATIC_BROTLI), gzipAsync(body, { level: 9 })]);
+    encoded.set("br", br);
+    encoded.set("gzip", gz);
+  }
+  return { body, encoded, etag: etagOf(body), type, immutable: file.startsWith("/fonts/") };
+}
+
+function sendAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {
+  const headers: Record<string, string> = {
+    "content-type": asset.type,
+    etag: asset.etag,
+    // Fonts never change — cache them hard. The app shell (html/js/css) changes
+    // with the daemon, so it revalidates; with an ETag that is an empty 304
+    // rather than the file again.
+    "cache-control": asset.immutable ? "public, max-age=31536000, immutable" : "no-cache",
+  };
+  if (asset.encoded.size) headers.vary = "accept-encoding";
+  if (isFresh(req, asset.etag)) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  return deliver(req, res, 200, headers, asset.body, asset.encoded);
 }
 
 const MAX_API_BODY_BYTES = 1024 * 1024;

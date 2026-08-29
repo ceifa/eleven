@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { InlineKeyboardMarkup } from "@grammyjs/types";
 import type { ModelEntry } from "../../config.ts";
 import type { TurnFailure } from "../../agent/runner.ts";
+import type { RecordedToolCall } from "../../threads/reader.ts";
+import { summarizeToolArgs } from "../../util.ts";
 
 /** Namespaces our own callback data, so a keyboard the agent built with the
  * telegram tool can never be mistaken for a failover offer. */
@@ -24,17 +26,45 @@ export interface FailoverOffer<T> {
   models: ModelEntry[];
   /** How a restart discards the failed attempt; absent when it cannot be branched away. */
   rewind?: { from: string; to: string };
+  /** What the failed attempt ran that the transcript won't show the next model. */
+  hiddenToolCalls: RecordedToolCall[];
   sessionKey: string;
   at: number;
 }
 
+/** Calls past this are dropped from the prompt, oldest first — a long attempt
+ * can run hundreds, and the recent ones are the ones still worth not redoing. */
+const MAX_LISTED_CALLS = 15;
+
 /**
- * What a `continue` retry is prompted with. Deliberately terse and static: the
- * request and the failed attempt's tool calls sit right above it in the
- * transcript, and the reason the model died says nothing the next one can use.
+ * What a `continue` retry is prompted with. Terse by default: the request and
+ * the failed attempt's tool calls sit right above it in the transcript, and the
+ * error the last model died on says nothing the next one can use.
+ *
+ * A nested runtime (Claude Code) is the exception. It drives its own tool loop,
+ * so its calls never enter LLM context — telling the next model not to repeat
+ * side effects it cannot see is worthless, and the ones that matter most are
+ * exactly the ones it cannot re-derive by reading the workspace. Those get
+ * listed.
  */
-export const CONTINUE_PROMPT =
-  "[the attempt above was cut off mid-turn. Its tool calls already ran — don't repeat them. Pick it up from there and finish.]";
+export function continuePrompt(hidden: { name: string; args?: Record<string, unknown> }[] = []): string {
+  const tail = hidden.slice(-MAX_LISTED_CALLS);
+  const dropped = hidden.length - tail.length;
+  if (!tail.length) {
+    return "[the attempt above was cut off mid-turn. Its tool calls already ran — don't repeat them. Pick it up from there and finish.]";
+  }
+  const lines = tail.map((call) => {
+    const argument = summarizeToolArgs(call.args, 80);
+    return `- ${call.name}${argument ? ` ${argument}` : ""}`;
+  });
+  return [
+    "[the attempt above was cut off mid-turn. It ran these tools, which this transcript does not show —",
+    "they already happened, so don't repeat them:",
+    ...(dropped > 0 ? [`(${dropped} earlier calls omitted)`] : []),
+    ...lines,
+    "Pick it up from there and finish.]",
+  ].join("\n");
+}
 
 /** The provider prefix is noise on a button. */
 export function modelName(ref: string): string {
@@ -56,12 +86,19 @@ export class FailoverOffers<T> {
   offer(
     sessionKey: string,
     replay: T,
-    failure: Pick<TurnFailure, "remaining" | "rewind">,
+    failure: Pick<TurnFailure, "remaining" | "rewind" | "hiddenToolCalls">,
   ): InlineKeyboardMarkup | undefined {
     const next = failure.remaining[0];
     if (!next) return undefined;
     const id = randomUUID().slice(0, 8);
-    this.offers.set(id, { replay, models: failure.remaining, rewind: failure.rewind, sessionKey, at: Date.now() });
+    this.offers.set(id, {
+      replay,
+      models: failure.remaining,
+      rewind: failure.rewind,
+      hiddenToolCalls: failure.hiddenToolCalls,
+      sessionKey,
+      at: Date.now(),
+    });
     // Insertion-ordered: the oldest offer is the first to go.
     if (this.offers.size > MAX_OFFERS) this.offers.delete(this.offers.keys().next().value!);
     const on = modelName(next.model);

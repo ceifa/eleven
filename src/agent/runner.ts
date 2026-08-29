@@ -135,6 +135,11 @@ export class TurnFailure extends Error {
   /** The branch a restart of this turn would rewind, filled in once the failure
    * is recorded (that record is what `from` has to still point at). */
   rewind?: TurnRewind;
+  /** What the failed attempt ran that no model can read back. A nested runtime
+   * drives its own tool loop, so eleven records those calls as custom entries —
+   * visible in the dashboard, invisible in LLM context. Whoever picks the turn
+   * up is otherwise told not to repeat side effects it cannot see. */
+  hiddenToolCalls: RecordedToolCall[] = [];
 
   constructor(message: string, failedModel: string, remaining: ModelEntry[]) {
     super(message);
@@ -459,9 +464,13 @@ export class Runner {
     // LLM context; a failover rewind drops the failed attempt's entries with
     // the rest of its branch.
     let claudeToolCallCount = 0;
+    // This attempt's nested-runtime calls, reset per candidate: a failover
+    // rewinds the previous attempt's entries off the branch with everything else.
+    let hiddenToolCalls: RecordedToolCall[] = [];
     setClaudeToolListener(session.sessionId, (name, args) => {
       attemptHadToolActivity = true;
       const call: RecordedToolCall = { id: `claude:${claudeToolCallCount++}:${Date.now()}`, name, args };
+      hiddenToolCalls.push(call);
       try {
         sessionManager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [call] } satisfies ToolCallsEntryData);
       } catch (error) {
@@ -512,6 +521,7 @@ export class Runner {
       for (const [index, { entry, model }] of models.entries()) {
         stoppedAt = index;
         attemptHadToolActivity = false;
+        hiddenToolCalls = [];
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
           await rewindFailedAttempt(session, sessionManager, turnStart);
@@ -589,7 +599,10 @@ export class Runner {
         // The failure is now the transcript's leaf: a restart may rewind past it
         // for as long as it stays that way.
         const leaf = sessionManager.getLeafId();
-        if (error instanceof TurnFailure && leaf && turnStart) error.rewind = { from: leaf, to: turnStart };
+        if (error instanceof TurnFailure) {
+          if (leaf && turnStart) error.rewind = { from: leaf, to: turnStart };
+          error.hiddenToolCalls = hiddenToolCalls;
+        }
       } catch (writeError) {
         log.warn(`failed to record the failed turn of ${threadId}: ${writeError}`);
       }

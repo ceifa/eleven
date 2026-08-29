@@ -78,6 +78,9 @@ export interface TurnRequest extends SessionTarget {
   prompt?: PromptConfig;
   text: string;
   images?: ImageContent[];
+  /** Discard a failed attempt before this turn starts — a manual restart runs
+   * the request as if it had never been tried. */
+  rewind?: TurnRewind;
   /** Channel delivery of the finished turn. Runs inside the thread's turn lane
    * (before onTurnEnd fires and before the next queued turn can start), so a
    * durable in-flight ledger keyed on the hooks covers the send itself. */
@@ -129,6 +132,9 @@ export class TurnFailure extends Error {
   readonly failedModel: string;
   /** Plan entries after the one that stopped the turn, in order. */
   readonly remaining: ModelEntry[];
+  /** The branch a restart of this turn would rewind, filled in once the failure
+   * is recorded (that record is what `from` has to still point at). */
+  rewind?: TurnRewind;
 
   constructor(message: string, failedModel: string, remaining: ModelEntry[]) {
     super(message);
@@ -136,6 +142,18 @@ export class TurnFailure extends Error {
     this.failedModel = failedModel;
     this.remaining = remaining;
   }
+}
+
+/**
+ * Branch a failed attempt away before running its turn again: navigate back to
+ * `to`, but only while the session's leaf is still `from`. Anything appended
+ * since (a turn run from the dashboard, say) sits on the branch the rewind would
+ * discard — leaving it alone costs a duplicated request, dropping it costs a
+ * conversation.
+ */
+export interface TurnRewind {
+  from: string;
+  to: string;
 }
 
 /**
@@ -402,6 +420,16 @@ export class Runner {
 
     const warm = await this.acquireSession(threadId, request, models[0]);
     const { session, sessionManager, activeModel } = warm;
+    // A restart of a failed turn drops that attempt's branch first, so this turn
+    // opens on the transcript the failed one started from.
+    if (request.rewind && sessionManager.getLeafId() === request.rewind.from) {
+      await rewindFailedAttempt(session, sessionManager, request.rewind.to);
+    }
+    // pi persists the user message on every prompt(), even when the provider
+    // errors — so a bare re-prompt on the next candidate would duplicate it.
+    // Failover branches back to this entry instead, abandoning the failed
+    // attempt (session files stay append-only; only the leaf pointer moves).
+    const turnStart = sessionManager.getLeafId();
     // Mark the turn in-flight now that we have a session file: if the daemon is
     // killed mid-turn, this is what a restart uses to wake the conversation.
     this.hooks.onTurnStart?.(threadId, sessionManager.getSessionFile());
@@ -478,11 +506,6 @@ export class Runner {
 
     try {
       let lastError: unknown;
-      // pi persists the user message on every prompt(), even when the provider
-      // errors — so a bare re-prompt on the next candidate would duplicate it.
-      // Failover branches back to this entry instead, abandoning the failed
-      // attempt (session files stay append-only; only the leaf pointer moves).
-      const turnStart = sessionManager.getLeafId();
       // Where the plan stopped — a break past a toolful attempt leaves the tail
       // untried, and that tail is what a manual failover would run.
       let stoppedAt = 0;
@@ -563,6 +586,10 @@ export class Runner {
         // turn's resume. In that case the toast is the only report there is.
         const file = sessionManager.getSessionFile();
         if (file && existsSync(file)) sessionFile = file;
+        // The failure is now the transcript's leaf: a restart may rewind past it
+        // for as long as it stays that way.
+        const leaf = sessionManager.getLeafId();
+        if (error instanceof TurnFailure && leaf && turnStart) error.rewind = { from: leaf, to: turnStart };
       } catch (writeError) {
         log.warn(`failed to record the failed turn of ${threadId}: ${writeError}`);
       }

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ConfigStore, ModelEntry, ModelScope, WorkspaceConfig } from "./config.ts";
-import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult } from "./agent/runner.ts";
+import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult, type TurnRewind } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
 import { ThreadStore, type ThreadEntry } from "./threads/store.ts";
@@ -72,6 +72,8 @@ export interface IncomingMessage {
   /** Explicit model plan for this turn, bypassing config resolution entirely —
    * a manual failover retries on the tail its failed turn never reached. */
   models?: ModelEntry[];
+  /** Discard a failed attempt before this turn starts (a manual restart). */
+  rewind?: TurnRewind;
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
@@ -211,6 +213,7 @@ export class Gateway extends EventEmitter {
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },
           text: incoming.text,
           images: incoming.images,
+          rewind: incoming.rewind,
           deliver: incoming.deliver,
         },
         events,

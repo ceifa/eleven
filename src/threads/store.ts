@@ -37,16 +37,24 @@ export class ThreadStore {
     this.data = readJsonFile(this.file, { version: 1, threads: {}, current: {} });
   }
 
-  /** Drop stale threads no conversation points at (gc.ts deletes their files). */
-  prune(maxAgeMs: number): ThreadEntry[] {
-    const cutoff = Date.now() - maxAgeMs;
+  /**
+   * Drop stale threads past the retention window (gc.ts deletes their files).
+   * Being the current thread of a conversation only protects a thread while it
+   * is still resumable: once it is past `idleMs` the next message rotates it
+   * away anyway, so pinning it would keep dead transcripts around forever.
+   */
+  prune(maxAgeMs: number, idleMs: number): ThreadEntry[] {
+    const now = Date.now();
+    const cutoff = now - maxAgeMs;
     const live = new Set(Object.values(this.data.current));
     const dropped: ThreadEntry[] = [];
     for (const [id, thread] of Object.entries(this.data.threads)) {
-      if (!live.has(id) && thread.lastActivityAt < cutoff) {
-        dropped.push(thread);
-        delete this.data.threads[id];
-      }
+      if (thread.lastActivityAt >= cutoff) continue;
+      if (live.has(id) && now - thread.lastActivityAt <= idleMs) continue;
+      dropped.push(thread);
+      delete this.data.threads[id];
+      // Unpin the conversation so its next message rotates a fresh thread.
+      if (this.data.current[thread.sessionKey] === id) delete this.data.current[thread.sessionKey];
     }
     if (dropped.length) this.persist();
     return dropped;

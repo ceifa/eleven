@@ -119,7 +119,7 @@ export class Gateway extends EventEmitter {
     this.config = config;
     setInterval(() => this.pending.beat(), PENDING_HEARTBEAT_MS).unref();
     const gc = () => {
-      void collectGarbage(this.threads, this.retentionMs());
+      void collectGarbage(this.threads, this.retentionMs(), this.idleMs());
       void sweepMedia(this.retentionMs());
     };
     gc();

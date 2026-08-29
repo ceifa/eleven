@@ -1,6 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
 import { syncChildren } from "./dom.js";
+import { elapsed, liveStatus, MATCH_CHARS, startOfDay, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { presentMessage, sameMessage } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
@@ -12,10 +13,15 @@ const state = {
   /** Durable transcript rows as the session file has them, oldest first. */
   timeline: [],
   requests: [],
-  /** The running turn's activity in order: prose, tool calls, provider requests. */
+  /** The running turn's activity in order: prose, tool calls, provider
+   *  requests, and messages that arrived while it was running. */
   live: [],
+  /** When the running turn began (0 when none is). Also the cut-off that says
+   *  which durable rows the live region owns. */
+  liveStartedAt: 0,
   /** Messages that exist but haven't landed in the transcript yet — just sent
-   *  from here, or just arrived from a channel. */
+   *  from here, or just arrived from a channel, with no turn running to hold
+   *  them. */
   pending: [],
   workspaceFilter: "",
   /** Free-text search over titles, conversations and transcripts. */
@@ -162,7 +168,6 @@ const timeAgo = (ts) => {
   return `${Math.floor(s / 86400)}d`;
 };
 
-const startOfDay = (ts) => new Date(ts).setHours(0, 0, 0, 0);
 const DAY_MS = 86_400_000;
 
 /** "Today" / "Yesterday" / a date — the label on a transcript's day separator. */
@@ -241,11 +246,13 @@ function connectWs() {
       if (active) {
         liveEpoch++;
         state.live = [];
+        state.liveStartedAt = Date.now();
         renderLive(true);
       }
     }
     if (message.type === "delta") {
       markThreadLive(message.threadId);
+      lastDeltaAt = Date.now();
       if (active) {
         // Prose that follows a tool call starts its own bubble — same shape the
         // transcript has after a reload.
@@ -273,6 +280,7 @@ function connectWs() {
     }
     if (message.type === "turn-done" || message.type === "turn-error") {
       markThreadIdle(message.threadId);
+      if (active) state.liveStartedAt = 0;
       if (message.type === "turn-error") {
         toast(message.error, true);
         stripError();
@@ -295,9 +303,13 @@ function connectWs() {
       // daemon reports it, and the next transcript read reconciles it.
       if (active && message.text) {
         const role = message.direction === "in" ? "user" : "assistant";
+        // A message that lands mid-turn is steered into that turn — so it goes
+        // into the live record, where it happened, instead of into the pending
+        // region that sits above everything the turn has streamed so far.
+        if (role === "user" && state.liveStartedAt) pushLiveMessage({ role, text: message.text });
         // A reply from the running turn is already on screen as streamed prose;
         // only one eleven sent outside a turn (the operator "send") needs a bubble.
-        if (role === "user" || !state.live.some((item) => item.kind === "text")) showPending(role, message.text);
+        else if (role === "user" || !state.live.some((item) => item.kind === "text")) showPending(role, message.text);
         scheduleReconcile();
       }
       scheduleThreadRefresh(message.workspace);
@@ -431,6 +443,7 @@ function applyThreadLive(threadId) {
   // hang off this one class, so none of them needs the pane re-rendered.
   if (threadId === state.activeThread?.id) {
     document.getElementById("thread-pane")?.classList.toggle("is-running", live);
+    if (live) updateLiveStatus();
   }
 }
 
@@ -566,6 +579,10 @@ function buildThreadCard(thread, older) {
       h("div", { class: "flex items-center gap-2 text-sm" },
         channelSource(thread.sessionKey),
         h("span", { class: "truncate min-w-0" }, thread.conversationName ?? thread.sessionKey),
+        // Always in the markup, shown by CSS only on a live card: the halo says
+        // "something is happening here" from the corner of your eye, and this
+        // says it plainly. Painting it as a class keeps the card cacheable.
+        h("i", { class: "spinner card-spinner", "aria-hidden": "true" }),
         h("span", { class: "ml-auto shrink-0 text-xs thread-meta font-mono", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
       ),
       h("div", { class: "flex items-center gap-2 text-xs thread-meta font-mono" },
@@ -741,6 +758,7 @@ async function openThread(id) {
   if (id !== state.activeThread?.id) {
     // Switching threads: nothing from the old one survives the move.
     state.live = [];
+    state.liveStartedAt = 0;
     state.pending = [];
   }
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
@@ -757,8 +775,15 @@ async function openThread(id) {
     // the transcript. With one running, the server snapshot is only a catch-up
     // for a page that missed events — once we're receiving them ourselves, ours
     // is the complete record and the snapshot would lose the newest deltas.
-    if (!data.live) state.live = [];
-    else if (!state.live.length) state.live = data.live.items ?? [];
+    if (!data.live) {
+      state.live = [];
+      state.liveStartedAt = 0;
+    } else {
+      // The daemon's clock, which is also the transcript's — so the cut-off it
+      // gives is directly comparable with the rows' own timestamps.
+      state.liveStartedAt = data.live.startedAt ?? state.liveStartedAt;
+      if (!state.live.length) state.live = data.live.items ?? [];
+    }
   }
   renderThreadPane();
   renderThreadList();
@@ -766,9 +791,30 @@ async function openThread(id) {
 
 // A pending bubble is redundant once the same message shows up in the
 // transcript. Compare a prefix: the activity broadcast clips long messages.
-const MATCH_CHARS = 200;
 const landed = (pending) =>
   state.timeline.some((item) => item.kind === "message" && sameMessage(item, pending, MATCH_CHARS));
+
+/**
+ * Put a message inside the running turn, at the point it arrived. This is what
+ * a mid-turn message needs: it is steered into the turn that is already going,
+ * so its place in the conversation is *between* two of that turn's tool calls —
+ * not above the whole turn, which is where every region-based placement put it.
+ * Returns the live item, so a locally sent one can still be corrected or undone.
+ */
+function pushLiveMessage(message) {
+  const existing = state.live.find((item) => item.kind === "message" && sameMessage(item, message, MATCH_CHARS));
+  if (existing) {
+    // The daemon's echo of a message this page sent (now with absolute media
+    // paths and any voice transcript) — upgrade it where it already is.
+    existing.text = message.text;
+    renderLive(true);
+    return existing;
+  }
+  const item = { kind: "message", role: message.role, text: message.text, at: Date.now() };
+  state.live.push(item);
+  renderLive();
+  return item;
+}
 
 /** Show a message that isn't in the transcript yet (and won't be until the turn
  *  persists it), unless it's already on screen. An attachment sent here starts
@@ -894,60 +940,24 @@ function sticky(mutate) {
   else markUnreadBelow();
 }
 
-/** Messages closer together than this, from the same speaker, read as one block. */
-const GROUP_WINDOW_MS = 4 * 60_000;
+/** The durable transcript, as nodes. Ordering, day breaks, message grouping and
+ *  which rows the running turn has already drawn are decided in live-turn.js —
+ *  this only turns each row into markup. */
+const durableRows = () =>
+  transcriptRows({
+    timeline: state.timeline,
+    requests: state.requests,
+    live: state.live,
+    liveStartedAt: state.liveStartedAt,
+    showRequests: state.showRequests,
+  }).map(transcriptNode);
 
-/** The durable rows in the order they happened. Tool calls and requests already
- *  rendered in the live region are skipped: they're the running turn's, and the
- *  live record knows how they interleave with prose the transcript can't see. */
-function durableRows() {
-  const liveIds = new Set(state.live.filter((item) => item.kind !== "text").map((item) => item.id));
-  const rows = [];
-  let at = 0;
-  for (const item of state.timeline) {
-    // Undated rows (older sessions) inherit the last known time so they can't
-    // sort to the top of the transcript.
-    at = Date.parse(item.timestamp) || at;
-    if (item.kind === "message") rows.push({ at, tie: 0, message: item });
-    else if (item.kind === "error") rows.push({ at, tie: 0, node: () => turnErrorRow(item.text) });
-    else {
-      const calls = item.calls.filter((call) => !liveIds.has(call.id));
-      if (calls.length) rows.push({ at, tie: 0, node: () => toolCallsBlock(calls) });
-    }
-  }
-  // The exact moments eleven called an AI provider, interleaved by time — a
-  // request precedes the message it produced, hence the tiebreak.
-  if (state.showRequests) {
-    for (const request of state.requests) {
-      if (!liveIds.has(request.id)) rows.push({ at: request.at, tie: 1, node: () => requestChip(request) });
-    }
-  }
-  rows.sort((a, b) => a.at - b.at || a.tie - b.tie);
-
-  const nodes = [];
-  let day;
-  let lastRole;
-  let lastAt = 0;
-  for (const row of rows) {
-    // A transcript spanning days reads as one endless column without these —
-    // and "when did I ask that?" is the question a reader scrolls back with.
-    const rowDay = row.at ? startOfDay(row.at) : undefined;
-    if (rowDay && rowDay !== day) {
-      day = rowDay;
-      lastRole = undefined;
-      nodes.push(daySeparator(row.at));
-    }
-    if (!row.message) {
-      lastRole = undefined; // anything between two messages breaks the run
-      nodes.push(row.node());
-      continue;
-    }
-    const grouped = row.message.role === lastRole && row.at - lastAt < GROUP_WINDOW_MS;
-    nodes.push(messageBubble(row.message, { grouped, at: row.at }));
-    lastRole = row.message.role;
-    lastAt = row.at;
-  }
-  return nodes;
+function transcriptNode(row) {
+  if (row.kind === "day") return daySeparator(row.at);
+  if (row.kind === "tool-calls") return toolCallsBlock(row.calls);
+  if (row.kind === "error") return turnErrorRow(row.text);
+  if (row.kind === "request") return requestChip(row.request);
+  return messageBubble(row.message, { grouped: row.grouped, at: row.at });
 }
 
 const daySeparator = (at) => h("div", { class: "day-sep" }, h("span", {}, dayLabel(at)));
@@ -985,6 +995,7 @@ function renderLive(rebuild = false) {
     const body = last?.kind === "text" ? region.lastElementChild?.querySelector(".msg-body") : undefined;
     if (body) body.innerHTML = md(last.text);
   });
+  updateLiveStatus();
 }
 
 function liveNode(item) {
@@ -992,8 +1003,33 @@ function liveNode(item) {
   if (item.kind === "request") {
     return state.showRequests ? requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 }) : h("div", { hidden: true });
   }
+  // A message that arrived mid-turn: an ordinary bubble, in the ordinary flow,
+  // at the point in the turn where it actually landed.
+  if (item.kind === "message") return messageBubble({ role: item.role, text: item.text }, { at: item.at });
   return messageBubble({ role: "assistant", text: item.text }, { streaming: true });
 }
+
+/* The line under the transcript while a turn runs: a spinner, what the turn is
+   doing, and how long it has been at it. The gap between "sent" and the first
+   token used to look like a hang, and a long tool call still does — this is the
+   page saying it is alive, and saying what it is busy with. */
+
+/** When a delta last arrived, anywhere — so the status can tell prose that is
+ *  still streaming from prose that stopped a minute ago. */
+let lastDeltaAt = 0;
+
+function updateLiveStatus() {
+  const row = document.getElementById("live-status");
+  if (!row) return;
+  row.querySelector(".live-status-label").textContent = liveStatus(state.live, { lastDeltaAt });
+  row.querySelector(".live-status-time").textContent = state.liveStartedAt ? elapsed(state.liveStartedAt) : "";
+}
+
+// The label ages on its own (prose stops, the clock ticks), so it is re-read
+// once a second rather than only when an event happens to arrive.
+setInterval(() => {
+  if (state.activeThread && isThreadLive(state.activeThread.id)) updateLiveStatus();
+}, 1000);
 
 // Deltas arrive dozens of times per second — coalesce to one render per frame.
 let liveRaf;
@@ -1028,7 +1064,7 @@ function threadHeader(thread) {
     h("div", { class: "thread-head-actions" },
       // Says the same thing the sign in the sidebar does, at the one place a
       // reader of this thread is already looking.
-      h("span", { class: "running-pill" }, h("i", { class: "running-dot" }), "running"),
+      h("span", { class: "running-pill" }, h("i", { class: "spinner" }), "running"),
       h("button", {
         class: `toolbar-icon${state.showRequests ? " is-active" : ""}`,
         title: state.showRequests ? "hide diagnostics" : "show provider requests and exact agent messages",
@@ -1476,9 +1512,13 @@ function renderThreadPane() {
           h("div", { id: "transcript" }, durableRows()),
           h("div", { id: "pending" }),
           h("div", { id: "live" }),
-          // Shown by CSS only while a turn runs and has produced nothing yet —
-          // the gap between "sent" and the first token used to look like a hang.
-          h("div", { class: "typing" }, h("i"), h("i"), h("i")),
+          // Shown by CSS only while a turn is running; updateLiveStatus keeps
+          // what it says current.
+          h("div", { class: "live-status", id: "live-status", role: "status" },
+            h("i", { class: "spinner", "aria-hidden": "true" }),
+            h("span", { class: "live-status-label" }, "Thinking…"),
+            h("span", { class: "live-status-time font-mono" }, ""),
+          ),
         ),
       ),
       h("button", { class: "jump-bottom", id: "jump-bottom", hidden: true, title: "Jump to the newest message", onclick: () => scrollToBottom(true) },
@@ -1829,17 +1869,14 @@ async function sendMessage(event) {
   // the files with it.
   const attachments = (await media?.refs()) ?? [];
   const message = { role: "user", text: withMediaNotes(text, attachments) };
-  state.pending.push(message);
-  renderPending();
+  const bubble = showOutgoing(message);
   scrollToBottom(); // your own message is always worth following down to
   try {
     const delivered = await api.send("POST", `/threads/${threadId}/message`, { text, attachments });
     // The daemon has now added absolute media paths and any voice transcript.
     // Its activity event usually upgrades this first; the response is the
     // deterministic fallback, and also deduplicates either arrival order.
-    if (delivered.message) message.text = delivered.message;
-    state.pending = state.pending.filter((entry) => entry === message || !entry.activity || !sameMessage(entry, message, MATCH_CHARS));
-    renderPending();
+    bubble.set(delivered.message ?? message.text);
     media?.clear();
   } catch (error) {
     // The send failed — drop the optimistic bubble and restore the draft so it
@@ -1847,15 +1884,45 @@ async function sendMessage(event) {
     // flight, so the text goes back to the thread it was written for; the box
     // is only refilled if it's still that thread's box.
     toast(error.message, true);
-    state.pending = state.pending.filter((entry) => entry !== message);
+    bubble.drop();
     drafts.set(threadId, text);
     const box = document.getElementById("composer-text");
     if (box?.dataset.thread === String(threadId)) {
       box.value = text;
       box.dispatchEvent(new Event("input"));
     }
-    renderPending();
   }
+}
+
+/**
+ * The optimistic bubble for a message this page just sent, and the two things
+ * that can still happen to it: the daemon's final body arrives, or the send
+ * failed and it never existed. Where it goes is the whole point — into the
+ * running turn when there is one, so it lands where it was typed rather than
+ * above everything the turn has been saying since.
+ */
+function showOutgoing(message) {
+  if (state.liveStartedAt) {
+    const item = pushLiveMessage(message);
+    return {
+      set: (text) => { item.text = text; renderLive(true); },
+      drop: () => { state.live = state.live.filter((entry) => entry !== item); renderLive(true); },
+    };
+  }
+  state.pending.push(message);
+  renderPending();
+  return {
+    set: (text) => {
+      message.text = text;
+      // The activity echo may have arrived first and drawn its own bubble.
+      state.pending = state.pending.filter((entry) => entry === message || !entry.activity || !sameMessage(entry, message, MATCH_CHARS));
+      renderPending();
+    },
+    drop: () => {
+      state.pending = state.pending.filter((entry) => entry !== message);
+      renderPending();
+    },
+  };
 }
 
 /** No page title here: the sidebar already says which view this is, and the

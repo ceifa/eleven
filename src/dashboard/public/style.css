@@ -628,8 +628,24 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   letter-spacing: 0.06em;
 }
 #thread-pane.is-running .running-pill { display: inline-flex; }
-.running-dot { width: 0.4rem; height: 0.4rem; border-radius: 50%; background: currentColor; animation: e11-breathe 1.6s ease-in-out infinite; }
-@keyframes e11-breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+/* One spinner for every place something is running — the pill above, a live
+   card in the list, the status line under the transcript. It takes its color
+   from whatever it sits in, so each of those keeps its own palette. */
+.spinner {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: e11-spin 0.7s linear infinite;
+}
+@keyframes e11-spin { to { transform: rotate(360deg); } }
+/* On a card the halo already carries the motion; this only has to be legible. */
+.card-spinner { display: none; width: 0.55rem; height: 0.55rem; border-width: 1.2px; color: var(--color-warning); }
+.card.is-live .card-spinner { display: inline-block; }
 
 /* -- the ⋯ overflow -- */
 
@@ -740,22 +756,23 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 }
 .chat:has(+ .chat.is-grouped) .msg-time { display: none; }
 
-/* The turn is running and has produced nothing yet — the gap between "sent"
-   and the first token used to look like a hang. Pure CSS: the dots appear only
-   while the pane is running AND the live region is still empty. */
-.typing { display: none; gap: 0.3rem; align-items: center; padding: 0.6rem 0.2rem; }
-#thread-pane.is-running #live:empty + .typing { display: flex; }
-.typing i {
-  width: 0.4rem; height: 0.4rem; border-radius: 50%;
-  background: var(--color-warning);
-  opacity: 0.35;
-  animation: e11-typing 1.2s ease-in-out infinite;
+/* What the running turn is doing, at the foot of the transcript. It stays for
+   the whole turn rather than only until the first token: the gap before the
+   first token used to look like a hang, and a four-minute tool call still does.
+   The clock on the right is what tells a slow turn from a dead one. */
+.live-status {
+  display: none;
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.6rem 0.2rem;
+  color: var(--color-warning);
+  font-size: 0.78rem;
 }
-.typing i:nth-child(2) { animation-delay: 0.15s; }
-.typing i:nth-child(3) { animation-delay: 0.3s; }
-@keyframes e11-typing { 0%, 100% { opacity: 0.25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
+#thread-pane.is-running .live-status { display: flex; }
+.live-status-label { min-width: 0; }
+.live-status-time { margin-left: auto; font-size: 0.7rem; opacity: 0.6; }
 @media (prefers-reduced-motion: reduce) {
-  .typing i, .running-dot { animation: none; opacity: 0.7; }
+  .spinner { animation: none; border-top-color: currentColor; opacity: 0.7; }
 }
 
 /* -- jump to latest -- */

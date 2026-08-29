@@ -40,7 +40,12 @@ const LIVE_ITEMS_MAX = 400;
 export type LiveItem =
   | { kind: "text"; text: string }
   | { kind: "tool"; id: string; name: string; summary: string; args?: Record<string, unknown> }
-  | { kind: "request"; id: string; model: string; at: number };
+  | { kind: "request"; id: string; model: string; at: number }
+  // A message that arrived while the turn was running and was steered into it.
+  // It is persisted immediately too, but only the live record knows *where* in
+  // the turn it landed — the transcript cannot see the streamed prose it fell
+  // between.
+  | { kind: "message"; role: "user" | "assistant"; text: string; at: number };
 
 export interface LiveTurn {
   startedAt: number;
@@ -136,6 +141,12 @@ export class Gateway extends EventEmitter {
       lastActivityAt: Date.now(),
       ...(thread.title ? undefined : { title: incoming.text.slice(0, 80) }),
     });
+    // A turn is already running: this message is about to be steered into it, so
+    // it belongs in that turn's live record, at the point it arrived. Without it
+    // a page opened mid-turn draws the message above everything the turn has
+    // said since — the transcript has no idea where the streamed prose goes.
+    // pushLive is a no-op when no turn is in flight, which is the common case.
+    this.pushLive(thread.id, { kind: "message", role: "user", text: incoming.text, at: Date.now() });
     this.emit("thread-activity", { thread, direction: "in", text: incoming.text });
 
     const events: TurnEvents = {

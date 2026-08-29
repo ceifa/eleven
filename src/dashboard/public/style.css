@@ -3,6 +3,13 @@
    Void-black base, neon-red display type with a CRT glow, amber string-lights
    for live activity. */
 
+/* The `hidden` attribute has to actually hide. The browser's own
+   [hidden] { display: none } is a user-agent rule, so any author rule that sets
+   display — .btn, .badge, .card, every component here — silently outranks it,
+   and an element the script "hid" stays on screen with no sign anything went
+   wrong. This is the one place in the file that earns !important. */
+[hidden] { display: none !important; }
+
 /* ---------- fonts ---------- */
 
 @font-face { font-family: "Grenze"; font-weight: 600; src: url("/fonts/grenze-600.ttf") format("truetype"); font-display: swap; }
@@ -338,7 +345,6 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 
 /* ---------- badges ---------- */
 
-.badge[hidden] { display: none; }
 .badge {
   display: inline-flex;
   align-items: center;

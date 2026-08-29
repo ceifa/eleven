@@ -3,7 +3,7 @@ import { run, sequentialize, type RunnerHandle } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ChannelConfig, GroupConfig, ModelEntry, TopicConfig, UserConfig } from "../../config.ts";
-import { TurnFailure } from "../../agent/runner.ts";
+import { TurnFailure, type TurnRewind } from "../../agent/runner.ts";
 import { lruTouch, summarizeToolArgs } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
@@ -14,7 +14,7 @@ import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
-import { FAILOVER_PREFIX, FailoverOffers, retryPrompt } from "./failover.ts";
+import { CONTINUE_PROMPT, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
 import { logger } from "../../log.ts";
 
 const STALL_THRESHOLD_MS = 120_000;
@@ -196,8 +196,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   // the user presses the draft's stop button.
   const draftStops = new Map<string, string>();
 
-  // "Retry on the next model" buttons hanging off failure messages.
-  const failovers = new FailoverOffers<Target>();
+  // Manual failover buttons hanging off failure messages, each holding what it
+  // takes to run that turn again.
+  const failovers = new FailoverOffers<{ target: Target; text: string; images: InboundImage[] }>();
 
   // Handled (chat, message_id) pairs — insertion-ordered so eviction drops the oldest.
   const seenMessages = new Map<string, number>();
@@ -337,8 +338,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     void runTurn(target, `[inline button pressed] ${data}`, []);
   }
 
-  /** The person took the manual failover a failed turn offered: run the same
-   * turn again on the models its plan never reached. */
+  /** The person took one of the two ways out a failed turn offered: pick the
+   * dead turn up where it stopped, or run the original request from nothing —
+   * both on the models its plan never reached. */
   function retryOnFallback(callbackData: string, target: Target) {
     const sessionKey = sessionKeyFor(target.chatId, target.topic);
     const offer = failovers.take(callbackData, sessionKey);
@@ -348,8 +350,15 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       }).catch(() => {});
       return;
     }
-    log.info(`manual failover in ${sessionKey}: ${offer.failedModel} → ${offer.models[0]!.model}`);
-    void runTurn(offer.target, retryPrompt(offer), [], offer.models);
+    const { replay, models, mode } = offer;
+    log.info(`manual failover in ${sessionKey}: ${mode} on ${models[0]!.model}`);
+    const restart = mode === "restart";
+    void runTurn(replay.target, restart ? replay.text : CONTINUE_PROMPT, restart ? replay.images : [], {
+      models,
+      // A continue keeps the failed attempt: its tool calls are what the next
+      // model resumes from. Only a restart branches them away.
+      rewind: restart ? offer.rewind : undefined,
+    });
   }
 
   /** Grey out the pressed message's keyboard so the action can't be repeated. */
@@ -382,9 +391,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     await deps.gateway.interrupt(sessionKey);
   }
 
-  /** `models` overrides the configured plan for this turn alone — that is what a
-   * manual failover retry runs on. */
-  async function runTurn(target: Target, text: string, images: InboundImage[], models?: ModelEntry[]) {
+  /** `retry` is set by a manual failover: its own model plan for this turn
+   * alone, and the failed attempt a restart branches away first. */
+  async function runTurn(target: Target, text: string, images: InboundImage[], retry?: { models: ModelEntry[]; rewind?: TurnRewind }) {
     const { chatId, topic, isPrivate } = target;
     const sessionKey = sessionKeyFor(chatId, topic);
     // The conversation is moving on: a retry button left over from an earlier
@@ -447,7 +456,8 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         workspaceHint: deps.workspace(),
         // Most specific first: a topic's model settings beat its owner's.
         modelScopes: [topicConfig, owner],
-        models,
+        models: retry?.models,
+        rewind: retry?.rewind,
         appends,
         customTools: [tool],
         runtime: {
@@ -509,8 +519,10 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       log.error(`turn failed: ${error}`);
       // The runner stops instead of failing over once an attempt ran tools (a
       // spent quota mid-turn is the common way there) — so when its plan still
-      // has models left, the failure carries a button that runs the next one.
-      const keyboard = error instanceof TurnFailure ? failovers.offer(sessionKey, target, error) : undefined;
+      // has models left, the failure carries the buttons that run the next one.
+      const keyboard = error instanceof TurnFailure
+        ? failovers.offer(sessionKey, { target, text, images }, error)
+        : undefined;
       await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}`, {
         messageThreadId: topic,
         replyMarkup: keyboard,

@@ -13,7 +13,7 @@ The idea is simple: eleven makes your local agent reachable from anywhere, throu
 - **Channels**: connect your agent to any channel, including Telegram and Discord.
 - **Pairing**: deny-by-default everywhere. Unknown DM senders and unregistered groups show up as requests in the dashboard; one click adds them to the allowlist.
 - **Workspaces**: a directory + tool policy (`read`-only to full `bash`) + optional model override. pi loads the workspace's `AGENTS.md` and `.agents/skills` natively, so your agent's persona lives in the repo, not in eleven.
-- **Dashboard** (`127.0.0.1:1111`): configure channels, providers, workspaces, approve pairings, and browse or join any thread with live streaming. Threads are named after the conversation they belong to — the forum topic, the group, the person — searchable full-text across every transcript, and stoppable mid-turn.
+- **Dashboard** (`127.0.0.1:1111`): configure channels, providers, workspaces, approve pairings, and browse or join any thread with live streaming. Threads are named after the conversation they belong to — the forum topic, the group, the person — searchable full-text across every transcript, and stoppable mid-turn. Its composer attaches files (pick, drop, or paste a screenshot) and records voice messages, transcribed the same way a Telegram voice note is.
 - **Models**: any provider pi supports, plus the official Claude Code runtime.
 
 ![eleven dashboard: workspace configuration](https://raw.githubusercontent.com/ceifa/eleven/main/assets/dashboard-workspaces.jpg)

@@ -1,11 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, extname, normalize, sep } from "node:path";
+import { basename, join, extname, normalize, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig } from "../config.ts";
 import { collectProviderUsage } from "../provider-usage.ts";
 import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
@@ -13,6 +14,7 @@ import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import { listWorkspaceSkills } from "../agent/runner.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
+import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
 import { conversationIdentity } from "../threads/conversation.ts";
 import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
@@ -53,6 +55,15 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
 };
+// What a composer may upload in one file. Telegram tops out at 20 MB; this is
+// the same order of magnitude, and the ceiling a browser is held to so a slip of
+// the finger on a video file can't stream gigabytes into the state directory.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+// Types a stored attachment may be rendered as, inside the dashboard's own
+// origin. Everything else is downloaded instead: an uploaded .html or .svg
+// served inline would be a script running as the page that can drive the agent.
+// (image/svg+xml is deliberately absent from this list for that reason.)
+const INLINE_MEDIA = /^(image\/(png|jpeg|gif|webp|avif)|audio\/|video\/)/;
 // What is worth compressing: everything the dashboard serves that is text.
 // Fonts are woff2, which is brotli already — running it again costs CPU to save
 // nothing.
@@ -416,6 +427,41 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       if (method === "GET" && path === "/threads") {
         return send(200, await listThreadViews(url));
       }
+      // An attachment on its way to a turn. The body is the file itself — a
+      // multipart parser would buy nothing here, since one upload is one file.
+      // The answer is a receipt: the stored name, which is the only handle the
+      // page ever holds (the absolute path stays on this side of the tunnel).
+      if (method === "POST" && path === "/media") {
+        const bytes = await rawBody(req, MAX_UPLOAD_BYTES);
+        if (!bytes.length) throw new ApiError(400, "upload is empty");
+        const name = url.searchParams.get("name") ?? "attachment";
+        const stored = await saveInboundMedia(bytes, name);
+        return send(201, { id: basename(stored), bytes: bytes.length, mime: validMime(req.headers["content-type"]) });
+      }
+      // Reading one back: how the transcript shows a photo instead of a path,
+      // for anything attached here *or* sent from a channel. The caller says how
+      // it wants the bytes typed, and only the renderable types are honored —
+      // the rest is served as an opaque download, never as a document in this
+      // origin.
+      if (method === "GET" && path.startsWith("/media/")) {
+        const file = resolveMediaPath(decodeURIComponent(path.slice("/media/".length)));
+        let bytes: Buffer | undefined;
+        try {
+          bytes = file ? await readFile(file) : undefined;
+        } catch {
+          bytes = undefined;
+        }
+        if (!bytes) return send(404, { error: "media not found" });
+        const declared = validMime(url.searchParams.get("type") ?? undefined) ?? "";
+        const inline = INLINE_MEDIA.test(declared);
+        return deliver(req, res, 200, {
+          "content-type": inline ? declared : "application/octet-stream",
+          "content-disposition": inline ? "inline" : "attachment",
+          "x-content-type-options": "nosniff",
+          // Stored names are unique per file and their contents never change.
+          "cache-control": "private, max-age=31536000, immutable",
+        }, bytes);
+      }
       if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
         const run = cliRuns.get(thread.id);
@@ -475,10 +521,11 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         return send(200, { ok: true });
       }
       if (method === "POST" && path === "/threads") {
-        const request = (await body(req)) as { workspace: string; text: string; source?: string };
-        const { workspace, text } = request;
+        const request = (await body(req)) as { workspace: string; text: string; source?: string; attachments?: unknown };
+        const { workspace } = request;
         if (!config.resolved.workspaces[workspace]) throw new Error(`workspace ${workspace} not found`);
-        if (!text?.trim()) throw new Error("message is required");
+        const { text, images } = await composeInbound(request.text, request.attachments);
+        if (!text.trim() && !images.length) throw new Error("message is required");
         const source = request.source === "cli" ? "cli" : "dashboard";
         const sessionKey = `${source}:${workspace}:${randomUUID()}`;
         const thread = gateway.newThread(sessionKey, workspace);
@@ -489,13 +536,13 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
             if (!evictable) break;
             cliRuns.delete(evictable);
           }
-          void runLocalTurn(sessionKey, text, source).then(
+          void runLocalTurn(sessionKey, text, source, images).then(
             (result) => cliRuns.set(thread.id, { status: "done", result }),
             (error) => cliRuns.set(thread.id, { status: "error", error: error instanceof Error ? error.message : String(error) }),
           );
           return send(201, threadView(thread));
         }
-        void runLocalTurn(sessionKey, text, source).catch(() => {});
+        void runLocalTurn(sessionKey, text, source, images).catch(() => {});
         return send(201, thread);
       }
       // The dashboard's stop button — Telegram's /stop for the thread you are
@@ -509,8 +556,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
-        const { text } = (await body(req)) as { text: string };
-        void runLocalTurn(thread.sessionKey, text, "dashboard").catch(() => {});
+        const request = (await body(req)) as { text: string; attachments?: unknown };
+        const { text, images } = await composeInbound(request.text, request.attachments);
+        if (!text.trim() && !images.length) throw new Error("message is required");
+        void runLocalTurn(thread.sessionKey, text, "dashboard", images).catch(() => {});
         return send(202, { ok: true });
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/send$/)) {
@@ -570,12 +619,32 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     }
   }
 
-  async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli") {
+  /**
+   * The prompt a composer's submission becomes: its text, the note per uploaded
+   * file so the agent can open it, the transcript of anything recorded — the
+   * same body an inbound Telegram message produces, so a turn cannot tell the
+   * two apart. Images additionally ride along for the model to look at.
+   */
+  async function composeInbound(text: unknown, attachments: unknown) {
+    const refs = Array.isArray(attachments)
+      ? attachments.flatMap((entry): StoredAttachment[] => {
+          const { id, mime, voice } = (entry ?? {}) as Record<string, unknown>;
+          return typeof id === "string" ? [{ id, mime: typeof mime === "string" ? mime : undefined, voice: voice === true }] : [];
+        })
+      : [];
+    const userText = typeof text === "string" ? text.trim() : "";
+    if (!refs.length) return { text: userText, images: [] };
+    const media = await collectStoredMedia(refs, config.resolved.transcription?.command);
+    return { text: formatInboundBody(userText, media), images: media.images };
+  }
+
+  async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli", images: ImageContent[] = []) {
     // turn-done/turn-error reach the UI via the gateway's own events.
     try {
       return await gateway.handle({
         sessionKey,
         text: message,
+        images: images.length ? images : undefined,
         runtime: {
           channel: source,
           conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
@@ -725,18 +794,24 @@ function sendAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {
 const MAX_API_BODY_BYTES = 1024 * 1024;
 
 async function body(req: IncomingMessage): Promise<unknown> {
+  const raw = (await rawBody(req, MAX_API_BODY_BYTES)).toString("utf8");
+  return raw ? JSON.parse(raw) : {};
+}
+
+/** Read a request body, refusing anything over `limit` — as early as the
+ *  declared length allows, and again as the bytes actually arrive. */
+async function rawBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   const declared = Number(req.headers["content-length"]);
-  if (Number.isFinite(declared) && declared > MAX_API_BODY_BYTES) throw new ApiError(413, "request body too large");
+  if (Number.isFinite(declared) && declared > limit) throw new ApiError(413, "request body too large");
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > MAX_API_BODY_BYTES) throw new ApiError(413, "request body too large");
+    if (bytes > limit) throw new ApiError(413, "request body too large");
     chunks.push(buffer);
   }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  return Buffer.concat(chunks);
 }
 
 /** True when the request carries an Origin whose host differs from the Host

@@ -14,7 +14,7 @@ import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
-import { CONTINUE_PROMPT, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
+import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
 import { logger } from "../../log.ts";
 
 const STALL_THRESHOLD_MS = 120_000;
@@ -353,7 +353,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const { replay, models, mode } = offer;
     log.info(`manual failover in ${sessionKey}: ${mode} on ${models[0]!.model}`);
     const restart = mode === "restart";
-    void runTurn(replay.target, restart ? replay.text : CONTINUE_PROMPT, restart ? replay.images : [], {
+    void runTurn(replay.target, restart ? replay.text : continuePrompt(offer.hiddenToolCalls), restart ? replay.images : [], {
       models,
       // A continue keeps the failed attempt: its tool calls are what the next
       // model resumes from. Only a restart branches them away.

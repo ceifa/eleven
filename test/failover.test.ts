@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TurnFailure, turnFailure } from "../src/agent/runner.ts";
-import { CONTINUE_PROMPT, FAILOVER_PREFIX, FailoverOffers } from "../src/channels/telegram/failover.ts";
+import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../src/channels/telegram/failover.ts";
 
 const PLAN = [
   { model: "claude-code/opus" },
@@ -37,7 +37,7 @@ test("a turn that failed before any candidate ran keeps its own error", () => {
 
 /** The keyboard a failure carries, and the callback data of one of its buttons. */
 function offerFor(offers: FailoverOffers<string>, sessionKey = "telegram:main:7", rewind?: { from: string; to: string }) {
-  const keyboard = offers.offer(sessionKey, "replay", { remaining: TAIL, rewind });
+  const keyboard = offers.offer(sessionKey, "replay", { remaining: TAIL, rewind, hiddenToolCalls: [] });
   const buttons = keyboard?.inline_keyboard[0] ?? [];
   return {
     labels: buttons.map((button) => ("text" in button ? button.text : "")),
@@ -98,7 +98,42 @@ test("an offer only fires in the conversation it was made in, and only while fre
 
 test("a failure with nothing left in the plan gets no buttons", () => {
   const offers = new FailoverOffers<string>();
-  assert.equal(offers.offer("telegram:main:7", "replay", { remaining: [] }), undefined);
+  assert.equal(offers.offer("telegram:main:7", "replay", { remaining: [], hiddenToolCalls: [] }), undefined);
+});
+
+test("a continue names the tool calls the next model cannot read back", () => {
+  const offers = new FailoverOffers<string>();
+  const hiddenToolCalls = [
+    { id: "claude:0", name: "Bash", args: { command: "npm test" } },
+    { id: "claude:1", name: "telegram", args: { action: "send", text: "the report is ready" } },
+  ];
+  const keyboard = offers.offer("telegram:main:7", "replay", { remaining: TAIL, hiddenToolCalls });
+  const button = keyboard!.inline_keyboard[0]![0]!;
+  const taken = offers.take("callback_data" in button ? button.callback_data : "", "telegram:main:7");
+
+  const prompt = continuePrompt(taken!.hiddenToolCalls);
+  // A send is exactly the side effect no amount of reading the workspace recovers.
+  assert.match(prompt, /- Bash npm test/);
+  assert.match(prompt, /- telegram send/);
+  assert.match(prompt, /don't repeat them/);
+});
+
+test("a continue after a runtime whose calls are already in context stays one line", () => {
+  const prompt = continuePrompt([]);
+
+  assert.ok(!prompt.includes("\n"));
+  assert.ok(prompt.length < 160);
+  assert.match(prompt, /don't repeat them/);
+});
+
+test("a long attempt lists only its recent calls, and says how many it dropped", () => {
+  const calls = Array.from({ length: 40 }, (_, i) => ({ id: `claude:${i}`, name: "Read", args: { path: `file-${i}.ts` } }));
+  const prompt = continuePrompt(calls);
+
+  assert.match(prompt, /\(25 earlier calls omitted\)/);
+  assert.ok(!prompt.includes("file-24.ts"));
+  assert.match(prompt, /file-25\.ts/);
+  assert.match(prompt, /file-39\.ts/);
 });
 
 test("callback data that is not a live offer is refused, not guessed at", () => {
@@ -111,7 +146,3 @@ test("callback data that is not a live offer is refused, not guessed at", () => 
   assert.equal(offers.take(data("continue").replace(":continue", ":wipe"), "telegram:main:7"), undefined);
 });
 
-test("the continue prompt spends no words on what the transcript already shows", () => {
-  assert.match(CONTINUE_PROMPT, /don't repeat them/);
-  assert.ok(CONTINUE_PROMPT.length < 160);
-});

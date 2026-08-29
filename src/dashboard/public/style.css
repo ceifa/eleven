@@ -319,6 +319,14 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   color: inherit;
   border-radius: 2px;
 }
+/* The scrolling column of thread cards. `overflow-y: auto` also clips
+   horizontally (the spec turns a `visible` cross axis into `auto`), so the
+   is-live halo — a bloom plus a 1px ring that both sit OUTSIDE the card's box —
+   gets sheared off against every edge of this container. The padding is that
+   halo's room to exist: ~5px of bloom + the ring, rounded up. The right side
+   also carries the scrollbar, hence the wider gutter. */
+.thread-scroll { padding: 0.4rem 0.5rem 0.4rem 0.4rem; }
+
 /* ---------- threads toolbar ---------- */
 
 /* The whole head of the list column: a search field and two glyphs. No card, no

@@ -23,7 +23,7 @@ import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
-const SHELL_FILES = ["index.html", "app.js", "dom.js", "markdown.js", "style.css"];
+const SHELL_FILES = ["index.html", "app.js", "dom.js", "markdown.js", "message-display.js", "waveform.js", "style.css"];
 // Newest mtime among the app-shell files, read once: new assets arrive with a
 // new daemon, and a stat per socket would buy nothing.
 const SHELL_VERSION = Math.max(
@@ -560,7 +560,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const { text, images } = await composeInbound(request.text, request.attachments);
         if (!text.trim() && !images.length) throw new Error("message is required");
         void runLocalTurn(thread.sessionKey, text, "dashboard", images).catch(() => {});
-        return send(202, { ok: true });
+        // The composer uses this exact body to replace its upload-receipt
+        // preview. It includes absolute paths and voice transcription — exactly
+        // what the agent received, and exactly what ⚡ promises to expose.
+        return send(202, { ok: true, message: text });
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/send$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);

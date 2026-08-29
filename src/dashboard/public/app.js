@@ -2,6 +2,8 @@
 
 import { syncChildren } from "./dom.js";
 import { md } from "./markdown.js";
+import { presentMessage, sameMessage } from "./message-display.js";
+import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
 
 const view = document.getElementById("view");
 const state = {
@@ -766,16 +768,18 @@ async function openThread(id) {
 // transcript. Compare a prefix: the activity broadcast clips long messages.
 const MATCH_CHARS = 200;
 const landed = (pending) =>
-  state.timeline.some(
-    (item) => item.kind === "message" && item.role === pending.role && item.text.slice(0, MATCH_CHARS) === pending.text.slice(0, MATCH_CHARS),
-  );
+  state.timeline.some((item) => item.kind === "message" && sameMessage(item, pending, MATCH_CHARS));
 
 /** Show a message that isn't in the transcript yet (and won't be until the turn
- *  persists it), unless it's already on screen. */
+ *  persists it), unless it's already on screen. An attachment sent here starts
+ *  life as an upload receipt; the activity event carries the daemon's final
+ *  body (absolute path and voice transcript), so upgrade that bubble in place. */
 function showPending(role, text) {
-  const message = { role, text };
-  if (landed(message) || state.pending.some((p) => p.role === role && p.text.slice(0, MATCH_CHARS) === text.slice(0, MATCH_CHARS))) return;
-  state.pending.push(message);
+  const message = { role, text, activity: true };
+  if (landed(message)) return;
+  const existing = state.pending.find((pending) => sameMessage(pending, message, MATCH_CHARS));
+  if (existing) existing.text = text;
+  else state.pending.push(message);
   renderPending();
 }
 
@@ -826,23 +830,7 @@ const turnErrorRow = (text) =>
     h("span", { class: "min-w-0" }, text),
   );
 
-/* How an attachment reaches a prompt: one bracketed line per file, naming the
-   path the agent can open. That is a fine thing to say to a model and a poor
-   thing to show a reader, so the bubble lifts those lines out of the text and
-   renders the files themselves — whether they were attached here or arrived
-   from a channel. */
-const MEDIA_NOTE = /^\[media attached: (\S+) \(([^)\n]*)\)\]$/gm;
-
-function splitMedia(text) {
-  const media = [];
-  const stripped = text.replace(MEDIA_NOTE, (_, path, mime) => {
-    media.push({ id: path.split("/").pop(), mime });
-    return "";
-  });
-  return { text: media.length ? stripped.replace(/\n{3,}/g, "\n\n").trim() : text, media };
-}
-
-/** The client's side of the same convention, for the bubble shown while a
+/** The client's side of the media-note convention, for the bubble shown while a
  *  message is still in flight — it has receipts, not paths. */
 const withMediaNotes = (text, attachments) =>
   [text, ...attachments.map((item) => `[media attached: ${item.id} (${item.mime})]`)].filter(Boolean).join("\n\n");
@@ -875,7 +863,9 @@ function mediaAttachment({ id, mime }) {
  */
 function messageBubble(message, { streaming = false, grouped = false, at } = {}) {
   const isUser = message.role === "user";
-  const { text, media } = splitMedia(message.text);
+  // ⚡ is deliberately literal: it exposes the prompt instead of replacing its
+  // media-note lines with the friendly attachment preview.
+  const { text, media } = presentMessage(message.text, state.showRequests);
   return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}${grouped ? " is-grouped" : ""}` },
     h("div", { class: `chat-bubble${streaming ? " msg-streaming" : ""}` },
       media.length ? h("div", { class: "msg-attachments" }, media.map(mediaAttachment)) : null,
@@ -1041,8 +1031,8 @@ function threadHeader(thread) {
       h("span", { class: "running-pill" }, h("i", { class: "running-dot" }), "running"),
       h("button", {
         class: `toolbar-icon${state.showRequests ? " is-active" : ""}`,
-        title: state.showRequests ? "hide provider requests" : "show provider requests",
-        "aria-label": "Provider requests",
+        title: state.showRequests ? "hide diagnostics" : "show provider requests and exact agent messages",
+        "aria-label": "Diagnostics",
         "aria-pressed": String(state.showRequests),
         onclick: toggleRequests,
       }, "⚡"),
@@ -1302,6 +1292,7 @@ function voiceRecorder(form, onTake) {
   let recorder;
   let stream;
   let ticker;
+  let stopWaveform;
   let startedAt = 0;
   let keep = true;
 
@@ -1318,6 +1309,8 @@ function voiceRecorder(form, onTake) {
   function teardown() {
     clearInterval(ticker);
     ticker = undefined;
+    stopWaveform?.();
+    stopWaveform = undefined;
     for (const track of stream?.getTracks() ?? []) track.stop();
     stream = undefined;
     recorder = undefined;
@@ -1355,6 +1348,7 @@ function voiceRecorder(form, onTake) {
     startedAt = Date.now();
     elapsed.textContent = "0:00";
     recorder.start();
+    stopWaveform = connectWaveform(stream, [...waveform.children]);
     liveRecording = () => finish(false);
     form.classList.add("is-recording");
     ticker = setInterval(() => (elapsed.textContent = clockDuration((Date.now() - startedAt) / 1000)), 250);
@@ -1368,10 +1362,14 @@ function voiceRecorder(form, onTake) {
     else teardown();
   }
 
+  const waveform = h("div", { class: "recorder-waveform", role: "img", "aria-label": "Live microphone level" },
+    Array.from({ length: WAVEFORM_BAR_COUNT }, () => h("i", { class: "recorder-waveform-bar" })),
+  );
   const bar = h("div", { class: "recorder" },
     h("span", { class: "recorder-dot", "aria-hidden": "true" }),
     h("span", { class: "recorder-label" }, "Recording"),
     elapsed,
+    waveform,
     h("button", { class: "composer-icon", type: "button", title: "Discard", "aria-label": "Discard recording", onclick: () => finish(false), html: X_ICON }),
     h("button", { class: "composer-icon is-primary", type: "button", title: "Keep", "aria-label": "Keep recording", onclick: () => finish(true), html: CHECK_ICON }),
   );
@@ -1835,7 +1833,13 @@ async function sendMessage(event) {
   renderPending();
   scrollToBottom(); // your own message is always worth following down to
   try {
-    await api.send("POST", `/threads/${threadId}/message`, { text, attachments });
+    const delivered = await api.send("POST", `/threads/${threadId}/message`, { text, attachments });
+    // The daemon has now added absolute media paths and any voice transcript.
+    // Its activity event usually upgrades this first; the response is the
+    // deterministic fallback, and also deduplicates either arrival order.
+    if (delivered.message) message.text = delivered.message;
+    state.pending = state.pending.filter((entry) => entry === message || !entry.activity || !sameMessage(entry, message, MATCH_CHARS));
+    renderPending();
     media?.clear();
   } catch (error) {
     // The send failed — drop the optimistic bubble and restore the draft so it

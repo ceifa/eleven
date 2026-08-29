@@ -960,7 +960,33 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   animation: e11-blink 1.1s ease-in-out infinite;
 }
 .recorder-label { font-size: 0.85rem; }
-.recorder-time { margin-right: auto; font-size: 0.85rem; color: color-mix(in oklab, var(--color-base-content) 60%, transparent); }
+.recorder-time { font-size: 0.85rem; color: color-mix(in oklab, var(--color-base-content) 60%, transparent); }
+/* A mirrored frequency meter rather than decorative canned motion: silence
+   leaves a hairline and speech lifts the centre outward in real time. */
+.recorder-waveform {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: 1 1 8rem;
+  min-width: 5rem;
+  height: 1.65rem;
+  overflow: hidden;
+  color: var(--color-error);
+}
+.recorder-waveform-bar {
+  display: block;
+  width: 2px;
+  height: 100%;
+  flex: 0 0 2px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.82;
+  transform: scaleY(var(--level, 0.08));
+  transform-origin: center;
+  transition: transform 60ms linear;
+}
+@media (prefers-reduced-motion: reduce) { .recorder-waveform-bar { transition: none; } }
 
 /* -- attachments inside a message -- */
 
@@ -1486,6 +1512,8 @@ video.msg-media { max-width: 22rem; }
   /* Thumb-sized targets cost width the text needs — the box keeps the glyphs,
      the chips lose their fixed cap and use the line they are on. */
   .composer-box { padding-left: 0.35rem; gap: 0.25rem; }
+  .recorder { gap: 0.4rem; padding-left: 0.65rem; }
+  .recorder-label { display: none; }
   .attach-chip { max-width: 100%; }
   .jump-bottom { bottom: 5rem; }
   .new-thread { padding: 0.75rem; align-items: flex-start; }

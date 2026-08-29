@@ -143,9 +143,12 @@ test("a recording is transcribed on arrival, like a Telegram voice note", async 
       body: JSON.stringify({ text: "", attachments: [{ id: stored.id, mime: "audio/webm", voice: true }] }),
     });
     assert.equal(response.status, 202);
+    const delivered = json(response) as { message: string };
+    assert.match(delivered.message, /\[Transcript\]\ntranscribed .*voice-note\.webm/);
+    assert.match(delivered.message, /\[media attached: .*voice-note\.webm \(audio\/webm\)\]/);
 
     const turn = turns.at(-1)!;
-    assert.match(turn.text, /\[Transcript\]\ntranscribed .*voice-note\.webm/);
+    assert.equal(turn.text, delivered.message, "the composer gets the exact body sent to the agent");
     assert.equal(turn.images?.length ?? 0, 0);
   });
 });

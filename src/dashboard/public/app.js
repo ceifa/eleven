@@ -40,8 +40,23 @@ const prefs = {
   set: (key, value) => {
     try { localStorage.setItem(`eleven.${key}`, value); } catch { /* private mode */ }
   },
+  remove: (key) => {
+    try { localStorage.removeItem(`eleven.${key}`); } catch { /* private mode */ }
+  },
 };
 state.showRequests = prefs.get("requests", "0") === "1";
+
+/** What was typed into a composer and not sent yet. A half-written message is
+ *  work, and the pane is torn down by things its writer never asked for —
+ *  opening another thread, a route change, a reload — so it's kept per thread
+ *  and outside the DOM. Empty means no draft: nothing is left behind for a
+ *  thread that was typed in and then cleared. */
+const drafts = {
+  get: (id) => prefs.get(`draft.${id}`, ""),
+  set: (id, text) => (text ? prefs.set(`draft.${id}`, text) : drafts.clear(id)),
+  clear: (id) => prefs.remove(`draft.${id}`),
+};
+const NEW_THREAD_DRAFT = "new"; // the launcher's box has no thread to key on yet
 
 /* ---------- helpers ---------- */
 
@@ -1026,6 +1041,9 @@ const copyText = (text, message) => navigator.clipboard.writeText(text).then(() 
 function autoGrow(textarea) {
   const fit = () => {
     textarea.style.height = "auto";
+    // Off screen (the pane a phone isn't showing) there is no scrollHeight to
+    // measure, and pinning the box to 0px would keep it collapsed once shown.
+    if (!textarea.scrollHeight) return;
     textarea.style.height = `${Math.min(textarea.scrollHeight, Math.round(window.innerHeight * 0.35))}px`;
   };
   textarea.addEventListener("input", fit);
@@ -1041,8 +1059,14 @@ function threadComposer(thread) {
     id: "composer-text",
     placeholder: `Message ${thread.workspace}…`,
     rows: "1",
+    // The composer is per thread, so the draft is too — id, not "the composer".
+    "data-thread": thread.id,
+    oninput: (e) => drafts.set(thread.id, e.target.value),
     onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); } },
   }));
+  // Before autoGrow's first fit (a frame away), so the box opens at the height
+  // the restored draft needs instead of snapping to it.
+  text.value = drafts.get(thread.id);
   return h("form", { class: "composer", onsubmit: sendMessage },
     h("div", { class: "composer-box" },
       text,
@@ -1144,7 +1168,13 @@ function renderThreadPane() {
   // Opening a thread is almost always the first half of answering in it, so the
   // caret lands in the composer. Not on a phone, where it would slide the
   // keyboard over the conversation you just tapped into.
-  if (opened && !isPhone()) document.getElementById("composer-text")?.focus();
+  if (opened && !isPhone()) {
+    const box = document.getElementById("composer-text");
+    // At the end of a restored draft, not in front of it: you came back to
+    // keep writing, not to insert a word before the first one.
+    box?.focus();
+    box?.setSelectionRange(box.value.length, box.value.length);
+  }
 }
 
 // Mirrors the `max-width: 768px` breakpoint in style.css — no build step here
@@ -1437,6 +1467,7 @@ async function deleteThread(id) {
     return toast(error.message, true);
   }
   toast("Thread deleted.");
+  drafts.clear(id); // nothing left to send it to
   // The thread-deleted broadcast also lands here, but don't depend on the
   // socket being healthy to clear the pane we're looking at.
   if (state.activeThread?.id === id) {
@@ -1452,8 +1483,9 @@ async function sendMessage(event) {
   const input = document.getElementById("composer-text");
   const text = input.value.trim();
   if (!text) return;
+  const threadId = state.activeThread.id;
   input.value = "";
-  input.dispatchEvent(new Event("input")); // shrink the grown box back to one row
+  input.dispatchEvent(new Event("input")); // shrink the grown box back to one row, and drop the draft
   // Optimistic bubble: it stays until the transcript read finds the real one,
   // so a long turn doesn't leave the message you just sent off-screen.
   const message = { role: "user", text };
@@ -1461,14 +1493,20 @@ async function sendMessage(event) {
   renderPending();
   scrollToBottom(); // your own message is always worth following down to
   try {
-    await api.send("POST", `/threads/${state.activeThread.id}/message`, { text });
+    await api.send("POST", `/threads/${threadId}/message`, { text });
   } catch (error) {
     // The send failed — drop the optimistic bubble and restore the draft so it
-    // doesn't look delivered.
+    // doesn't look delivered. The reader may have moved on while it was in
+    // flight, so the text goes back to the thread it was written for; the box
+    // is only refilled if it's still that thread's box.
     toast(error.message, true);
     state.pending = state.pending.filter((entry) => entry !== message);
-    input.value = text;
-    input.dispatchEvent(new Event("input"));
+    drafts.set(threadId, text);
+    const box = document.getElementById("composer-text");
+    if (box?.dataset.thread === String(threadId)) {
+      box.value = text;
+      box.dispatchEvent(new Event("input"));
+    }
     renderPending();
   }
 }
@@ -1510,8 +1548,15 @@ async function viewThreads() {
     ),
   );
   renderThreadList();
-  renderThreadPane();
-  if (state.activeThread) openThread(state.activeThread.id);
+  // Arriving with nothing open means you came here to say something. The
+  // launcher is the landing page, then — an empty pane whose only offer is a
+  // button to the launcher was one click of ceremony in front of every session.
+  if (state.activeThread) {
+    renderThreadPane();
+    openThread(state.activeThread.id);
+  } else {
+    newThreadDialog();
+  }
 }
 
 // One box, searching titles, conversation names and everything ever said in a
@@ -1560,12 +1605,15 @@ function newThreadDialog() {
     class: "composer-text new-thread-text",
     placeholder: "What do you need?",
     rows: "3",
-    oninput: () => refreshStart(),
+    oninput: (event) => { drafts.set(NEW_THREAD_DRAFT, event.target.value); refreshStart(); },
     onkeydown: (event) => {
       if (event.key === "Escape") return cancel();
       if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); start(); }
     },
   }));
+  // The launcher is where a session lands, so its box is the one most likely to
+  // be half-written when the tab is closed. Same draft treatment as a thread's.
+  text.value = drafts.get(NEW_THREAD_DRAFT);
 
   const picker = h("div", { class: "ws-picker" }, workspaces.map((name) =>
     h("button", {
@@ -1602,11 +1650,14 @@ function newThreadDialog() {
       return;
     }
     prefs.set("workspace", workspace);
+    drafts.clear(NEW_THREAD_DRAFT); // it's a message now
     await refreshThreads();
     openThread(thread.id);
   }
 
   function cancel() {
+    // Backing out is a decision about the text too — the draft goes with it.
+    drafts.clear(NEW_THREAD_DRAFT);
     // Back to whatever was open before the launcher took the pane.
     state.activeThread = previous;
     renderThreadPane();
@@ -1640,7 +1691,9 @@ function newThreadDialog() {
     ),
   );
   renderThreadList(); // the list must stop showing a thread as open
+  refreshStart(); // a restored draft is already something to start with
   text.focus();
+  text.setSelectionRange(text.value.length, text.value.length);
 }
 
 /* ---------- workspaces view (agent + channels together) ---------- */

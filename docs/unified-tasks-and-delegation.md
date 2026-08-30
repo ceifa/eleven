@@ -3,7 +3,6 @@
 Status: **implemented** (2026-08-30). Kept as the rationale for the change;
 the two open questions it named were measured before acting, results below.
 Date: 2026-08-30
-Readable summary: <https://ceifa-eleven-unificacao.agenthost.page/?k=gv7z6z7fn3>
 
 ## The complaint, restated
 

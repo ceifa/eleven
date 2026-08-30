@@ -663,6 +663,11 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         sessionKey,
         text: message,
         images: images.length ? images : undefined,
+        // A thread lives in a conversation, not in the composer that types into
+        // it: a message sent from here into a Telegram topic must run on the
+        // model that topic is configured with — the same one the detail view
+        // reports as this thread's effective model.
+        modelScopes: channelModelScopes(sessionKey),
         runtime: {
           channel: source,
           conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",

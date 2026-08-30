@@ -57,6 +57,10 @@ interface Spy {
   interrupted: string[];
   discarded: string[];
   fresh: { id: string; sessionKey: string; workspace: string };
+  /** Every turn the dashboard asked the gateway to run. */
+  handled: { sessionKey: string; text: string; modelScopes?: unknown[] }[];
+  /** A thread that lives in a Telegram topic — the composer is not its home. */
+  topic: { id: string; sessionKey: string; workspace: string };
 }
 
 /** Enough of a daemon for the HTTP layer: one workspace, one thread, no bots. */
@@ -77,11 +81,23 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     lastActivityAt: 2_000,
     title: "a thread",
   };
+  // A second thread, living in a Telegram topic that is configured to run on a
+  // model of its own — what the composer must honor when it types into it.
+  const topicThread = {
+    id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    sessionKey: "telegram:main:-1001:topic:7",
+    workspace: "agent",
+    createdAt: 500,
+    lastActivityAt: 1_500,
+    title: "a topic thread",
+  };
+  const topicScope = { title: "eleven", models: [{ model: "claude-code/opus" }] };
   const port = await freePort();
+  const channel = { type: "telegram", name: "main", token: "t", groups: { "-1001": { title: "Sesh", topics: { "7": topicScope } } } };
   const config = {
     raw: { workspaces: { agent: { path: dir } }, dashboard: { host: "127.0.0.1", port } },
-    resolved: { workspaces: { agent: { path: dir } }, dashboard: { host: "127.0.0.1", port }, models: [] },
-    channels: () => [],
+    resolved: { workspaces: { agent: { path: dir, channels: [channel] } }, dashboard: { host: "127.0.0.1", port }, models: [] },
+    channels: () => [{ workspace: "agent", channel }],
     turnModels: () => [],
     configuredModelRefs: () => [],
     on: () => {},
@@ -91,12 +107,19 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     interrupted: [],
     discarded: [],
     fresh: { id: "99999999-8888-7777-6666-555555555555", sessionKey: thread.sessionKey, workspace: thread.workspace },
+    handled: [],
+    topic: topicThread,
   };
   const gateway = {
     on: () => {},
+    handle: async (incoming: { sessionKey: string; text: string; modelScopes?: unknown[] }) => {
+      spy.handled.push(incoming);
+      return undefined;
+    },
     threads: {
-      list: () => [thread],
-      get: (id: string) => (id === thread.id ? thread : id === spy.fresh.id ? spy.fresh : undefined),
+      list: () => [thread, topicThread],
+      get: (id: string) =>
+        id === thread.id ? thread : id === topicThread.id ? topicThread : id === spy.fresh.id ? spy.fresh : undefined,
       isCurrent: (id: string) => id !== thread.id || !spy.rotated.length,
       current: () => thread,
     },
@@ -235,6 +258,28 @@ test("a workspace's skills come with its detail read — what the thread's skill
     // And only with it: listing every workspace must not open every skill pack.
     const [listed] = JSON.parse((await get(`${base}/api/workspaces`)).body.toString());
     assert.equal(listed.skills, undefined);
+  });
+});
+
+test("a message typed into a Telegram topic's thread runs with that topic's models", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    // Regression: the composer ran every turn on the workspace's own sequence,
+    // so a thread in a topic pinned to a specific model answered on another one
+    // — the very model the thread's detail view was reporting it would use.
+    const response = await post(`${base}/api/threads/${spy.topic.id}/message`, { text: "ship it" });
+    assert.equal(response.status, 202);
+    assert.equal(spy.handled.length, 1);
+    assert.deepEqual(spy.handled[0].modelScopes, [
+      { title: "eleven", models: [{ model: "claude-code/opus" }] },
+      { title: "Sesh", topics: { "7": { title: "eleven", models: [{ model: "claude-code/opus" }] } } },
+    ]);
+  });
+});
+
+test("a thread with no channel of its own carries no scopes — the workspace decides", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    await post(`${base}/api/threads/${thread.id}/message`, { text: "hello" });
+    assert.deepEqual(spy.handled[0].modelScopes, []);
   });
 });
 

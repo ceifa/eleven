@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { basename, join, extname, normalize, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -25,17 +25,20 @@ import { logger } from "../log.ts";
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
 const SHELL_FILES = ["index.html", "app.js", "dom.js", "live-turn.js", "markdown.js", "message-display.js", "waveform.js", "style.css"];
-// Newest mtime among the app-shell files, read once: new assets arrive with a
-// new daemon, and a stat per socket would buy nothing.
-const SHELL_VERSION = Math.max(
-  ...SHELL_FILES.map((name) => {
-    try {
-      return statSync(join(PUBLIC_DIR, name)).mtimeMs;
-    } catch {
-      return 0;
-    }
-  }),
-);
+// Newest mtime among the app-shell files. Read per connection rather than
+// once: running from a checkout, the files change under the daemon, and a
+// handful of stats when a socket opens is nothing next to announcing a shell
+// version that no longer matches the bytes being served.
+const shellVersion = () =>
+  Math.max(
+    ...SHELL_FILES.map((name) => {
+      try {
+        return statSync(join(PUBLIC_DIR, name)).mtimeMs;
+      } catch {
+        return 0;
+      }
+    }),
+  );
 // One Telegram rich-message request: avoids ambiguous partial delivery and
 // duplicate prefixes when a multi-chunk send fails midway.
 const MAX_OUTBOUND_MESSAGE_CHARS = 32_000;
@@ -94,6 +97,9 @@ interface Asset {
   etag: string;
   type: string;
   immutable: boolean;
+  /** mtime and size as they were just before the read, so a later request can
+   *  tell a cached body from a file that has moved on. */
+  stamp: string;
 }
 
 class ApiError extends Error {
@@ -154,7 +160,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     // running the old html/js against the new API, and a field renamed on one
     // side throws mid-render on the other; the page compares this across
     // reconnects and reloads itself when it changed.
-    socket.send(JSON.stringify({ type: "hello", shell: SHELL_VERSION }));
+    socket.send(JSON.stringify({ type: "hello", shell: shellVersion() }));
     heartbeat ??= setInterval(() => broadcast({ type: "ping" }), 20_000);
     socket.on("close", () => {
       if (wss.clients.size === 0) {
@@ -840,15 +846,22 @@ async function deliver(
   res.end(req.method === "HEAD" ? undefined : out);
 }
 
-// The public dir ships with the daemon and cannot change under it — the same
-// assumption SHELL_VERSION already makes. So each file is read, hashed and
-// compressed once, and every request after that is answered from memory: no
-// disk read, no re-compression, and a revalidation costs an empty 304.
+// Each file is read, hashed and compressed once, and every request after that
+// is answered from memory: no disk read, no re-compression, and a revalidation
+// costs an empty 304. The public dir *can* change under the daemon — it is the
+// checkout itself when eleven runs from source — so a cached entry is only
+// trusted while the file's mtime and size still match. Without that, an edit
+// mid-session hands the browser a new app.js next to a live-turn.js from
+// before it, and the page dies on an import of an export that no longer exists.
 const assets = new Map<string, Promise<Asset | undefined>>();
 
-function loadAsset(file: string): Promise<Asset | undefined> {
+async function loadAsset(file: string): Promise<Asset | undefined> {
   const cached = assets.get(file);
-  if (cached) return cached;
+  if (cached) {
+    const asset = await cached;
+    if (asset && asset.stamp === (await stampOf(file))) return asset;
+    assets.delete(file);
+  }
   // Misses are not remembered: unknown paths all fall through to the app shell,
   // and caching them would let anyone grow this map without bound.
   const pending = readAsset(file).then((asset) => (asset ? asset : (assets.delete(file), undefined)));
@@ -856,11 +869,32 @@ function loadAsset(file: string): Promise<Asset | undefined> {
   return pending;
 }
 
-async function readAsset(file: string): Promise<Asset | undefined> {
-  // Resolve then confine to PUBLIC_DIR. `replaceAll("..","")` was a fragile
-  // denylist that also mangled legitimate names containing "..".
+/** Resolve then confine to PUBLIC_DIR. `replaceAll("..","")` was a fragile
+ *  denylist that also mangled legitimate names containing "..". */
+function resolveAsset(file: string): string | undefined {
   const target = normalize(join(PUBLIC_DIR, file));
   if (target !== PUBLIC_DIR && !target.startsWith(PUBLIC_DIR + sep)) return undefined;
+  return target;
+}
+
+async function stampOf(file: string): Promise<string | undefined> {
+  const target = resolveAsset(file);
+  if (!target) return undefined;
+  try {
+    const info = await stat(target);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readAsset(file: string): Promise<Asset | undefined> {
+  const target = resolveAsset(file);
+  if (!target) return undefined;
+  // Stamp before reading, never after: a write that lands between the two
+  // leaves the entry looking stale and it is read again, which is the harmless
+  // way round. Stamping after would pin the new mtime onto the old bytes.
+  const stamp = await stampOf(file);
   let body: Buffer;
   try {
     body = await readFile(target);
@@ -874,7 +908,7 @@ async function readAsset(file: string): Promise<Asset | undefined> {
     encoded.set("br", br);
     encoded.set("gzip", gz);
   }
-  return { body, encoded, etag: etagOf(body), type, immutable: file.startsWith("/fonts/") };
+  return { body, encoded, etag: etagOf(body), type, immutable: file.startsWith("/fonts/"), stamp: stamp ?? "" };
 }
 
 function sendAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {

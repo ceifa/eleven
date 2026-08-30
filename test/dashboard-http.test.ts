@@ -183,6 +183,36 @@ test("static assets are compressed, revalidated with an ETag, and answered 304 u
   });
 });
 
+// The dashboard runs straight off the checkout, so editing a module while the
+// daemon is up used to serve the new app.js next to the live-turn.js cached
+// before the edit — the browser then died on an import of an export that the
+// stale half did not have.
+test("an asset edited under the running daemon is served fresh, not from the cache", async () => {
+  const scratch = join(PUBLIC_DIR, "regression-asset.js");
+  writeFileSync(scratch, "export const answer = 41;\n");
+  try {
+    await withDashboard(async (base) => {
+      const first = await get(`${base}/regression-asset.js`, { "accept-encoding": "identity" });
+      assert.equal(first.body.toString(), "export const answer = 41;\n");
+
+      // Same byte count on purpose: only the mtime says it moved on, and a
+      // size-only check would sail right past this.
+      writeFileSync(scratch, "export const answer = 42;\n");
+
+      const second = await get(`${base}/regression-asset.js`, { "accept-encoding": "identity" });
+      assert.equal(second.body.toString(), "export const answer = 42;\n");
+      assert.notEqual(second.headers["etag"], first.headers["etag"]);
+
+      // And a browser holding the old body is told to take the new one.
+      const revalidated = await get(`${base}/regression-asset.js`, { "if-none-match": String(first.headers["etag"]), "accept-encoding": "identity" });
+      assert.equal(revalidated.status, 200);
+      assert.equal(revalidated.body.toString(), "export const answer = 42;\n");
+    });
+  } finally {
+    rmSync(scratch, { force: true });
+  }
+});
+
 test("fonts are cached forever and left alone — woff2 is already compressed", async () => {
   await withDashboard(async (base) => {
     const response = await get(`${base}/fonts/grenze-700.woff2`, { "accept-encoding": "br, gzip" });

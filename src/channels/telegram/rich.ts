@@ -1,6 +1,7 @@
 import { InputFile, type Api } from "grammy";
 import type { InlineKeyboardMarkup, InputRichMessageMedia, ReplyParameters } from "@grammyjs/types";
 import { withRetry } from "./retry.ts";
+import { ephemeralReceiver, isEphemeralRejected, noteEphemeralRefused } from "./ephemeral.ts";
 import { logger } from "../../log.ts";
 
 const log = logger("telegram/rich");
@@ -53,7 +54,7 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
   // Ephemeral delivery requires the bot to be a chat admin. Where it isn't, the
   // whole message used to be dropped — which is how /stop and /new went silent
   // in a group: they did their work, the confirmation just never arrived.
-  let ephemeralTo = options.ephemeralTo;
+  let ephemeralTo = ephemeralReceiver(chatId, options.ephemeralTo);
   let last;
   for (const [index, chunk] of chunks.entries()) {
     const isLast = index === chunks.length - 1;
@@ -77,6 +78,7 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
       if (ephemeralTo !== undefined && isEphemeralRejected(error)) {
         // Ephemeral is a courtesy to the rest of the chat, not the point.
         log.warn(`ephemeral rich message rejected in chat ${chatId}, posting normally: ${error}`);
+        noteEphemeralRefused(chatId);
         ephemeralTo = undefined;
         last = await send(chunk);
         continue;
@@ -109,12 +111,6 @@ function buildMedia(files?: RichMedia[]): { blocks: string; media: InputRichMess
 
 function isRichMessageEmpty(error: unknown): boolean {
   return String((error as { description?: string })?.description ?? error).includes("RICH_MESSAGE_EMPTY");
-}
-
-/** A chat that won't take an ephemeral message — the bot is not an admin there,
- * or the chat type doesn't support one. */
-function isEphemeralRejected(error: unknown): boolean {
-  return /BOT_NOT_ADMIN|EPHEMERAL/i.test(String((error as { description?: string })?.description ?? error));
 }
 
 /** Neutralize markdown structure tokens so the text renders literally. */

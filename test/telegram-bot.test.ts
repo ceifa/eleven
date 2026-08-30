@@ -214,7 +214,9 @@ test("in a group the status is ephemeral, edited and deleted as one", async () =
 
 test("a chat that refuses ephemeral status still gets the status", async () => {
   const { calls, api } = fakeApi({ rejectEphemeral: true });
-  const progress = new TelegramTaskProgress(api, -100, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
+  // Its own chat id: a refusal is remembered per chat for the life of the
+  // process, so sharing -100 would disable ephemeral in the tests that follow.
+  const progress = new TelegramTaskProgress(api, -101, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
   await progress.finish("completed");

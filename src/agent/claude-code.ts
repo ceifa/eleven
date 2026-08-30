@@ -29,7 +29,7 @@ import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.t
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
-import { readToolActivity, type TaskActivityEvent, type TaskActivityUsage } from "./task-activity.ts";
+import { readToolActivity, type TaskActivityEvent } from "./task-activity.ts";
 
 const log = logger("claude-code");
 
@@ -102,7 +102,6 @@ export interface ClaudeSessionRegistration {
 interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onTaskActivity?: (event: TaskActivityEvent) => void;
-  agentTaskTitles: Map<string, string>;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
 }
@@ -178,7 +177,7 @@ const sessions = new Map<string, RegisteredSession>();
 const activeOwner = new AsyncLocalStorage<string>();
 
 export function registerClaudeSession(sessionId: string, registration: ClaudeSessionRegistration): void {
-  sessions.set(sessionId, { ...registration, agentTaskTitles: new Map() });
+  sessions.set(sessionId, { ...registration });
 }
 
 export function unregisterClaudeSession(sessionId: string): void {
@@ -602,8 +601,6 @@ async function consumeClaudeQuery(
           if (block.type !== "tool_use") continue;
           markTool(block.name, asArgs(block.input), block.id);
         }
-      } else if (message.type === "system") {
-        if (!isolated) emitAgentTaskActivity(registration, message);
       } else if (message.type === "result") {
         // A turn that queried no model and produced no prose answered someone
         // else's injected message, not this prompt (see MAX_NOOP_RESULT_SKIPS).
@@ -892,89 +889,12 @@ function asArgs(value: unknown): Record<string, unknown> {
 }
 
 /** A Pi turn cannot outlive its provider stream, so detached native work
- * would be killed as soon as Claude returns a result. Keep it foregrounded;
- * parallel Agent calls in one batch still execute concurrently. */
+ * would be killed as soon as Claude returns a result. Keep it foregrounded.
+ * Delegation is not a capability eleven grants, so Bash is the only native tool
+ * left that can detach. */
 function foregroundToolInput(name: string, input: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (name === "Agent" || name === "Task") {
-    // Remote/worktree isolation is another detached execution path and would
-    // bypass both the workspace policy and this process-bound lifecycle.
-    const { isolation: _isolation, ...localInput } = input;
-    return { ...localInput, run_in_background: false };
-  }
   if (name === "Bash" && input.run_in_background === true) return { ...input, run_in_background: false };
   return undefined;
-}
-
-function normalizeTaskUsage(value: unknown): TaskActivityUsage | undefined {
-  const usage = asArgs(value);
-  const totalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
-  const toolUses = typeof usage.tool_uses === "number" ? usage.tool_uses : undefined;
-  const durationMs = typeof usage.duration_ms === "number" ? usage.duration_ms : undefined;
-  return totalTokens !== undefined || toolUses !== undefined || durationMs !== undefined
-    ? { totalTokens, toolUses, durationMs }
-    : undefined;
-}
-
-function emitAgentTaskActivity(
-  registration: RegisteredSession,
-  message: Extract<SDKMessage, { type: "system" }>,
-): void {
-  // Only tasks whose start this stream saw belong on the roster. Everything else
-  // is a job of another kind, or one Claude Code inherited from an earlier
-  // process and reported on resume ("Orphaned by a previous Claude Code process
-  // exit…") — neither is an agent of this turn.
-  const known = registration.agentTaskTitles;
-  if (message.subtype === "task_started") {
-    // task_* also covers background Bash/monitor/workflow jobs. This surface is
-    // specifically the native Agent roster; don't mislabel generic jobs.
-    const isAgent = message.task_type === "local_agent" || !!message.subagent_type;
-    if (message.skip_transcript || !isAgent) return;
-    known.set(message.task_id, message.description);
-    registration.onTaskActivity?.({
-      kind: "agent",
-      task: {
-        id: message.task_id,
-        title: message.description,
-        status: "running",
-        ...(message.task_type ? { taskType: message.task_type } : {}),
-        ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
-      },
-    });
-    return;
-  }
-  if (message.subtype === "task_progress") {
-    if (!known.has(message.task_id)) return;
-    const title = message.description || known.get(message.task_id)!;
-    known.set(message.task_id, title);
-    registration.onTaskActivity?.({
-      kind: "agent",
-      task: {
-        id: message.task_id,
-        title,
-        status: "running",
-        ...(message.summary ? { summary: message.summary } : {}),
-        ...(message.last_tool_name ? { lastToolName: cleanToolName(message.last_tool_name) } : {}),
-        ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
-        ...(normalizeTaskUsage(message.usage) ? { usage: normalizeTaskUsage(message.usage) } : {}),
-      },
-    });
-    return;
-  }
-  if (message.subtype === "task_notification") {
-    const title = known.get(message.task_id);
-    if (message.skip_transcript || !title) return;
-    known.delete(message.task_id);
-    registration.onTaskActivity?.({
-      kind: "agent",
-      task: {
-        id: message.task_id,
-        title,
-        status: message.status,
-        ...(message.summary ? { summary: message.summary } : {}),
-        ...(normalizeTaskUsage(message.usage) ? { usage: normalizeTaskUsage(message.usage) } : {}),
-      },
-    });
-  }
 }
 
 /** Do not hand Telegram/provider tokens from Eleven's daemon environment to

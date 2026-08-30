@@ -186,7 +186,8 @@ test("Claude Code exposes stable moving aliases and an explicit native tool poli
   assert.deepEqual(nativeToolsForPolicy(["read"]), ["Read", "Glob", "Grep"]);
   assert.deepEqual(nativeToolsForPolicy(["bash", "write"]), ["Bash", "Write"]);
   assert.ok(nativeToolsForPolicy(undefined).includes("WebSearch"));
-  assert.ok(nativeToolsForPolicy(undefined).includes("Task"));
+  // Delegation is not a capability eleven grants — see tool-policy.test.ts.
+  assert.equal(nativeToolsForPolicy(undefined).includes("Agent"), false);
   assert.equal(cleanToolName("mcp__eleven__telegram"), "telegram");
   assert.equal(cleanToolName("Read"), "Read");
 });
@@ -232,16 +233,18 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
     assert.equal(call.options.permissionMode, "dontAsk");
     const preToolUse = ((call.options.hooks as { PreToolUse: Array<{ hooks: Array<(input: unknown, id: string) => Promise<unknown>> }> })
       .PreToolUse[0]?.hooks[0])!;
+    // Bash is the only native tool left that can detach: delegation is not a
+    // capability eleven grants, so there is no Agent call to foreground.
     const foreground = await preToolUse({
       hook_event_name: "PreToolUse",
-      tool_name: "Agent",
-      tool_input: { description: "review", prompt: "review it", isolation: "remote" },
-    }, "agent-tool");
+      tool_name: "Bash",
+      tool_input: { command: "sleep 600", run_in_background: true },
+    }, "bash-tool");
     assert.deepEqual(foreground, {
       continue: true,
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        updatedInput: { description: "review", prompt: "review it", run_in_background: false },
+        updatedInput: { command: "sleep 600", run_in_background: false },
       },
     });
     assert.deepEqual(deleted, [claudeAttemptId(piSessionId, "default", context.messages)]);
@@ -250,12 +253,13 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
   }
 });
 
-test("Claude subagents emit normalized agent activity", async () => {
+test("nothing in the runtime's own task stream reaches the turn's activity", async () => {
   const piSessionId = "aaaaaaaa-1111-4111-8111-111111111111";
-  // The plan itself is no longer scraped out of this stream: TaskCreate/List/
-  // Get/Update are eleven's own tools now (task-tools.ts), on every provider.
-  // What is still Claude's, and still has to be normalized, is the roster of
-  // native subagents it spawns.
+  // Neither half of Claude's task stream is eleven's any more. The plan is the
+  // workspace's, through its own tools on every provider; delegation is not a
+  // capability eleven grants at all, so a native subagent roster is something no
+  // turn can produce — and scraping one would draw rows for work eleven cannot
+  // see the inside of. A runtime that emits these anyway is ignored.
   const taskMessages = [
     {
       type: "system", subtype: "task_started", task_id: "agent-1", description: "Review reuse",
@@ -274,7 +278,7 @@ test("Claude subagents emit normalized agent activity", async () => {
     successfulMessages[1],
   ] as unknown as SDKMessage[];
   const activities: Array<import("../src/agent/task-activity.ts").TaskActivityEvent> = [];
-  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["agent"], customTools: [] });
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
     setClaudeTaskListener(piSessionId, (event) => activities.push(event));
     const provider = createClaudeCodeProvider({
@@ -285,15 +289,9 @@ test("Claude subagents emit normalized agent activity", async () => {
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
 
-    assert.deepEqual(activities.map((event) => event.kind), ["agent", "agent", "agent"]);
-    assert.deepEqual(activities.map((event) => event.kind === "agent" ? event.task.status : "?"), [
-      "running", "running", "completed",
-    ]);
-    const progress = activities[1];
-    assert.equal(progress?.kind === "agent" ? progress.task.lastToolName : undefined, "Grep");
-    assert.equal(progress?.kind === "agent" ? progress.task.usage?.totalTokens : undefined, 1200);
-    // No plan event comes out of this stream any more, whatever the model calls.
-    assert.deepEqual(activities.filter((event) => event.kind === "plan"), []);
+    // Not a plan row, not an agent row. The only producers left are the
+    // workspace's own tools, over the host handshake.
+    assert.deepEqual(activities, []);
   } finally {
     unregisterClaudeSession(piSessionId);
   }
@@ -321,7 +319,7 @@ test("a resume that reports jobs orphaned by an earlier process still answers th
     ...successfulMessages,
   ] as unknown as SDKMessage[];
   const activities: Array<import("../src/agent/task-activity.ts").TaskActivityEvent> = [];
-  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read", "agent"], customTools: [] });
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
     setClaudeTaskListener(piSessionId, (event) => activities.push(event));
     const provider = createClaudeCodeProvider({

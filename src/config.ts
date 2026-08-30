@@ -4,8 +4,16 @@ import { CONFIG_FILE, expandHome } from "./paths.ts";
 import { writeJsonFile } from "./util.ts";
 
 /** Provider-neutral workspace capabilities. Pi consumes the four core tools;
- * Claude Code additionally understands web and native subagents. */
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "web", "agent"] as const;
+ * Claude Code additionally understands web.
+ *
+ * Delegation is deliberately absent. A runtime's native subagents run as
+ * sessions eleven does not own: extension tools are bridged into them, but each
+ * one gets a session identity of its own, so an extension that keys state per
+ * session forks it without knowing, and reports the fork under the parent's
+ * activity scope. Nothing in the capability vocabulary can express "the same
+ * conversation" across that boundary. A workspace that wants fan-out ships it
+ * as an extension tool, where it has one identity and one place to report from. */
+export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "web"] as const;
 export type WorkspaceTool = (typeof BUILTIN_TOOLS)[number];
 
 /** The subset implemented by Pi itself. */
@@ -18,9 +26,11 @@ export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
  * against — the names have to be nameable before they can be withheld.
  *
  * An allowlist, not a denylist: a new tool in the runtime never appears in
- * eleven by surprise. TaskOutput and TaskStop are deliberately absent — both
- * only address background tasks, and eleven forces every native task into the
- * foreground.
+ * eleven by surprise. That is why there is no entry for delegation — Agent,
+ * SendMessage and the runtime's own TaskCreate/TaskGet/TaskList/TaskUpdate are
+ * simply never named here, so they are never granted, and TaskOutput/TaskStop
+ * with them (both only address background tasks, and eleven forces every native
+ * task into the foreground).
  */
 export const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
   read: ["Read", "Glob", "Grep"],
@@ -28,7 +38,6 @@ export const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
   edit: ["Edit"],
   write: ["Write"],
   web: ["WebFetch", "WebSearch"],
-  agent: ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
 };
 
 /** Every native tool name a workspace may withhold. */

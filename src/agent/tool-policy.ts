@@ -4,8 +4,8 @@ import { BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
  * Workspace capability -> pi tool names, the mirror of POLICY_TO_NATIVE on the
  * Claude side. pi ships grep/find/ls for its read-only preset — a session with
  * no bash to run them with — and powershell for Windows shells, so each answers
- * to the capability of the tool it stands in for. `web` and `agent` have no pi
- * equivalent and simply gate nothing there.
+ * to the capability of the tool it stands in for. `web` has no pi equivalent and
+ * simply gates nothing there.
  */
 const POLICY_TO_PI: Record<WorkspaceTool, readonly string[]> = {
   read: ["read", "grep", "find", "ls"],
@@ -13,7 +13,6 @@ const POLICY_TO_PI: Record<WorkspaceTool, readonly string[]> = {
   edit: ["edit"],
   write: ["write"],
   web: [],
-  agent: [],
 };
 
 /**

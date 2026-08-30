@@ -186,7 +186,9 @@ test("Claude Code exposes stable moving aliases and an explicit native tool poli
   assert.deepEqual(nativeToolsForPolicy(["read"]), ["Read", "Glob", "Grep"]);
   assert.deepEqual(nativeToolsForPolicy(["bash", "write"]), ["Bash", "Write"]);
   assert.ok(nativeToolsForPolicy(undefined).includes("WebSearch"));
-  assert.ok(nativeToolsForPolicy(undefined).includes("Task"));
+  // Delegation and the plan are eleven's own tools now, on every provider — the
+  // unrestricted default must not smuggle a second, Claude-only surface back in.
+  assert.equal(nativeToolsForPolicy(undefined).includes("Task"), false);
   assert.equal(cleanToolName("mcp__eleven__telegram"), "telegram");
   assert.equal(cleanToolName("Read"), "Read");
 });
@@ -250,39 +252,13 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
   }
 });
 
-test("Claude task tools and subagents emit normalized activity", async () => {
+test("Claude subagents emit normalized agent activity", async () => {
   const piSessionId = "aaaaaaaa-1111-4111-8111-111111111111";
+  // The plan itself is no longer scraped out of this stream: TaskCreate/List/
+  // Get/Update are eleven's own tools now (task-tools.ts), on every provider.
+  // What is still Claude's, and still has to be normalized, is the roster of
+  // native subagents it spawns.
   const taskMessages = [
-    {
-      type: "assistant", parent_tool_use_id: null, uuid: "a1", session_id: "session",
-      message: { content: [{ type: "tool_use", id: "create", name: "TaskCreate", input: { subject: "Alpha", description: "First" } }] },
-    },
-    {
-      type: "user", parent_tool_use_id: null, uuid: "u1", session_id: "session",
-      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "create", content: "created" }] },
-      tool_use_result: { task: { id: "1", subject: "Alpha" } },
-    },
-    {
-      type: "assistant", parent_tool_use_id: null, uuid: "a2", session_id: "session",
-      message: { content: [{ type: "tool_use", id: "update", name: "TaskUpdate", input: { taskId: "1", status: "in_progress" } }] },
-    },
-    {
-      type: "user", parent_tool_use_id: null, uuid: "u2", session_id: "session",
-      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "update", content: "updated" }] },
-      tool_use_result: { success: true, taskId: "1" },
-    },
-    {
-      type: "assistant", parent_tool_use_id: null, uuid: "a3", session_id: "session",
-      message: { content: [{ type: "tool_use", id: "list", name: "TaskList", input: {} }] },
-    },
-    {
-      type: "user", parent_tool_use_id: null, uuid: "u3", session_id: "session",
-      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "list", content: "listed" }] },
-      tool_use_result: { tasks: [
-        { id: "1", subject: "Alpha", status: "in_progress", blockedBy: [] },
-        { id: "2", subject: "Beta", status: "pending", blockedBy: ["1"] },
-      ] },
-    },
     {
       type: "system", subtype: "task_started", task_id: "agent-1", description: "Review reuse",
       subagent_type: "general-purpose", task_type: "local_agent", uuid: "s1", session_id: "session",
@@ -311,51 +287,15 @@ test("Claude task tools and subagents emit normalized activity", async () => {
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
 
-    assert.deepEqual(activities[0], {
-      kind: "plan",
-      tasks: [{ id: "1", title: "Alpha", status: "pending" }],
-    });
-    assert.equal(activities[1]?.kind, "plan");
-    if (activities[1]?.kind === "plan") assert.equal(activities[1].tasks[0]?.status, "running");
-    assert.deepEqual(activities[2], {
-      kind: "plan",
-      tasks: [
-        { id: "1", title: "Alpha", status: "running" },
-        { id: "2", title: "Beta", status: "pending", blockedBy: ["1"] },
-      ],
-    });
-    assert.deepEqual(activities.slice(3).map((event) => event.kind === "agent" ? event.task.status : "plan"), [
+    assert.deepEqual(activities.map((event) => event.kind), ["agent", "agent", "agent"]);
+    assert.deepEqual(activities.map((event) => event.kind === "agent" ? event.task.status : "?"), [
       "running", "running", "completed",
     ]);
-    const progress = activities[4];
+    const progress = activities[1];
     assert.equal(progress?.kind === "agent" ? progress.task.lastToolName : undefined, "Grep");
     assert.equal(progress?.kind === "agent" ? progress.task.usage?.totalTokens : undefined, 1200);
-
-    // A warm-session eviction must not forget Claude's durable task list.
-    unregisterClaudeSession(piSessionId);
-    registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["agent"], customTools: [] });
-    const resumed: typeof activities = [];
-    setClaudeTaskListener(piSessionId, (event) => resumed.push(event));
-    const resumedMessages = [
-      {
-        type: "assistant", parent_tool_use_id: null, uuid: "a4", session_id: "session",
-        message: { content: [{ type: "tool_use", id: "finish", name: "TaskUpdate", input: { taskId: "1", status: "completed" } }] },
-      },
-      {
-        type: "user", parent_tool_use_id: null, uuid: "u4", session_id: "session",
-        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "finish", content: "updated" }] },
-        tool_use_result: { success: true, taskId: "1" },
-      },
-      successfulMessages[1],
-    ] as unknown as SDKMessage[];
-    const resumedProvider = createClaudeCodeProvider({
-      query: scriptedQuery(resumedMessages, () => {}),
-      deleteSession: (async () => {}) as never,
-      state: fakeState(),
-    });
-    for await (const _event of resumedProvider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
-    assert.equal(resumed[0]?.kind === "plan" ? resumed[0].tasks[0]?.status : undefined, "completed");
-    assert.equal(resumed[0]?.kind === "plan" ? resumed[0].tasks[1]?.title : undefined, "Beta");
+    // No plan event comes out of this stream any more, whatever the model calls.
+    assert.deepEqual(activities.filter((event) => event.kind === "plan"), []);
   } finally {
     unregisterClaudeSession(piSessionId);
   }

@@ -59,7 +59,7 @@ export interface TaskProgressOptions {
  * status is deleted when the turn ends — the reply (or failure notice) that
  * follows supersedes it. */
 export class TelegramTaskProgress {
-  private readonly plan = new Map<string, TaskActivityItem>();
+  private readonly plan = new Map<string, { task: TaskActivityItem; scope?: string }>();
   private readonly agents = new Map<string, TaskActivityItem>();
   private readonly startedAt = Date.now();
   private currentTool: RunningStatus["tool"];
@@ -113,8 +113,12 @@ export class TelegramTaskProgress {
     if (this.dead || this.outcome) return;
     this.hasTasks = true;
     if (event.kind === "plan") {
-      this.plan.clear();
-      for (const task of event.tasks) this.plan.set(task.id, task);
+      // Authoritative only over its own scope: the session's plan and a tool
+      // reporting its internal phases coexist in one turn.
+      for (const [id, row] of this.plan) {
+        if (row.scope === event.scope) this.plan.delete(id);
+      }
+      for (const task of event.tasks) this.plan.set(task.id, { task, scope: event.scope });
     } else {
       const previous = this.agents.get(event.task.id);
       this.agents.set(event.task.id, previous ? { ...previous, ...event.task } : event.task);
@@ -218,7 +222,7 @@ export class TelegramTaskProgress {
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
     let text = renderTaskActivity(
-      [...this.plan.values()],
+      [...this.plan.values()].map((row) => row.task),
       [...this.agents.values()],
       this.outcome,
       running,

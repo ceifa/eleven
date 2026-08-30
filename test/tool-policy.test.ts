@@ -85,10 +85,18 @@ describe("nativeToolsForPolicy (Claude Code side)", () => {
     deepStrictEqual(nativeToolsForPolicy(undefined), nativeToolsForPolicy([...BUILTIN_TOOLS]));
   });
 
-  test("still carries the agent capability it is meant to carry", () => {
-    deepStrictEqual(
-      nativeToolsForPolicy(["agent"]),
-      ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
-    );
+  test("offers no native plan or delegation tools at all", () => {
+    // Both jobs are eleven's now and work on every provider: the plan is
+    // task-tools.ts, delegation is the `workflow` tool. A native second surface
+    // for either means two stores (or two ways to spawn), on one provider only,
+    // with the model picking between them.
+    const superseded = ["Task", "Agent", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+    for (const policy of [undefined, ["agent"] as WorkspaceTool[], [...BUILTIN_TOOLS]]) {
+      deepStrictEqual(nativeToolsForPolicy(policy).filter((name) => superseded.includes(name)), []);
+    }
+  });
+
+  test("the agent capability now gates only eleven's own tools", () => {
+    deepStrictEqual(nativeToolsForPolicy(["agent"]), []);
   });
 });

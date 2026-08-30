@@ -36,7 +36,7 @@ import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceToo
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
-import type { TaskActivityEvent } from "./task-activity.ts";
+import { readToolActivity, type TaskActivityEvent } from "./task-activity.ts";
 
 const log = logger("runner");
 
@@ -498,6 +498,13 @@ export class Runner {
       } else if (event.type === "tool_execution_start") {
         attemptHadToolActivity = true;
         events.onToolCall?.(event.toolName, event.args, event.toolCallId);
+      } else if (event.type === "tool_execution_update") {
+        // A long-running tool reporting its own plan/subagents. The payload is
+        // the tool's, not eleven's: readToolActivity validates it and namespaces
+        // its ids, so nothing here knows what the tool actually does.
+        for (const activity of readToolActivity(event.partialResult, event.toolCallId)) {
+          events.onTaskActivity?.(activity);
+        }
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
         lastStopReason = message.stopReason;

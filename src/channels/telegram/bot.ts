@@ -12,6 +12,7 @@ import { parseTelegramSessionKey } from "./session-key.ts";
 import { DraftStream } from "./stream.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
+import { forgetEphemeralRefusal } from "./ephemeral.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
@@ -269,6 +270,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   bot.on("message", (ctx) => handleMessage(ctx));
   bot.on("callback_query:data", (ctx) => handleCallback(ctx));
   bot.on("stopped_message_generation", (ctx) => handleGenerationStopped(ctx));
+  // The bot's own rights in a chat just changed — a promotion to admin is what
+  // makes ephemeral delivery possible, so drop the memo of an earlier refusal.
+  bot.on("my_chat_member", (ctx) => forgetEphemeralRefusal(ctx.chat.id));
 
   async function handleMessage(ctx: Context) {
     const message = ctx.message;

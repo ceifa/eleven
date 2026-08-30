@@ -3,6 +3,7 @@ import type { ReplyParameters } from "@grammyjs/types";
 import type { TaskActivityEvent, TaskActivityItem } from "../../agent/task-activity.ts";
 import { logger } from "../../log.ts";
 import { isNoop, withRetry } from "./retry.ts";
+import { ephemeralReceiver, noteEphemeralRefused } from "./ephemeral.ts";
 
 const log = logger("telegram/tasks");
 const FIRST_RENDER_DELAY_MS = 250;
@@ -88,7 +89,7 @@ export class TelegramTaskProgress {
     this.chatId = chatId;
     this.topic = options.topic;
     this.replyParameters = options.replyParameters;
-    this.ephemeralTo = options.ephemeralTo;
+    this.ephemeralTo = ephemeralReceiver(chatId, options.ephemeralTo);
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
     this.idleRenderDelayMs = options.idleRenderDelayMs ?? IDLE_FIRST_RENDER_DELAY_MS;
   }
@@ -269,11 +270,16 @@ export class TelegramTaskProgress {
         // A chat where ephemeral delivery didn't apply answers with an ordinary
         // message — carry on editing it as one.
         if (message.ephemeral_message_id !== undefined) this.ephemeralMessageId = message.ephemeral_message_id;
-        else this.messageId = message.message_id;
+        else {
+          this.messageId = message.message_id;
+          noteEphemeralRefused(this.chatId);
+          this.ephemeralTo = undefined;
+        }
       } catch (error) {
         // Ephemeral is a courtesy to the other people in the chat, not the
         // point: a chat that refuses it still deserves to see the status.
         log.warn(`ephemeral status rejected in chat ${this.chatId}, posting normally: ${error}`);
+        noteEphemeralRefused(this.chatId);
         this.ephemeralTo = undefined;
       }
     }

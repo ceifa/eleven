@@ -502,7 +502,7 @@ export class Runner {
         // A long-running tool reporting its own plan/subagents. The payload is
         // the tool's, not eleven's: readToolActivity validates it and namespaces
         // its ids, so nothing here knows what the tool actually does.
-        for (const activity of readToolActivity(event.partialResult, event.toolCallId)) {
+        for (const activity of readToolActivity(event.partialResult, event.toolCallId, event.toolName)) {
           events.onTaskActivity?.(activity);
         }
       } else if (event.type === "message_end" && event.message.role === "assistant") {

@@ -89,8 +89,8 @@ test("the board a mid-turn page reads is folded, and broadcast whole", async () 
   // like: the catch-up endpoint and the live broadcast carry the same folded
   // shape, so a page that connects late and one that watched all along agree.
   const gateway = new Gateway(config as never);
-  const broadcasts: Array<{ plan: unknown[]; agents: unknown[] }> = [];
-  gateway.on("task-activity", (event: { tasks: { plan: unknown[]; agents: unknown[] } }) => broadcasts.push(event.tasks));
+  const broadcasts: Array<{ plan: unknown[]; agents: unknown[]; agentTotal: number }> = [];
+  gateway.on("task-activity", (event: { tasks: { plan: unknown[]; agents: unknown[]; agentTotal: number } }) => broadcasts.push(event.tasks));
   let live: ReturnType<GatewayType["liveTurn"]>;
 
   stubTurn(gateway, (threadId, hooks, events) => {
@@ -98,7 +98,7 @@ test("the board a mid-turn page reads is folded, and broadcast whole", async () 
     events.onTaskActivity?.({ kind: "plan", tasks: [{ id: "1", title: "scout", status: "running" }] });
     events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "running", subagentType: "general-purpose" } });
     // A tool reporting its own phases must not evict the session's plan.
-    events.onTaskActivity?.({ kind: "plan", scope: "call-7", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] });
+    events.onTaskActivity?.({ kind: "plan", scope: "call-7", label: "workflow", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] });
     // An incremental agent update merges rather than replacing the row.
     events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "completed", usage: { totalTokens: 900 } } });
     live = gateway.liveTurn(threadId);
@@ -106,14 +106,19 @@ test("the board a mid-turn page reads is folded, and broadcast whole", async () 
 
   await send(gateway, "go");
 
-  assert.deepEqual(live?.tasks.plan.map((task) => task.title), ["scout", "fan out"]);
+  // Grouped by producer: the session's plan first, then the tool's own phases
+  // under the tool's name — not one merged list.
+  assert.deepEqual(live?.tasks.plan, [
+    { tasks: [{ id: "1", title: "scout", status: "running" }] },
+    { label: "workflow", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] },
+  ]);
   assert.deepEqual(live?.tasks.agents, [
     { id: "a1", title: "reader", status: "completed", subagentType: "general-purpose", usage: { totalTokens: 900 } },
   ]);
   // One broadcast per change, each carrying the whole board — the last one is
   // exactly what the catch-up endpoint would serve.
   assert.equal(broadcasts.length, 4);
-  assert.deepEqual(broadcasts.at(-1), { plan: live?.tasks.plan, agents: live?.tasks.agents });
+  assert.deepEqual(broadcasts.at(-1), { plan: live?.tasks.plan, agents: live?.tasks.agents, agentTotal: 1 });
 });
 
 test("a turn that ends takes its board with it", async () => {
@@ -127,4 +132,45 @@ test("a turn that ends takes its board with it", async () => {
   await send(gateway, "go");
   const thread = gateway.threads.current("telegram:main:-1001:topic:7");
   assert.equal(gateway.liveTurn(thread!.id), undefined);
+});
+
+test("a plan with work left is seeded into the next turn, marked as inherited", async () => {
+  // Regression: the plan became durable, but each turn's status started empty —
+  // so a thread with three open tasks showed none of them unless the model
+  // happened to call TaskList again.
+  const { taskStore } = await import("../src/agent/task-store.ts");
+  const gateway = new Gateway(config as never);
+  const sessionDir = join(stateDir, "threads", "agent");
+
+  stubTurn(gateway, (threadId, hooks) => hooks.onTurnStart?.(threadId, undefined));
+  await send(gateway, "first");
+  const threadId = gateway.threads.current("telegram:main:-1001:topic:7")!.id;
+  const store = taskStore(sessionDir, threadId);
+  const open = store.create({ subject: "still open", description: "" });
+
+  // The seed is emitted before the turn runs, so a turn that does nothing at
+  // all is enough to observe it.
+  const seen: Array<{ kind: string; seeded?: boolean; tasks?: { title: string }[] }> = [];
+  await gateway.handle({
+    sessionKey: "telegram:main:-1001:topic:7",
+    text: "second",
+    runtime: { channel: "telegram" },
+    events: { onTaskActivity: (activity) => seen.push(activity as never) },
+  });
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].kind, "plan");
+  assert.equal(seen[0].seeded, true);
+  assert.deepEqual(seen[0].tasks?.map((task) => task.title), ["still open"]);
+
+  // Finished work is history: it must not follow the conversation forever.
+  store.update(open.id, { status: "completed" });
+  const after: unknown[] = [];
+  await gateway.handle({
+    sessionKey: "telegram:main:-1001:topic:7",
+    text: "third",
+    runtime: { channel: "telegram" },
+    events: { onTaskActivity: (activity) => after.push(activity) },
+  });
+  assert.deepEqual(after, []);
 });

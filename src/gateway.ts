@@ -18,13 +18,16 @@ import { summarizeToolArgs } from "./util.ts";
 import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 import { deleteTaskStore, taskStore } from "./agent/task-store.ts";
-import { TaskActivityBoard, type TaskActivityItem } from "./agent/task-activity.ts";
+import { TaskActivityBoard, type TaskActivityItem, type TaskActivitySection } from "./agent/task-activity.ts";
 import { forgetTaskTools, taskTools } from "./agent/task-tools.ts";
 
 const log = logger("gateway");
 
-/** The board's two lists, as sent over the wire. */
-const taskView = (live: LiveTurn) => ({ tasks: { plan: live.tasks.plan, agents: live.tasks.agents } });
+/** The board as sent over the wire: plan rows grouped by producer, the agents,
+ *  and how many agents exist (a producer may cap the rows it sends). */
+const taskView = (live: LiveTurn) => ({
+  tasks: { plan: live.tasks.sections, agents: live.tasks.agents, agentTotal: live.tasks.agentTotal },
+});
 
 const DEFAULT_IDLE_DAYS = 7;
 const DEFAULT_RETENTION_DAYS = 30;
@@ -70,7 +73,7 @@ export interface LiveTurn {
 export interface LiveTurnView {
   startedAt: number;
   items: LiveItem[];
-  tasks: { plan: TaskActivityItem[]; agents: TaskActivityItem[] };
+  tasks: { plan: TaskActivitySection[]; agents: TaskActivityItem[]; agentTotal: number };
 }
 
 export interface IncomingMessage {
@@ -240,6 +243,10 @@ export class Gateway extends EventEmitter {
     const planned = !workspace.config.tools || workspace.config.tools.includes("agent");
     const plan = planned ? taskStore(sessionDir, thread.id) : undefined;
     plan?.listen((activity) => events.onTaskActivity?.(activity));
+    // The plan outlives the turn that wrote it, so a later turn starts with work
+    // already on it. Show that, but marked as seeded: inherited context can be
+    // drawn, it just must not be the reason a status message exists.
+    if (plan?.unfinished) events.onTaskActivity?.(plan.snapshot(true));
 
     try {
       const result = await this.runner.submit(

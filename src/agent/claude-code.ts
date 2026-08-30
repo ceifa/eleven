@@ -751,7 +751,7 @@ function buildMcpServer(
           const onUpdate = (partial: unknown) => {
             const listener = sessions.get(ownerSessionId)?.onTaskActivity;
             if (!listener) return;
-            for (const activity of readToolActivity(partial, scope)) listener(activity);
+            for (const activity of readToolActivity(partial, scope, tool.name)) listener(activity);
           };
           // MCP callbacks cross the SDK transport boundary. Re-enter the owner
           // explicitly so extension tools that spawn nested AgentSessions

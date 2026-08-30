@@ -37,6 +37,7 @@ import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 import { readToolActivity, type TaskActivityEvent } from "./task-activity.ts";
+import { runWithActivitySink } from "./host-api.ts";
 
 const log = logger("runner");
 
@@ -74,6 +75,8 @@ export interface TurnRequest extends SessionTarget {
   models: ModelEntry[];
   /** Provider-neutral workspace capability allowlist; undefined enables the curated default. */
   tools?: WorkspaceTool[];
+  /** Runtime-native tools this workspace withholds — it supplies its own. */
+  excludeNativeTools?: string[];
   customTools?: ToolDefinition[];
   /** Resolved prompt for this turn (workspace system prompt + channel appends). */
   prompt?: PromptConfig;
@@ -256,7 +259,14 @@ export class Runner {
     if (running && (await this.steerIntoTurn(threadId, running, request))) return undefined;
     return keyedLane(this.lanes, threadId, async () => {
       try {
-        const result = await this.runTurn(threadId, request, events);
+        // Everything the turn reaches runs inside its activity sink: pi's agent
+        // loop, its extension handlers, every tool execution. That is what lets
+        // a workspace extension report progress from outside a tool call
+        // (host-api.ts) and still be routed to the right conversation.
+        const result = await runWithActivitySink(
+          (activity) => events.onTaskActivity?.(activity),
+          () => this.runTurn(threadId, request, events),
+        );
         // Inside the lane but outside runTurn: a delivery failure must not
         // tear down the warm session like a model failure would.
         await request.deliver?.(result);
@@ -644,6 +654,7 @@ export class Runner {
       request.sessionDir,
       request.workspacePath,
       request.tools,
+      request.excludeNativeTools,
       systemPrompt,
     ]);
 
@@ -738,6 +749,7 @@ export class Runner {
     registerClaudeSession(session.sessionId, {
       cwd: request.workspacePath,
       workspaceTools: request.tools,
+      excludeNativeTools: request.excludeNativeTools,
       customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
     });
 

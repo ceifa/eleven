@@ -17,9 +17,7 @@ import { logger } from "./log.ts";
 import { summarizeToolArgs } from "./util.ts";
 import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
-import { deleteTaskStore, taskStore } from "./agent/task-store.ts";
 import { TaskActivityBoard, type TaskActivityItem, type TaskActivitySection } from "./agent/task-activity.ts";
-import { forgetTaskTools, taskTools } from "./agent/task-tools.ts";
 
 const log = logger("gateway");
 
@@ -236,17 +234,6 @@ export class Gateway extends EventEmitter {
     };
 
     const sessionDir = join(THREADS_DIR, thread.workspace);
-    // The plan is eleven's, not the runtime's: the same four tools on every
-    // provider, and their updates reach the channel as they happen. Gated on the
-    // `agent` capability, like the runtime's native plan tools used to be.
-    // (A per-model-entry allowlist doesn't narrow them — same as `workflow`.)
-    const planned = !workspace.config.tools || workspace.config.tools.includes("agent");
-    const plan = planned ? taskStore(sessionDir, thread.id) : undefined;
-    plan?.listen((activity) => events.onTaskActivity?.(activity));
-    // The plan outlives the turn that wrote it, so a later turn starts with work
-    // already on it. Show that, but marked as seeded: inherited context can be
-    // drawn, it just must not be the reason a status message exists.
-    if (plan?.unfinished) events.onTaskActivity?.(plan.snapshot(true));
 
     try {
       const result = await this.runner.submit(
@@ -258,9 +245,8 @@ export class Gateway extends EventEmitter {
           runtime: { ...incoming.runtime, workspace: thread.workspace, workspacePath: workspace.config.path },
           models: incoming.models ?? this.config.turnModels(thread.model, [...(incoming.modelScopes ?? []), workspace.config]),
           tools: workspace.config.tools,
-          customTools: planned
-            ? [...(incoming.customTools ?? []), ...taskTools(sessionDir, thread.id)]
-            : incoming.customTools,
+          excludeNativeTools: workspace.config.excludeNativeTools,
+          customTools: incoming.customTools,
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },
           text: incoming.text,
           images: incoming.images,
@@ -280,9 +266,6 @@ export class Gateway extends EventEmitter {
     } catch (error) {
       this.emit("turn-error", { threadId: thread.id, error: String(error) });
       throw error;
-    } finally {
-      // The listener closes over this turn's events; the store outlives it.
-      plan?.listen(undefined);
     }
   }
 
@@ -328,8 +311,6 @@ export class Gateway extends EventEmitter {
       await rm(thread.sessionFile, { force: true });
     }
     await this.requests.delete(id);
-    await deleteTaskStore(join(THREADS_DIR, thread.workspace), id);
-    forgetTaskTools(id);
     this.threads.delete(id);
     log.info(`thread deleted: ${thread.workspace}/${id.slice(0, 8)}`);
     return true;

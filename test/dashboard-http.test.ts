@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -64,6 +64,10 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
   const dir = mkdtempSync(join(tmpdir(), "eleven-dashboard-http-"));
   const sessionFile = join(dir, "session.jsonl");
   writeFileSync(sessionFile, "");
+  // A workspace with something to discover in it: the skills view reads the
+  // directory, so an empty temp dir would let a broken one look correct.
+  mkdirSync(join(dir, ".agents", "skills", "pancake"), { recursive: true });
+  writeFileSync(join(dir, ".agents", "skills", "pancake", "SKILL.md"), "---\nname: pancake\ndescription: Flips a pancake.\n---\n\nbody\n");
   const thread = {
     id: "11111111-2222-3333-4444-555555555555",
     sessionKey: "dashboard:agent:11111111",
@@ -221,6 +225,16 @@ test("starting a fresh thread on an unknown thread is a 404, not a rotation", as
     const response = await post(`${base}/api/threads/00000000-0000-0000-0000-000000000000/new`);
     assert.equal(response.status, 404);
     assert.deepEqual(spy.rotated, []);
+  });
+});
+
+test("a workspace's skills come with its detail read — what the thread's skills view shows", async () => {
+  await withDashboard(async (base) => {
+    const detail = JSON.parse((await get(`${base}/api/workspaces/agent`)).body.toString());
+    assert.deepEqual(detail.skills, [{ name: "pancake", description: "Flips a pancake." }]);
+    // And only with it: listing every workspace must not open every skill pack.
+    const [listed] = JSON.parse((await get(`${base}/api/workspaces`)).body.toString());
+    assert.equal(listed.skills, undefined);
   });
 });
 

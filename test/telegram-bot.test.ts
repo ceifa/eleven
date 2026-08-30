@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
+import { foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { DraftStream } from "../src/channels/telegram/stream.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
@@ -391,6 +391,27 @@ test("group attribution wraps the complete inbound body while DMs stay bare", ()
 
   assert.equal(formatTelegramInboundPrompt(group as never, body), "[Gabriel @c3if4]\n[Transcript]\nLet's go in October.");
   assert.equal(formatTelegramInboundPrompt({ chat: { type: "private" } } as never, body), body);
+});
+
+test("a display name written in lookalike unicode is folded and flagged", () => {
+  // An actual pairing request: styled letters spelling out an official-looking name.
+  assert.deepEqual(foldDisplayName("T\u{1D68E}\u{1D425}\u{1D68E}g\u{1D69B}\u{1D68A}\u{1D5FA}"), { name: "Telegram", disguised: true });
+  // Invisible padding (zero-width space, RTL override) counts as a costume too.
+  assert.deepEqual(foldDisplayName("Sup\u200Bport\u202E"), { name: "Support", disguised: true });
+  // Ordinary names — including decomposed accents and emoji — pass through unflagged.
+  assert.deepEqual(foldDisplayName("  Gabriel   Ceifa "), { name: "Gabriel Ceifa", disguised: false });
+  assert.deepEqual(foldDisplayName("Jose\u0301 Silva"), { name: "José Silva", disguised: false });
+  assert.deepEqual(foldDisplayName("Samara 🌻"), { name: "Samara 🌻", disguised: false });
+});
+
+test("the sender label carries the folded name, not the disguise", () => {
+  const ctx = {
+    chat: { type: "supergroup" },
+    me: { id: 999 },
+    message: { from: { id: 42, first_name: "T\u{1D68E}\u{1D425}\u{1D68E}g\u{1D69B}\u{1D68A}\u{1D5FA}" } },
+  };
+
+  assert.equal(formatTelegramInboundPrompt(ctx as never, "hi"), "[Telegram]\nhi");
 });
 
 test("Telegram reply context prefers the selected quote", () => {

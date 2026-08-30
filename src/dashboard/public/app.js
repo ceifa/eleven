@@ -2157,23 +2157,42 @@ function pairingPanel(requests) {
   return h("div", { class: "card warn max-w-3xl mb-4" },
     h("div", { class: "card-body gap-2" },
       h("h2", { class: "card-title text-base" }, "Pairing requests", h("span", { class: "badge badge-warning badge-sm" }, requests.length)),
-      ...requests.map((request) =>
-        h("div", { class: "flex items-center gap-3 py-1" },
-          h("span", { class: "text-lg" }, request.kind === "group" ? "👥" : "👤"),
+      ...requests.map((request) => {
+        const isGroup = request.kind === "group";
+        const title = (isGroup ? request.chatTitle : request.name) || (isGroup ? `chat ${request.chatId}` : `user ${request.userId}`);
+        const meta = [
+          `→ ${request.bot}`,
+          isGroup ? `chat ${request.chatId}` : `user ${request.userId}`,
+          isGroup && request.name ? `via ${request.name}` : null,
+          `${timeAgo(request.createdAt)} ago`,
+        ].filter(Boolean);
+        return h("div", { class: "flex items-center gap-3 py-1" },
+          pairingAvatar(request, title),
           h("div", { class: "flex-1 min-w-0" },
-            h("div", { class: "truncate" },
-              request.kind === "group"
-                ? `group "${request.chatTitle ?? request.chatId}"`
-                : `${request.name ?? "?"} ${request.username ? `(@${request.username})` : ""}`,
+            h("div", { class: "flex items-center gap-2 min-w-0" },
+              h("span", { class: "truncate" }, title),
+              request.username ? h("span", { class: "text-xs opacity-60 font-mono shrink-0" }, `@${request.username}`) : null,
+              // Worth the pixels: the name below is the folded one, and knowing
+              // the sender wrote it in lookalike glyphs is most of the decision.
+              request.disguised
+                ? h("span", { class: "badge badge-warning badge-sm shrink-0", title: "Written in lookalike unicode — shown here folded to plain letters." }, "disguised name")
+                : null,
             ),
-            h("div", { class: "text-xs opacity-60 font-mono" }, `→ ${request.bot} · ${request.kind === "group" ? `chat ${request.chatId}` : `user ${request.userId}`} · ${timeAgo(request.createdAt)} ago`),
+            h("div", { class: "text-xs opacity-60 font-mono truncate" }, meta.join(" · ")),
           ),
           h("button", { class: "btn btn-success btn-sm", onclick: () => pairingAction(request.id, "approve") }, "Approve"),
           h("button", { class: "btn btn-ghost btn-sm", onclick: () => pairingAction(request.id, "deny") }, "Deny"),
-        ),
-      ),
+        );
+      }),
     ),
   );
+}
+
+/** The requester's picture, or their initial when Telegram has none to give. */
+function pairingAvatar(request, title) {
+  if (request.photo) return h("img", { class: "pair-avatar", src: request.photo, alt: "" });
+  const initial = [...title.trim()][0]?.toUpperCase() ?? (request.kind === "group" ? "#" : "?");
+  return h("div", { class: "pair-avatar pair-avatar-blank" }, initial);
 }
 
 function workspaceCard(name, workspace) {

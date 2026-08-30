@@ -414,6 +414,23 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   border: 1px solid color-mix(in oklab, var(--color-warning) 35%, transparent);
 }
 
+/* A face is half of an approve/deny decision — and the initial, when Telegram
+   has no picture to give, at least keeps the rows aligned. */
+.pair-avatar {
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--color-base-300);
+}
+.pair-avatar-blank {
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  opacity: 0.65;
+}
+
 /* ---------- buttons ---------- */
 
 .btn {

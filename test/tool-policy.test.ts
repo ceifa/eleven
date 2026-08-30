@@ -64,18 +64,18 @@ describe("activeToolNames", () => {
     );
   });
 
-  test("web and agent gate nothing on pi, and never revoke eleven's tools", () => {
-    deepStrictEqual(activeToolNames(piActiveWithOwned, owned, ["web", "agent"]), ["workflow", "telegram"]);
+  test("web gates nothing on pi, and never revokes eleven's tools", () => {
+    deepStrictEqual(activeToolNames(piActiveWithOwned, owned, ["web"]), ["workflow", "telegram"]);
   });
 });
 
 describe("nativeToolsForPolicy (Claude Code side)", () => {
   test("never offers a tool that only addresses background tasks", () => {
     // Regression: TaskOutput and TaskStop shipped in every request, but
-    // foregroundToolInput strips run_in_background from every Agent and Bash
-    // call, so neither ever had a task to read or stop.
+    // foregroundToolInput strips run_in_background from every Bash call, so
+    // neither ever had a task to read or stop.
     const background = ["TaskOutput", "TaskStop"];
-    for (const policy of [undefined, ["agent"] as WorkspaceTool[], [...BUILTIN_TOOLS]]) {
+    for (const policy of [undefined, ["bash"] as WorkspaceTool[], [...BUILTIN_TOOLS]]) {
       deepStrictEqual(nativeToolsForPolicy(policy).filter((name) => background.includes(name)), []);
     }
   });
@@ -85,24 +85,24 @@ describe("nativeToolsForPolicy (Claude Code side)", () => {
     deepStrictEqual(nativeToolsForPolicy(undefined), nativeToolsForPolicy([...BUILTIN_TOOLS]));
   });
 
-  test("carries the agent capability's own tools again", () => {
-    // A stock eleven has to ship a plan and a way to delegate. Layer 2 dropped
-    // them on the assumption that a workspace extension supplies both — true
-    // here, false for anyone else running eleven.
-    deepStrictEqual(
-      nativeToolsForPolicy(["agent"]),
-      ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
-    );
+  test("no capability can grant delegation, not even the unrestricted default", () => {
+    // A native subagent runs as a session eleven does not own: extension tools
+    // are bridged into it, but it gets a session id of its own, so an extension
+    // keying state per session forks it silently and reports the fork under the
+    // parent's activity scope. There is no capability that expresses "the same
+    // conversation" across that boundary, so eleven grants none of these — a
+    // workspace that wants fan-out ships it as an extension tool.
+    const delegation = ["Agent", "Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+    for (const policy of [undefined, [...BUILTIN_TOOLS]]) {
+      deepStrictEqual(nativeToolsForPolicy(policy).filter((name) => delegation.includes(name)), []);
+    }
+    deepStrictEqual([...BUILTIN_TOOLS].includes("agent" as WorkspaceTool), false);
   });
 
-  test("a workspace can withhold natives it supplies itself", () => {
-    // The opt-out that replaces the hardcoded removal: by name, per workspace.
-    const withheld = ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
-    deepStrictEqual(nativeToolsForPolicy(["agent"], withheld), []);
-    deepStrictEqual(nativeToolsForPolicy(["read", "agent"], withheld), ["Read", "Glob", "Grep"]);
-    // Withholding one leaves the rest alone.
-    deepStrictEqual(nativeToolsForPolicy(["agent"], ["Task"]), ["SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]);
+  test("a workspace can still withhold a native it supplies itself", () => {
+    // `excludeNativeTools` outlives the delegation tools it was written for.
+    deepStrictEqual(nativeToolsForPolicy(["web"], ["WebSearch"]), ["WebFetch"]);
     // And it narrows the unrestricted default too, not just an explicit policy.
-    deepStrictEqual(nativeToolsForPolicy(undefined, ["Task"]).includes("Task"), false);
+    deepStrictEqual(nativeToolsForPolicy(undefined, ["Grep"]).includes("Grep"), false);
   });
 });

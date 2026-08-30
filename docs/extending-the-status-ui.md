@@ -125,29 +125,36 @@ and say how many exist with `{ kind: "agents", total }`.
 Do not skip the total. Without it the channel counts the rows that arrived and
 tells the reader "… 2 more" when forty agents ran.
 
-## Replacing what the runtime ships
+## What the runtime does not get to ship
 
-Claude Code brings its own plan and its own subagents. A workspace that supplies
-its own should withhold them, or the model gets two of each and has to choose:
+Delegation is not one of eleven's capabilities. Claude Code's `Agent`,
+`SendMessage` and its own `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate` are
+never granted to any workspace, so nothing the runtime brings competes with a
+plan you own.
+
+That is not tidiness. A native subagent runs as a session eleven does not own.
+Extension tools *are* bridged into it — eleven carries them over SDK-MCP with
+`alwaysLoad`, measured and not assumed — but the spawned agent gets a session
+identity of its own. An extension that keys state per session (a plan per
+conversation, say) forks that state without knowing, then reports the fork under
+the parent's activity scope, where a snapshot replaces the parent's rows.
+Nothing in the capability vocabulary can say "the same conversation" across that
+boundary. A workspace that wants fan-out ships it as an extension tool, where it
+has one identity and one place to report from.
+
+`excludeNativeTools` remains for everything else: a workspace withholds any
+native by name, per workspace, when it supplies its own.
 
 ```jsonc
 {
   "workspaces": {
     "mine": {
       "path": "~/work",
-      "excludeNativeTools": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"]
+      "excludeNativeTools": ["WebSearch"]
     }
   }
 }
 ```
-
-Withholding is by tool name and per workspace. eleven ships the natives; the
-workspace decides whether it wants them.
-
-Extension tools reach Claude's own subagents: eleven bridges them over SDK-MCP
-with `alwaysLoad`, and a spawned agent carries them in its tool set. Measured,
-not assumed — so a plan you own is visible to the subagents that should be
-reading it.
 
 ## Worked example
 

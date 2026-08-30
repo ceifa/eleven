@@ -7,7 +7,7 @@ import { TurnFailure, type TurnRewind } from "../../agent/runner.ts";
 import { lruTouch, summarizeToolArgs } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
-import { collectInboundMedia, formatInboundBody } from "./media.ts";
+import { collectInboundMedia, download, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { DraftStream } from "./stream.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
@@ -23,6 +23,9 @@ const WATCHDOG_INTERVAL_MS = 30_000;
 const RESTART_BACKOFF_MS = { initial: 30_000, max: 600_000 };
 const ACK_REACTION = "👀";
 const MAX_CHAT_TOOLS = 128;
+// A pairing request carries the requester's picture inline; the 160px thumb is
+// ~10 KB, and this cap keeps a surprise from bloating the request store.
+const MAX_AVATAR_BYTES = 128 * 1024;
 // Coalesce rapid arrivals (forwarded batches, albums) into a single turn: each
 // message re-arms the quiet window; the cap bounds the total added latency.
 const BURST_QUIET_MS = 1_500;
@@ -637,24 +640,49 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     });
   }
 
-  function offerPairing(ctx: Context) {
+  async function offerPairing(ctx: Context) {
     const from = ctx.from!;
     const chat = ctx.chat!;
     const isGroup = chat.type !== "private";
+    const kind = isGroup ? "group" : "dm";
+    // Deciding on a stranger goes better with a face, so the request carries
+    // one. Checking for a pending request first keeps a persistent knocker from
+    // costing a download per message — and fetching before registering keeps
+    // the photo in the request the dashboard is pushed.
+    if (deps.pairing.find({ bot: name, kind, userId: from.id, chatId: chat.id })) return;
+    const raw = [from.first_name, from.last_name].filter(Boolean).join(" ");
+    const { name: senderName, disguised } = foldDisplayName(raw);
     const { request, isNew } = deps.pairing.request({
-      kind: isGroup ? "group" : "dm",
+      kind,
       bot: name,
       userId: from.id,
       chatId: chat.id,
       chatTitle: isGroup ? (chat as { title?: string }).title : undefined,
       username: from.username,
-      name: fullName(from),
+      name: senderName,
+      disguised: disguised || undefined,
+      photo: await profilePhoto(ctx, chat.id),
     });
     if (!isNew) return; // already pending; stay quiet instead of spamming
     log.info(`pairing request (${request.kind}) from ${from.id} (@${from.username}) chat ${chat.id}`);
     if (!isGroup) {
       // Groups stay silent — the request just shows up in the dashboard.
       void sendRich(ctx.api, chat.id, "This bot is private. I've asked the owner to approve you — hang tight.").catch(() => {});
+    }
+  }
+
+  /** A chat's picture (the user's, in a DM) as a data URL. Decoration on a
+   *  decision that must still be made without it: any failure is a shrug. */
+  async function profilePhoto(ctx: Context, chatId: number): Promise<string | undefined> {
+    try {
+      const fileId = (await ctx.api.getChat(chatId)).photo?.small_file_id;
+      if (!fileId) return undefined;
+      const buffer = await download(ctx, token, fileId);
+      // The small thumb is ~10 KB; anything near this cap is not what we asked for.
+      return buffer.length > MAX_AVATAR_BYTES ? undefined : `data:image/jpeg;base64,${buffer.toString("base64")}`;
+    } catch (error) {
+      log.debug(`profile photo unavailable for chat ${chatId}: ${error}`);
+      return undefined;
     }
   }
 
@@ -784,7 +812,22 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 }
 
 function fullName(user?: { first_name?: string; last_name?: string }): string {
-  return [user?.first_name, user?.last_name].filter(Boolean).join(" ");
+  return foldDisplayName([user?.first_name, user?.last_name].filter(Boolean).join(" ")).name;
+}
+
+/**
+ * Display names are attacker-controlled, and a stranger who writes theirs in
+ * styled unicode ("T𝚎𝐥𝚎𝚐𝚛𝚊𝗺") or pads it with invisible characters looks
+ * official everywhere the name lands — the pairing panel, the config, a prompt
+ * label. NFKC folds those lookalikes back to plain letters, so the name reads
+ * as what it imitates; comparing against plain NFC (which differs only for the
+ * compatibility characters) is also the detector: a name that moves was
+ * wearing a costume.
+ */
+export function foldDisplayName(value: string): { name: string; disguised: boolean } {
+  const visible = value.replaceAll(/[\p{Cc}\p{Cf}]/gu, "");
+  const name = visible.normalize("NFKC").replaceAll(/\s+/g, " ").trim();
+  return { name, disguised: name !== value.normalize("NFC").replaceAll(/\s+/g, " ").trim() };
 }
 
 /** The topic a message belongs to, plus whatever name Telegram let slip along

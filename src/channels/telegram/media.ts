@@ -87,7 +87,7 @@ export async function collectInboundMedia(ctx: Context, token: string, transcrib
   return result;
 }
 
-async function download(ctx: Context, token: string, fileId: string): Promise<Buffer> {
+export async function download(ctx: Context, token: string, fileId: string): Promise<Buffer> {
   const file = await ctx.api.getFile(fileId);
   if (!file.file_path) throw new Error("file has no path");
   const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);

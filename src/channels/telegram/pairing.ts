@@ -16,8 +16,17 @@ export interface PairingRequest {
   chatTitle?: string;
   username?: string;
   name?: string;
+  /** The name arrived dressed up in lookalike unicode (see `foldDisplayName`). */
+  disguised?: boolean;
+  /** Profile picture as a `data:` URL — small enough (Telegram's 160px thumb)
+   *  to travel inside the record, which spares the dashboard an image route
+   *  that would have to carry the bot token. */
+  photo?: string;
   createdAt: number;
 }
+
+/** What makes two requests the same request: one pending entry per stranger. */
+export type PairingIdentity = Pick<PairingRequest, "bot" | "kind" | "userId" | "chatId">;
 
 /**
  * Deny-by-default with no id hunting: unknown DM senders and unregistered
@@ -35,11 +44,19 @@ export class PairingStore extends EventEmitter {
       .map((r) => ({ ...r, id: r.id ?? r.code ?? randomUUID().slice(0, 8) }));
   }
 
+  /** The pending request for this stranger, if they already knocked. Callers use
+   *  it to skip the work (a profile photo download) a duplicate would waste. */
+  find(identity: PairingIdentity): PairingRequest | undefined {
+    return this.requests.find(
+      (r) =>
+        r.bot === identity.bot &&
+        (identity.kind === "group" ? r.kind === "group" && r.chatId === identity.chatId : r.kind === "dm" && r.userId === identity.userId),
+    );
+  }
+
   /** Register (or return the existing) request for an unknown sender or group. */
   request(input: Omit<PairingRequest, "id" | "createdAt">): { request: PairingRequest; isNew: boolean } {
-    const existing = this.requests.find(
-      (r) => r.bot === input.bot && (input.kind === "group" ? r.kind === "group" && r.chatId === input.chatId : r.kind === "dm" && r.userId === input.userId),
-    );
+    const existing = this.find(input);
     if (existing) return { request: existing, isNew: false };
     const request: PairingRequest = { ...input, id: randomUUID().slice(0, 8), createdAt: Date.now() };
     this.requests.push(request);

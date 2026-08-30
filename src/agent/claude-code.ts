@@ -29,7 +29,7 @@ import { BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
-import type { TaskActivityEvent, TaskActivityItem, TaskActivityUsage } from "./task-activity.ts";
+import { readToolActivity, type TaskActivityEvent, type TaskActivityUsage } from "./task-activity.ts";
 
 const log = logger("claude-code");
 
@@ -48,7 +48,17 @@ const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
   edit: ["Edit"],
   write: ["Write"],
   web: ["WebFetch", "WebSearch"],
-  agent: ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
+  // Nothing native. Delegation is the `workflow` tool and the plan is
+  // task-tools.ts — both eleven's, both on every provider. The natives were a
+  // second surface for the same two jobs, available on exactly one provider:
+  // the model had to choose, the two reported differently, and eleven had to
+  // neuter the Agent tool anyway (foregroundToolInput strips run_in_background
+  // and isolation, because a Pi turn cannot outlive its provider stream).
+  //
+  // The capability itself stays: it is what gates eleven's plan tools. Putting
+  // the natives back is this line — the normalizer that renders their roster
+  // (emitAgentTaskActivity) is still here and still tested.
+  agent: [],
 };
 
 /** Claude Code capabilities intentionally enabled when a workspace omits a
@@ -114,7 +124,6 @@ export interface ClaudeSessionRegistration {
 interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onTaskActivity?: (event: TaskActivityEvent) => void;
-  planTasks: Map<string, PlanTask>;
   agentTaskTitles: Map<string, string>;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
@@ -187,34 +196,11 @@ class InputQueue {
   }
 }
 
-interface PlanTask {
-  id: string;
-  subject: string;
-  status: TaskActivityItem["status"];
-  blockedBy: Set<string>;
-}
-
 const sessions = new Map<string, RegisteredSession>();
-// Warm Pi sessions are evicted independently of Claude's durable session. Keep
-// the plan mirror across those rebuilds; TaskList/TaskGet reconcile it whenever
-// Claude reads its own task store again. The cap prevents abandoned threads
-// from growing process memory forever.
-const planTasksBySession = new Map<string, Map<string, PlanTask>>();
-const MAX_PLAN_SESSION_CACHE = 256;
 const activeOwner = new AsyncLocalStorage<string>();
 
 export function registerClaudeSession(sessionId: string, registration: ClaudeSessionRegistration): void {
-  let planTasks = planTasksBySession.get(sessionId);
-  if (!planTasks) {
-    planTasks = new Map();
-    planTasksBySession.set(sessionId, planTasks);
-    if (planTasksBySession.size > MAX_PLAN_SESSION_CACHE) planTasksBySession.delete(planTasksBySession.keys().next().value!);
-  }
-  sessions.set(sessionId, {
-    ...registration,
-    planTasks,
-    agentTaskTitles: new Map(),
-  });
+  sessions.set(sessionId, { ...registration, agentTaskTitles: new Map() });
 }
 
 export function unregisterClaudeSession(sessionId: string): void {
@@ -230,7 +216,6 @@ export function setClaudeWorkspaceTools(sessionId: string, tools: WorkspaceTool[
 
 /** Delete every hidden Claude transcript owned by one Pi session. */
 export async function cleanupClaudeSessions(sessionId: string): Promise<void> {
-  planTasksBySession.delete(sessionId);
   const state = claudeSessionState.remove(sessionId);
   if (!state) return;
   await deleteTracked(claudeSessionState, deleteSession, sessionId, state.cwd, state.garbage ?? []);
@@ -618,7 +603,6 @@ async function consumeClaudeQuery(
       stderr: (line) => log.warn(line.trim()),
     };
 
-    const taskCalls = new Map<string, { name: string; input: Record<string, unknown> }>();
     let skippedResult: SDKMessage | undefined;
     let noopSkips = 0;
     let grace: NodeJS.Timeout | undefined;
@@ -630,12 +614,8 @@ async function consumeClaudeQuery(
         if (message.parent_tool_use_id === null) lastTopLevelText = assistantText(message);
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
-          const args = asArgs(block.input);
-          markTool(block.name, args, block.id);
-          if (isPlanTool(block.name)) taskCalls.set(block.id, { name: block.name, input: args });
+          markTool(block.name, asArgs(block.input), block.id);
         }
-      } else if (message.type === "user") {
-        if (!isolated) applyPlanToolResults(registration, taskCalls, message);
       } else if (message.type === "system") {
         if (!isolated) emitAgentTaskActivity(registration, message);
       } else if (message.type === "result") {
@@ -764,11 +744,20 @@ function buildMcpServer(
         try {
           onBeforeTool(tool.name, args, request.requestId);
           const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
+          // Pi's tool loop turns onUpdate into tool_execution_update; MCP has no
+          // such loop, so eleven is the one holding the callback here. Same
+          // contract either way: the tool reports activity, this forwards it.
+          const scope = request.requestId ?? `${tool.name}-${randomUUID()}`;
+          const onUpdate = (partial: unknown) => {
+            const listener = sessions.get(ownerSessionId)?.onTaskActivity;
+            if (!listener) return;
+            for (const activity of readToolActivity(partial, scope)) listener(activity);
+          };
           // MCP callbacks cross the SDK transport boundary. Re-enter the owner
           // explicitly so extension tools that spawn nested AgentSessions
           // (workflow) inherit Claude's cwd/provider bridge.
           const result = await activeOwner.run(ownerSessionId, () =>
-            tool.execute(request.requestId ?? randomUUID(), prepared, request.signal, undefined),
+            tool.execute(request.requestId ?? randomUUID(), prepared, request.signal, onUpdate),
           );
           return {
             content: result.content.map((block) => block.type === "image"
@@ -928,100 +917,6 @@ function foregroundToolInput(name: string, input: Record<string, unknown>): Reco
   }
   if (name === "Bash" && input.run_in_background === true) return { ...input, run_in_background: false };
   return undefined;
-}
-
-function isPlanTool(name: string): boolean {
-  return name === "TaskCreate" || name === "TaskGet" || name === "TaskUpdate" || name === "TaskList";
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function readStrings(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && !!entry) : [];
-}
-
-function normalizePlanStatus(value: unknown): TaskActivityItem["status"] {
-  return value === "completed" ? "completed" : value === "in_progress" ? "running" : "pending";
-}
-
-function planSnapshot(registration: RegisteredSession): TaskActivityEvent {
-  return {
-    kind: "plan",
-    tasks: [...registration.planTasks.values()].map((task) => ({
-      id: task.id,
-      title: task.subject,
-      status: task.status,
-      ...(task.blockedBy.size ? { blockedBy: [...task.blockedBy] } : {}),
-    })),
-  };
-}
-
-function applyPlanToolResults(
-  registration: RegisteredSession,
-  calls: Map<string, { name: string; input: Record<string, unknown> }>,
-  message: Extract<SDKMessage, { type: "user" }>,
-): void {
-  const content = Array.isArray(message.message.content) ? message.message.content : [];
-  const result = asArgs((message as unknown as { tool_use_result?: unknown }).tool_use_result);
-  for (const block of content) {
-    if (block.type !== "tool_result") continue;
-    const call = calls.get(block.tool_use_id);
-    if (!call) continue;
-    calls.delete(block.tool_use_id);
-    if (block.is_error || result.success === false) continue;
-
-    let changed = false;
-    if (call.name === "TaskList") {
-      if (!Array.isArray(result.tasks)) continue;
-      const listed = result.tasks;
-      registration.planTasks.clear();
-      for (const value of listed) {
-        const task = asArgs(value);
-        const id = readString(task.id);
-        const subject = readString(task.subject);
-        if (!id || !subject) continue;
-        registration.planTasks.set(id, {
-          id,
-          subject,
-          status: normalizePlanStatus(task.status),
-          blockedBy: new Set(readStrings(task.blockedBy)),
-        });
-      }
-      changed = true; // TaskList is the authoritative snapshot, including empty.
-    } else if (call.name === "TaskCreate" || call.name === "TaskGet") {
-      const task = asArgs(result.task);
-      const id = readString(task.id);
-      const subject = readString(task.subject) ?? readString(call.input.subject);
-      if (id && subject) {
-        registration.planTasks.set(id, {
-          id,
-          subject,
-          status: normalizePlanStatus(task.status ?? call.input.status),
-          blockedBy: new Set(readStrings(task.blockedBy ?? call.input.blockedBy)),
-        });
-        changed = true;
-      }
-    } else if (call.name === "TaskUpdate") {
-      const id = readString(call.input.taskId) ?? readString(result.taskId);
-      if (id && call.input.status === "deleted") {
-        changed = registration.planTasks.delete(id);
-        for (const task of registration.planTasks.values()) task.blockedBy.delete(id);
-      } else if (id) {
-        const task = registration.planTasks.get(id);
-        if (task) {
-          const subject = readString(call.input.subject);
-          if (subject) task.subject = subject;
-          if (typeof call.input.status === "string") task.status = normalizePlanStatus(call.input.status);
-          for (const dependency of readStrings(call.input.addBlockedBy)) task.blockedBy.add(dependency);
-          for (const blockedId of readStrings(call.input.addBlocks)) registration.planTasks.get(blockedId)?.blockedBy.add(id);
-          changed = true;
-        }
-      }
-    }
-    if (changed) registration.onTaskActivity?.(planSnapshot(registration));
-  }
 }
 
 function normalizeTaskUsage(value: unknown): TaskActivityUsage | undefined {

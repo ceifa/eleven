@@ -17,6 +17,8 @@ import { logger } from "./log.ts";
 import { summarizeToolArgs } from "./util.ts";
 import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
+import { deleteTaskStore, taskStore } from "./agent/task-store.ts";
+import { forgetTaskTools, taskTools } from "./agent/task-tools.ts";
 
 const log = logger("gateway");
 const DEFAULT_IDLE_DAYS = 7;
@@ -208,17 +210,28 @@ export class Gateway extends EventEmitter {
       },
     };
 
+    const sessionDir = join(THREADS_DIR, thread.workspace);
+    // The plan is eleven's, not the runtime's: the same four tools on every
+    // provider, and their updates reach the channel as they happen. Gated on the
+    // `agent` capability, like the runtime's native plan tools used to be.
+    // (A per-model-entry allowlist doesn't narrow them — same as `workflow`.)
+    const planned = !workspace.config.tools || workspace.config.tools.includes("agent");
+    const plan = planned ? taskStore(sessionDir, thread.id) : undefined;
+    plan?.listen((activity) => events.onTaskActivity?.(activity));
+
     try {
       const result = await this.runner.submit(
         thread.id,
         {
           sessionFile: thread.sessionFile,
-          sessionDir: join(THREADS_DIR, thread.workspace),
+          sessionDir,
           workspacePath: workspace.config.path,
           runtime: { ...incoming.runtime, workspace: thread.workspace, workspacePath: workspace.config.path },
           models: incoming.models ?? this.config.turnModels(thread.model, [...(incoming.modelScopes ?? []), workspace.config]),
           tools: workspace.config.tools,
-          customTools: incoming.customTools,
+          customTools: planned
+            ? [...(incoming.customTools ?? []), ...taskTools(sessionDir, thread.id)]
+            : incoming.customTools,
           prompt: { systemPrompt: workspace.config.systemPrompt, appends: incoming.appends },
           text: incoming.text,
           images: incoming.images,
@@ -238,6 +251,9 @@ export class Gateway extends EventEmitter {
     } catch (error) {
       this.emit("turn-error", { threadId: thread.id, error: String(error) });
       throw error;
+    } finally {
+      // The listener closes over this turn's events; the store outlives it.
+      plan?.listen(undefined);
     }
   }
 
@@ -283,6 +299,8 @@ export class Gateway extends EventEmitter {
       await rm(thread.sessionFile, { force: true });
     }
     await this.requests.delete(id);
+    await deleteTaskStore(join(THREADS_DIR, thread.workspace), id);
+    forgetTaskTools(id);
     this.threads.delete(id);
     log.info(`thread deleted: ${thread.workspace}/${id.slice(0, 8)}`);
     return true;

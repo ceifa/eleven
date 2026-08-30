@@ -1447,7 +1447,42 @@ function voiceRecorder(form, onTake) {
   return { button, bar, cancel: () => finish(false) };
 }
 
+/**
+ * The footer of a thread that belongs to a channel. There is no composer,
+ * because a turn typed here is a dashboard turn: it carries no channel tool and
+ * nothing delivers it, so the reply would land in the transcript and never
+ * reach the chat — a question and an answer invisible to the person on the
+ * other end, in the middle of a conversation they are still reading.
+ *
+ * The stop button stays: a runaway turn is worth killing from wherever you are.
+ * And the way forward is a thread of your own, in the same workspace.
+ */
+function readOnlyComposer(thread) {
+  return h("div", { class: "composer composer-readonly" },
+    h("div", { class: "composer-box" },
+      h("p", { class: "composer-readonly-text" },
+        "This thread lives in ", h("strong", {}, thread.conversation), " — answer it there. A reply typed here would never reach it.",
+      ),
+      h("button", {
+        class: "btn btn-sm",
+        type: "button",
+        title: "start a thread of your own here, in this thread's workspace",
+        onclick: () => newThreadDialog(thread.workspace),
+      }, "New thread"),
+      h("button", {
+        class: "composer-stop",
+        type: "button",
+        id: "stop-turn",
+        title: "abort the running turn (and drop input still waiting to start one)",
+        "aria-label": "Stop",
+        onclick: () => stopTurn(thread.id),
+      }, h("span", { class: "stop-square", "aria-hidden": "true" })),
+    ),
+  );
+}
+
 function threadComposer(thread) {
+  if (thread.composable === false) return readOnlyComposer(thread);
   const text = autoGrow(h("textarea", {
     class: "composer-text",
     id: "composer-text",
@@ -1530,7 +1565,11 @@ function renderThreadPane() {
   // Re-rendering the same thread should leave a reader who scrolled up where
   // they were; switching threads or sitting at the bottom jumps to the latest.
   const prev = scroller();
-  const opened = renderedThreadId !== thread.id || !pane.querySelector("#composer-text");
+  // The footer is the tell that this pane is built and current: a thread in
+  // another channel has one without a text box, and testing for the box alone
+  // would rebuild that pane on every event — scrolling the reader to the bottom
+  // each time.
+  const opened = renderedThreadId !== thread.id || !pane.querySelector(".composer");
   const keepScroll = !opened && prev && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
   pane.classList.toggle("is-running", isThreadLive(thread.id));
@@ -2081,7 +2120,9 @@ function searchBox() {
  * what you chose last, and disappears entirely when there is only one
  * workspace to pick.
  */
-function newThreadDialog() {
+/** `preferred` preselects a workspace — how a thread you are reading but cannot
+ *  type into hands you a fresh one in the same place. */
+function newThreadDialog(preferred) {
   const pane = document.getElementById("thread-pane");
   if (!pane) return;
   const workspaces = state.overview?.workspaces ?? [];
@@ -2092,7 +2133,7 @@ function newThreadDialog() {
   pane.classList.remove("is-running");
   pane.classList.add("is-composing");
 
-  const remembered = prefs.get("workspace", "");
+  const remembered = preferred ?? prefs.get("workspace", "");
   let workspace = workspaces.includes(remembered) ? remembered : workspaces[0];
 
   const text = autoGrow(h("textarea", {

@@ -267,28 +267,38 @@ test("a workspace's skills come with its detail read — what the thread's skill
   });
 });
 
-test("a message typed into a Telegram topic's thread runs under that conversation's settings", async () => {
+test("a thread that belongs to a channel refuses a turn typed here", async () => {
   await withDashboard(async (base, _thread, spy) => {
-    // Regression: the composer ran every turn on the workspace's own sequence
-    // and prompt, so a thread in a topic pinned to a model answered on another
-    // one — the very model the thread's detail view was reporting it would use
-    // — and without the instructions the group carries ("work on the repo named
-    // after the topic"), which is what tells the agent where it is.
+    // A dashboard turn carries no channel tool and nothing delivers it: run one
+    // in a Telegram thread and the reply lands in the transcript and never
+    // reaches the chat — invisible to the person still reading the conversation
+    // on the other end. It also ran on the workspace's models and prompt rather
+    // than the topic's, which is how this was first noticed.
     const response = await post(`${base}/api/threads/${spy.topic.id}/message`, { text: "ship it" });
-    assert.equal(response.status, 202);
-    assert.equal(spy.handled.length, 1);
-    // Most specific first: the topic's model sequence beats the group's.
-    assert.deepEqual(spy.handled[0].modelScopes?.map((scope) => (scope as { title?: string } | undefined)?.title), ["eleven", "Sesh"]);
-    // Outermost first: the group sets the scene, the topic narrows it.
-    assert.deepEqual(spy.handled[0].appends, ["work on the repo named after the topic", "this one is TypeScript"]);
+    assert.equal(response.status, 409);
+    assert.match(JSON.parse(response.body).error, /lives in Telegram · Sesh · eleven/);
+    assert.deepEqual(spy.handled, []);
   });
 });
 
-test("a thread with no channel of its own carries no scopes — the workspace decides", async () => {
+test("the dashboard's own thread still takes one", async () => {
   await withDashboard(async (base, thread, spy) => {
-    await post(`${base}/api/threads/${thread.id}/message`, { text: "hello" });
-    assert.deepEqual(spy.handled[0].modelScopes, []);
-    assert.deepEqual(spy.handled[0].appends, []);
+    const response = await post(`${base}/api/threads/${thread.id}/message`, { text: "hello" });
+    assert.equal(response.status, 202);
+    assert.deepEqual(spy.handled.map((turn) => turn.text), ["hello"]);
+  });
+});
+
+test("a thread says whether it can be typed into — the composer obeys it", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    const listed = JSON.parse((await get(`${base}/api/threads`)).body.toString());
+    assert.deepEqual(
+      listed.map((view: { id: string; composable: boolean }) => [view.id, view.composable]),
+      [[thread.id, true], [spy.topic.id, false]],
+    );
+    // And in the read the pane actually opens with.
+    const detail = JSON.parse((await get(`${base}/api/threads/${spy.topic.id}`)).body.toString());
+    assert.equal(detail.thread.composable, false);
   });
 });
 

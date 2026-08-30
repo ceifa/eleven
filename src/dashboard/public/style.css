@@ -879,6 +879,17 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 /* While a turn runs, the one button in the composer is the one that stops it. */
 #thread-pane.is-running .composer-send { display: none; }
 #thread-pane.is-running .composer-stop { display: inline-flex; }
+/* A thread that belongs to another channel: the box says so instead of
+   inviting a reply that would never leave the dashboard. */
+.composer-readonly .composer-box { align-items: center; padding: 0.5rem 0.5rem 0.5rem 0.9rem; }
+.composer-readonly-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+}
+.composer-readonly-text strong { color: var(--color-base-content); font-weight: 600; }
 .composer-hint {
   max-width: 54rem;
   margin: 0 auto;

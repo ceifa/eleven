@@ -103,7 +103,10 @@ export class Gateway extends EventEmitter {
       // the same pi session (not just after a successful turn reports it back).
       if (sessionFile) this.threads.update(threadId, { sessionFile });
       this.pending.begin(threadId);
-      this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0 });
+      // handle() opens the record when the message arrives, so the turn already
+      // has the message that started it; only a turn nobody opened one for
+      // (a woken interrupted turn) starts from scratch here.
+      if (!this.liveTurns.has(threadId)) this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0 });
       // Queued messages run back to back on the same thread: this is the only
       // point where a watcher can tell one turn's output from the next one's.
       this.emit("turn-start", { threadId });
@@ -150,7 +153,13 @@ export class Gateway extends EventEmitter {
     // it belongs in that turn's live record, at the point it arrived. Without it
     // a page opened mid-turn draws the message above everything the turn has
     // said since — the transcript has no idea where the streamed prose goes.
-    // pushLive is a no-op when no turn is in flight, which is the common case.
+    //
+    // And when none is running, this message is about to *start* a turn: open
+    // the record here, so it holds the message the turn begins with. On a
+    // thread's first turn that record is the only place the message exists —
+    // pi keeps a brand-new session in memory until the model's first reply, so
+    // there is no transcript file for a dashboard to read until the turn ends.
+    if (!this.liveTurns.has(thread.id)) this.liveTurns.set(thread.id, { startedAt: Date.now(), items: [], chars: 0 });
     this.pushLive(thread.id, { kind: "message", role: "user", text: incoming.text, at: Date.now() });
     this.emit("thread-activity", { thread, direction: "in", text: incoming.text });
 

@@ -1,7 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
 import { syncChildren } from "./dom.js";
-import { elapsed, liveStatus, MATCH_CHARS, startOfDay, transcriptRows } from "./live-turn.js";
+import { agentDetail, agentMeta, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { presentMessage, sameMessage } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
@@ -19,6 +19,10 @@ const state = {
   /** When the running turn began (0 when none is). Also the cut-off that says
    *  which durable rows the live region owns. */
   liveStartedAt: 0,
+  /** The running turn's plan and subagents. State, not a log: the daemon sends
+   *  the whole board on every change, so this is replaced rather than appended
+   *  to — and a page opened mid-turn gets the same shape from the catch-up. */
+  tasks: { plan: [], agents: [] },
   /** Messages that exist but haven't landed in the transcript yet — just sent
    *  from here, or just arrived from a channel, with no turn running to hold
    *  them. */
@@ -247,7 +251,9 @@ function connectWs() {
         liveEpoch++;
         state.live = [];
         state.liveStartedAt = Date.now();
+        state.tasks = { plan: [], agents: [] };
         renderLive(true);
+        renderTasks();
       }
     }
     if (message.type === "delta") {
@@ -276,6 +282,14 @@ function connectWs() {
       if (active) {
         state.live.push({ kind: "tool", id: message.id, name: message.name, summary: message.summary ?? "", args: message.args });
         renderLive();
+      }
+    }
+    if (message.type === "task-activity") {
+      markThreadLive(message.threadId);
+      // The whole board arrives folded — store it, don't reduce it.
+      if (active) {
+        state.tasks = message.tasks ?? { plan: [], agents: [] };
+        renderTasks();
       }
     }
     if (message.type === "turn-done" || message.type === "turn-error") {
@@ -764,6 +778,7 @@ async function openThread(id) {
     // Switching threads: nothing from the old one survives the move.
     state.live = [];
     state.liveStartedAt = 0;
+    state.tasks = { plan: [], agents: [] };
     state.pending = [];
   }
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
@@ -788,11 +803,14 @@ async function openThread(id) {
     if (!data.live) {
       state.live = [];
       state.liveStartedAt = 0;
+      // The board outlives the turn on purpose: the finished plan is the most
+      // useful thing on screen right after a long run.
     } else {
       // The daemon's clock, which is also the transcript's — so the cut-off it
       // gives is directly comparable with the rows' own timestamps.
       state.liveStartedAt = data.live.startedAt ?? state.liveStartedAt;
       if (!state.live.length) state.live = data.live.items ?? [];
+      if (hasTasks(data.live.tasks)) state.tasks = data.live.tasks;
     }
   }
   renderThreadPane();
@@ -1018,6 +1036,71 @@ function liveNode(item) {
   // at the point in the turn where it actually landed.
   if (item.kind === "message") return messageBubble({ role: item.role, text: item.text }, { at: item.at });
   return messageBubble({ role: "assistant", text: item.text }, { streaming: true });
+}
+
+/* The turn's plan and its subagents, under the transcript. Not part of the live
+   region: that region is a log that only grows, while this is state that gets
+   replaced — a plan whose rows move from pending to done, and a roster of
+   agents reporting as they run. It outlives the turn, because a finished plan
+   is the most useful thing on screen right after a long one. */
+
+function renderTasks() {
+  const region = document.getElementById("tasks");
+  if (!region) return;
+  const { plan = [], agents = [] } = state.tasks ?? {};
+  sticky(() => region.replaceChildren(...[
+    plan.length ? taskSection("Plan", plan, planRow) : null,
+    agents.length ? taskSection("Agents", agents, agentRow) : null,
+  ].filter(Boolean)));
+}
+
+const taskSection = (title, tasks, row) =>
+  h("div", { class: "task-section" },
+    h("div", { class: "task-section-title" }, title),
+    ...tasks.map(row),
+  );
+
+const planRow = (task) =>
+  h("div", { class: `task-row is-${task.status}` },
+    h("span", { class: "task-icon", "aria-hidden": "true" }, taskIcon(task)),
+    h("span", { class: "task-title" }, task.title),
+    task.blockedBy?.length
+      ? h("span", { class: "task-meta" }, `blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}`)
+      : null,
+  );
+
+/** A subagent row opens what the runtime reported about that agent. There is no
+ *  per-agent provider request to link to — a nested runtime drives its own tool
+ *  loop, so those calls never reach the request log — and the panel says so
+ *  rather than leaving a reader hunting for a link that cannot exist. */
+function agentRow(task) {
+  const meta = agentMeta(task);
+  return h("div", {
+    class: `task-row is-${task.status} is-clickable`,
+    title: "view what this agent reported",
+    onclick: () => openAgentModal(task),
+  },
+    h("span", { class: "task-icon", "aria-hidden": "true" }, taskIcon(task)),
+    h("span", { class: "task-title" }, task.title),
+    meta.length ? h("span", { class: "task-meta" }, meta.join(" · ")) : null,
+    h("span", { class: "task-open", "aria-hidden": "true" }, "›"),
+  );
+}
+
+function openAgentModal(task) {
+  const body = h("div", { class: "agent-detail" },
+    ...agentDetail(task).map(([label, value]) =>
+      h("div", { class: "agent-detail-row" },
+        h("span", { class: "agent-detail-label" }, label),
+        h("span", { class: "agent-detail-value font-mono" }, value),
+      ),
+    ),
+    task.summary ? h("p", { class: "agent-detail-summary" }, task.summary) : null,
+    h("p", { class: "agent-detail-note" },
+      "Only what the runtime reported for this agent. Its own provider requests are not in the request log: "
+      + "a subagent runs inside a nested tool loop whose calls eleven never sees."),
+  );
+  openModal("Agent", task.title, [], body);
 }
 
 /* The line under the transcript while a turn runs: a spinner, what the turn is
@@ -1623,6 +1706,7 @@ function renderThreadPane() {
           h("div", { id: "transcript" }, durableRows()),
           h("div", { id: "pending" }),
           h("div", { id: "live" }),
+          h("div", { class: "task-board", id: "tasks" }),
           // Shown by CSS only while a turn is running; updateLiveStatus keeps
           // what it says current.
           h("div", { class: "live-status", id: "live-status", role: "status" },
@@ -1645,10 +1729,11 @@ function renderThreadPane() {
     document.getElementById("transcript")?.replaceChildren(...durableRows());
   }
 
-  // Both regions live inside the pane, so they can only be filled once it's
+  // The regions live inside the pane, so they can only be filled once it's
   // attached; the scroll position is applied after, over the finished height.
   renderPending();
   renderLive(true);
+  renderTasks();
   const messages = scroller();
   if (messages) messages.scrollTop = keepScroll ?? messages.scrollHeight;
   updateJumpButton();

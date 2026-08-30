@@ -31,6 +31,49 @@ export type TaskActivityEvent =
   | { kind: "agent"; task: TaskActivityItem };
 
 /**
+ * A turn's task activity, folded into the two lists every surface draws. One
+ * implementation because both surfaces have the same three subtleties: a plan
+ * snapshot replaces only its own scope, agent events merge into the row they
+ * name, and a turn that ends badly has to terminate the rows still marked
+ * running (nobody is left to report them).
+ */
+export class TaskActivityBoard {
+  private readonly planRows = new Map<string, { task: TaskActivityItem; scope?: string }>();
+  private readonly agentRows = new Map<string, TaskActivityItem>();
+
+  apply(event: TaskActivityEvent): void {
+    if (event.kind === "plan") {
+      for (const [id, row] of this.planRows) {
+        if (row.scope === event.scope) this.planRows.delete(id);
+      }
+      for (const task of event.tasks) this.planRows.set(task.id, { task, scope: event.scope });
+      return;
+    }
+    const previous = this.agentRows.get(event.task.id);
+    this.agentRows.set(event.task.id, previous ? { ...previous, ...event.task } : event.task);
+  }
+
+  /** The turn stopped or failed: whatever was still running, isn't. */
+  settle(status: Extract<TaskActivityStatus, "failed" | "stopped">): void {
+    for (const [id, task] of this.agentRows) {
+      if (task.status === "running") this.agentRows.set(id, { ...task, status });
+    }
+  }
+
+  get plan(): TaskActivityItem[] {
+    return [...this.planRows.values()].map((row) => row.task);
+  }
+
+  get agents(): TaskActivityItem[] {
+    return [...this.agentRows.values()];
+  }
+
+  get empty(): boolean {
+    return !this.planRows.size && !this.agentRows.size;
+  }
+}
+
+/**
  * What a tool attaches to a partial result to report progress. Any tool — a
  * workspace extension, a channel tool — speaks this and reaches the same
  * renderer the runtime's own plan/agent events do; eleven never learns what the

@@ -167,6 +167,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   gateway.on("delta", (event) => broadcast({ type: "delta", ...event }));
   gateway.on("provider-request", (event) => broadcast({ type: "provider-request", ...event }));
   gateway.on("tool-call", (event) => broadcast({ type: "tool-call", ...event }));
+  // The whole board, not the event that changed it — same shape the catch-up
+  // endpoint serves, so the client stores it instead of replaying anything.
+  gateway.on("task-activity", (event) => broadcast({ type: "task-activity", ...event }));
   gateway.on("turn-start", (event) => broadcast({ type: "turn-start", ...event }));
   gateway.on("turn-done", (event) => broadcast({ type: "turn-done", ...event }));
   gateway.on("turn-error", (event) => broadcast({ type: "turn-error", ...event }));

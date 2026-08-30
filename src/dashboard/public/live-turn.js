@@ -51,6 +51,60 @@ export function shownLive(live, item, at, startedAt) {
   return live.some((entry) => entry.kind === "message" && sameMessage(entry, item, MATCH_CHARS));
 }
 
+/* ---------- the turn's plan and subagents ---------- */
+
+/** State reads at a glance or it doesn't read at all: the icon is the status. */
+export function taskIcon(task) {
+  if (task.status === "completed") return "✓";
+  if (task.status === "failed") return "✕";
+  if (task.status === "stopped") return "◼";
+  if (task.status === "running") return "◐";
+  return task.blockedBy?.length ? "⏸" : "○";
+}
+
+export const fmtTokens = (n) =>
+  n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k tok` : `${n} tok`;
+
+export const fmtDuration = (ms) => {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+};
+
+/** The one line of context an agent row carries next to its title. Live rows
+ *  say what the agent is doing; finished ones say what it cost. */
+export function agentMeta(task) {
+  const parts = [];
+  if (task.status === "running" && task.lastToolName) parts.push(task.lastToolName);
+  if (task.usage?.totalTokens !== undefined) parts.push(fmtTokens(task.usage.totalTokens));
+  if (task.usage?.durationMs !== undefined) parts.push(fmtDuration(task.usage.durationMs));
+  if (task.status !== "running" && task.summary && task.summary.trim().toLowerCase() !== task.title.trim().toLowerCase()) {
+    parts.push(task.summary);
+  }
+  return parts;
+}
+
+/**
+ * Everything known about one subagent, as label/value pairs for the detail
+ * panel. Deliberately only what the runtime actually reported: eleven does not
+ * see a subagent's provider requests — a nested runtime drives its own tool
+ * loop — so this never invents a per-agent request it cannot show.
+ */
+export function agentDetail(task) {
+  const rows = [["status", task.status]];
+  if (task.subagentType) rows.push(["type", task.subagentType]);
+  if (task.taskType) rows.push(["runs as", task.taskType]);
+  if (task.lastToolName) rows.push(["last tool", task.lastToolName]);
+  if (task.usage?.totalTokens !== undefined) rows.push(["tokens", fmtTokens(task.usage.totalTokens)]);
+  if (task.usage?.toolUses !== undefined) rows.push(["tool calls", String(task.usage.toolUses)]);
+  if (task.usage?.durationMs !== undefined) rows.push(["duration", fmtDuration(task.usage.durationMs)]);
+  if (task.blockedBy?.length) rows.push(["blocked by", task.blockedBy.map((id) => `#${id}`).join(", ")]);
+  return rows;
+}
+
+/** Does the board have anything worth a region on screen? */
+export const hasTasks = (tasks) => !!(tasks?.plan?.length || tasks?.agents?.length);
+
 export const startOfDay = (ts) => new Date(ts).setHours(0, 0, 0, 0);
 
 /** Messages closer together than this, from the same speaker, read as one block. */

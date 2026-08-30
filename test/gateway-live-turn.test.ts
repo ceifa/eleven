@@ -83,3 +83,48 @@ test("a turn does not inherit the previous turn's live record", async () => {
 
   assert.deepEqual(seen, [["first", "text"], ["second", "text"]]);
 });
+
+test("the board a mid-turn page reads is folded, and broadcast whole", async () => {
+  // The dashboard must never have to replay events to know what the plan looks
+  // like: the catch-up endpoint and the live broadcast carry the same folded
+  // shape, so a page that connects late and one that watched all along agree.
+  const gateway = new Gateway(config as never);
+  const broadcasts: Array<{ plan: unknown[]; agents: unknown[] }> = [];
+  gateway.on("task-activity", (event: { tasks: { plan: unknown[]; agents: unknown[] } }) => broadcasts.push(event.tasks));
+  let live: ReturnType<GatewayType["liveTurn"]>;
+
+  stubTurn(gateway, (threadId, hooks, events) => {
+    hooks.onTurnStart?.(threadId, undefined);
+    events.onTaskActivity?.({ kind: "plan", tasks: [{ id: "1", title: "scout", status: "running" }] });
+    events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "running", subagentType: "general-purpose" } });
+    // A tool reporting its own phases must not evict the session's plan.
+    events.onTaskActivity?.({ kind: "plan", scope: "call-7", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] });
+    // An incremental agent update merges rather than replacing the row.
+    events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "completed", usage: { totalTokens: 900 } } });
+    live = gateway.liveTurn(threadId);
+  });
+
+  await send(gateway, "go");
+
+  assert.deepEqual(live?.tasks.plan.map((task) => task.title), ["scout", "fan out"]);
+  assert.deepEqual(live?.tasks.agents, [
+    { id: "a1", title: "reader", status: "completed", subagentType: "general-purpose", usage: { totalTokens: 900 } },
+  ]);
+  // One broadcast per change, each carrying the whole board — the last one is
+  // exactly what the catch-up endpoint would serve.
+  assert.equal(broadcasts.length, 4);
+  assert.deepEqual(broadcasts.at(-1), { plan: live?.tasks.plan, agents: live?.tasks.agents });
+});
+
+test("a turn that ends takes its board with it", async () => {
+  // The board belongs to the running turn; the next one starts from nothing.
+  const gateway = new Gateway(config as never);
+  stubTurn(gateway, (threadId, hooks, events) => {
+    hooks.onTurnStart?.(threadId, undefined);
+    events.onTaskActivity?.({ kind: "plan", tasks: [{ id: "1", title: "scout", status: "running" }] });
+    hooks.onTurnEnd?.(threadId);
+  });
+  await send(gateway, "go");
+  const thread = gateway.threads.current("telegram:main:-1001:topic:7");
+  assert.equal(gateway.liveTurn(thread!.id), undefined);
+});

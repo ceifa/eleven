@@ -71,9 +71,15 @@ Consequences:
   renders them unchanged. Eleven learns nothing about any specific tool.
 - Ids must be namespaced by the emitter (`<toolCallId>:<n>`) so a tool's rows
   cannot collide with Claude's task ids inside the same turn.
-- The dashboard currently receives `onToolCall` but not task activity
-  (`src/gateway.ts:196,205` — only the Telegram channel subscribes). Worth
-  wiring at the same time; the event is already provider-neutral.
+- The dashboard receives `onToolCall` but not task activity — only the Telegram
+  channel subscribes. Wired at the same time: the gateway folds the events into
+  a board (`TaskActivityBoard`) and broadcasts *the whole board*, which is also
+  what the catch-up endpoint serves — so a page that connects mid-turn and one
+  that watched from the start agree without the client replaying anything.
+  Subagent rows are clickable, showing what the runtime reported for that agent
+  (type, last tool, tokens, tool calls, duration, summary). There is no
+  per-agent provider request to link to: a nested runtime drives its own tool
+  loop, so those calls never reach eleven's request log, and the panel says so.
 
 Cost: ~15 lines in eleven, ~30 in the workflow extension — the engine already
 tracks phases, labels, agent count and token usage (`engine.ts`), it just

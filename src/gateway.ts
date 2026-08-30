@@ -18,9 +18,14 @@ import { summarizeToolArgs } from "./util.ts";
 import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 import { deleteTaskStore, taskStore } from "./agent/task-store.ts";
+import { TaskActivityBoard, type TaskActivityItem } from "./agent/task-activity.ts";
 import { forgetTaskTools, taskTools } from "./agent/task-tools.ts";
 
 const log = logger("gateway");
+
+/** The board's two lists, as sent over the wire. */
+const taskView = (live: LiveTurn) => ({ tasks: { plan: live.tasks.plan, agents: live.tasks.agents } });
+
 const DEFAULT_IDLE_DAYS = 7;
 const DEFAULT_RETENTION_DAYS = 30;
 const GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -55,6 +60,17 @@ export interface LiveTurn {
   items: LiveItem[];
   /** Streamed characters kept so far, against LIVE_TEXT_MAX_CHARS. */
   chars: number;
+  /** The turn's plan and subagents. Unlike `items` this is state, not a log:
+   *  a page opened mid-turn needs the board as it stands, not the events that
+   *  built it — so the whole board is what gets broadcast and served. */
+  tasks: TaskActivityBoard;
+}
+
+/** The live turn as the dashboard consumes it (a board is not JSON on its own). */
+export interface LiveTurnView {
+  startedAt: number;
+  items: LiveItem[];
+  tasks: { plan: TaskActivityItem[]; agents: TaskActivityItem[] };
 }
 
 export interface IncomingMessage {
@@ -108,7 +124,7 @@ export class Gateway extends EventEmitter {
       // handle() opens the record when the message arrives, so the turn already
       // has the message that started it; only a turn nobody opened one for
       // (a woken interrupted turn) starts from scratch here.
-      if (!this.liveTurns.has(threadId)) this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0 });
+      if (!this.liveTurns.has(threadId)) this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0, tasks: new TaskActivityBoard() });
       // Queued messages run back to back on the same thread: this is the only
       // point where a watcher can tell one turn's output from the next one's.
       this.emit("turn-start", { threadId });
@@ -161,7 +177,7 @@ export class Gateway extends EventEmitter {
     // thread's first turn that record is the only place the message exists —
     // pi keeps a brand-new session in memory until the model's first reply, so
     // there is no transcript file for a dashboard to read until the turn ends.
-    if (!this.liveTurns.has(thread.id)) this.liveTurns.set(thread.id, { startedAt: Date.now(), items: [], chars: 0 });
+    if (!this.liveTurns.has(thread.id)) this.liveTurns.set(thread.id, { startedAt: Date.now(), items: [], chars: 0, tasks: new TaskActivityBoard() });
     this.pushLive(thread.id, { kind: "message", role: "user", text: incoming.text, at: Date.now() });
     this.emit("thread-activity", { thread, direction: "in", text: incoming.text });
 
@@ -204,9 +220,15 @@ export class Gateway extends EventEmitter {
         this.pushLive(thread.id, { kind: "tool", id, name, args, summary });
         this.emit("tool-call", { threadId: thread.id, id, name, args, summary });
       },
+      // Broadcast the folded board rather than the raw event: a page that
+      // connects mid-turn gets the same shape from the catch-up endpoint, so
+      // the client never has to replay events to know what the plan looks like.
       onTaskActivity: (activity) => {
         incoming.events?.onTaskActivity?.(activity);
-        this.emit("task-activity", { threadId: thread.id, activity });
+        const live = this.liveTurns.get(thread.id);
+        if (!live) return;
+        live.tasks.apply(activity);
+        this.emit("task-activity", { threadId: thread.id, ...taskView(live) });
       },
     };
 
@@ -322,9 +344,11 @@ export class Gateway extends EventEmitter {
     return this.runner.isRunning(id);
   }
 
-  /** Activity of the thread's running turn, if one is in flight. */
-  liveTurn(id: string): LiveTurn | undefined {
-    return this.liveTurns.get(id);
+  /** Activity of the thread's running turn, if one is in flight, in the shape
+   *  the dashboard consumes (the board is a class, not JSON). */
+  liveTurn(id: string): LiveTurnView | undefined {
+    const live = this.liveTurns.get(id);
+    return live ? { startedAt: live.startedAt, items: live.items, ...taskView(live) } : undefined;
   }
 
   /** Append to the running turn's live record, oldest entries falling off first

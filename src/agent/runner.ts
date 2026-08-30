@@ -33,6 +33,7 @@ import {
   type TurnErrorEntryData,
 } from "../threads/reader.ts";
 import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
+import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 import type { TaskActivityEvent } from "./task-activity.ts";
@@ -722,29 +723,26 @@ export class Runner {
 
     // Workspace extension tools (workflow, etc.) are Eleven-owned capabilities
     // just like channel tools. Keep Claude builtins native, but expose every
-    // non-Pi tool through the isolated MCP bridge with its bound executor.
-    const customNames = session.getAllTools()
-      .map((tool) => tool.name)
-      .filter((name) => !(PI_BUILTIN_TOOLS as readonly string[]).includes(name));
+    // Eleven-owned tool through the isolated MCP bridge with its bound executor.
+    // Deriving this from the session registry instead would sweep up the pi
+    // builtins pi registers but leaves inactive (powershell, grep/find/ls) and
+    // switch them on.
+    const customNames = elevenOwnedTools(extensionToolNames, (request.customTools ?? []).map((tool) => tool.name));
     registerClaudeSession(session.sessionId, {
       cwd: request.workspacePath,
       workspaceTools: request.tools,
       customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
     });
 
-    // The workspace-wide active set (pi builtins the workspace allows +
-    // extension/custom tools). A candidate's allowlist only ever gates the four
-    // core capabilities inside it — extension and channel tools stay on.
-    const baseActive = [...new Set([...session.getActiveToolNames(), ...customNames])];
+    // What pi activated on its own (its coding default: read/bash/edit/write),
+    // before any policy narrows it.
+    const piActive = session.getActiveToolNames();
     // Close over just this field: the closure lives as long as the warm
     // session, and capturing `request` would pin the turn's text and images.
     const workspaceTools = request.tools;
     const applyToolPolicy = (entryTools?: WorkspaceTool[]) => {
       const policy = intersectTools(workspaceTools, entryTools);
-      const allowed = new Set<string>(policy ?? PI_BUILTIN_TOOLS);
-      session.setActiveToolsByName(
-        baseActive.filter((name) => !(PI_BUILTIN_TOOLS as readonly string[]).includes(name) || allowed.has(name)),
-      );
+      session.setActiveToolsByName(activeToolNames(piActive, customNames, policy));
       setClaudeWorkspaceTools(session.sessionId, policy);
     };
     applyToolPolicy(initial.entry.tools);

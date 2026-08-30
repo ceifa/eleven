@@ -206,31 +206,18 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return conversationIdentity(sessionKey, channels);
   }
 
-  /** The scopes a Telegram conversation is configured under — the owner being
-   * the group, or the person when the conversation is a DM. */
-  function channelScopes(sessionKey: string) {
+  /** The model scopes a Telegram conversation runs under, most specific first
+   * (topic, then owner — the group, or the person when it is a DM). Read-only
+   * here: what the detail view reports as the thread's effective model. Turns in
+   * these threads are the channel's own, and it resolves this itself. */
+  function channelModelScopes(sessionKey: string) {
     const target = parseTelegramSessionKey(sessionKey);
-    if (!target) return {};
+    if (!target) return [];
     const channel = config.channels().find((entry) => entry.channel.name === target.channel)?.channel;
     const key = String(target.chatId);
     const owner = target.chatId > 0 ? channel?.users?.[key] : channel?.groups?.[key];
     const topic = target.topic !== undefined ? owner?.topics?.[String(target.topic)] : undefined;
-    return { owner, topic };
-  }
-
-  /** Its model scopes, most specific first — a topic's settings beat its owner's. */
-  function channelModelScopes(sessionKey: string) {
-    const { owner, topic } = channelScopes(sessionKey);
-    return owner || topic ? [topic, owner] : [];
-  }
-
-  /** Its prompt appends, outermost first (owner, then topic) — the same order a
-   * Telegram turn builds them in. These are instructions about the conversation
-   * ("in this group we work on the repo named after the topic"), not about the
-   * channel, so a turn typed here needs them exactly as much as one sent there. */
-  function channelAppends(sessionKey: string): string[] {
-    const { owner, topic } = channelScopes(sessionKey);
-    return [owner?.appendSystemPrompt, topic?.appendSystemPrompt].filter((append): append is string => !!append);
+    return [topic, owner];
   }
 
   /** A thread as the API describes it. `sessionFile` is an absolute path nobody
@@ -240,19 +227,40 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     const current = gateway.threads.isCurrent(thread.id);
     const running = gateway.isThreadRunning(thread.id);
     const identity = identityOf(thread.sessionKey);
+    const source = thread.sessionKey.split(":", 1)[0];
     return {
       ...thread,
       sessionFile: detail ? thread.sessionFile : undefined,
       current,
       running,
       state: running ? "running" : current ? "current" : "old",
-      source: thread.sessionKey.split(":", 1)[0],
+      source,
+      // Whether a turn may be typed into this thread from here. See composable().
+      composable: composable(thread.sessionKey),
       conversation: identity.label,
       // What the list puts on the card: the topic, group or person, which is
       // how you actually recognize a thread — the label is the tooltip.
       conversationName: identity.name,
       conversationContext: identity.context,
     };
+  }
+
+  /**
+   * Whether the composer may run a turn in this thread.
+   *
+   * A thread belongs to the conversation it was born in. The dashboard's turns
+   * are not channel turns: they carry no channel tool and nothing delivers them,
+   * so a reply typed into a Telegram thread from here lands in the transcript
+   * and never reaches the chat — a question and an answer that the person on the
+   * other end cannot see, in the middle of a conversation they are still
+   * reading. The dashboard's own threads (and the CLI's, whose caller is long
+   * gone) have no such other end.
+   *
+   * Reading, stopping a runaway turn, rotating the conversation and delivering
+   * literal text (/send, which does reach the chat) all stay open.
+   */
+  function composable(sessionKey: string): boolean {
+    return !(CHANNEL_TYPES as readonly string[]).includes(sessionKey.split(":", 1)[0]);
   }
 
   async function listThreadViews(url: URL) {
@@ -586,6 +594,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
+        if (!composable(thread.sessionKey)) {
+          throw new ApiError(409, `this thread lives in ${identityOf(thread.sessionKey).label} — answer it there, or start a thread of your own here`);
+        }
         const request = (await body(req)) as { text: string; attachments?: unknown };
         const { text, images } = await composeInbound(request.text, request.attachments);
         if (!text.trim() && !images.length) throw new Error("message is required");
@@ -678,13 +689,6 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         sessionKey,
         text: message,
         images: images.length ? images : undefined,
-        // A thread lives in a conversation, not in the composer that types into
-        // it: a message sent from here into a Telegram topic must run on the
-        // model that topic is configured with — the same one the detail view
-        // reports as this thread's effective model — and under the instructions
-        // that conversation carries.
-        modelScopes: channelModelScopes(sessionKey),
-        appends: channelAppends(sessionKey),
         runtime: {
           channel: source,
           conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",

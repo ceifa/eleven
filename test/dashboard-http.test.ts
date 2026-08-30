@@ -58,7 +58,7 @@ interface Spy {
   discarded: string[];
   fresh: { id: string; sessionKey: string; workspace: string };
   /** Every turn the dashboard asked the gateway to run. */
-  handled: { sessionKey: string; text: string; modelScopes?: unknown[] }[];
+  handled: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[] }[];
   /** A thread that lives in a Telegram topic — the composer is not its home. */
   topic: { id: string; sessionKey: string; workspace: string };
 }
@@ -91,9 +91,15 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     lastActivityAt: 1_500,
     title: "a topic thread",
   };
-  const topicScope = { title: "eleven", models: [{ model: "claude-code/opus" }] };
+  const topicScope = { title: "eleven", appendSystemPrompt: "this one is TypeScript", models: [{ model: "claude-code/opus" }] };
+  const groupScope = {
+    title: "Sesh",
+    appendSystemPrompt: "work on the repo named after the topic",
+    models: [{ model: "openai-codex/gpt-5" }],
+    topics: { "7": topicScope },
+  };
   const port = await freePort();
-  const channel = { type: "telegram", name: "main", token: "t", groups: { "-1001": { title: "Sesh", topics: { "7": topicScope } } } };
+  const channel = { type: "telegram", name: "main", token: "t", groups: { "-1001": groupScope } };
   const config = {
     raw: { workspaces: { agent: { path: dir } }, dashboard: { host: "127.0.0.1", port } },
     resolved: { workspaces: { agent: { path: dir, channels: [channel] } }, dashboard: { host: "127.0.0.1", port }, models: [] },
@@ -112,7 +118,7 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
   };
   const gateway = {
     on: () => {},
-    handle: async (incoming: { sessionKey: string; text: string; modelScopes?: unknown[] }) => {
+    handle: async (incoming: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[] }) => {
       spy.handled.push(incoming);
       return undefined;
     },
@@ -261,18 +267,20 @@ test("a workspace's skills come with its detail read — what the thread's skill
   });
 });
 
-test("a message typed into a Telegram topic's thread runs with that topic's models", async () => {
+test("a message typed into a Telegram topic's thread runs under that conversation's settings", async () => {
   await withDashboard(async (base, _thread, spy) => {
-    // Regression: the composer ran every turn on the workspace's own sequence,
-    // so a thread in a topic pinned to a specific model answered on another one
-    // — the very model the thread's detail view was reporting it would use.
+    // Regression: the composer ran every turn on the workspace's own sequence
+    // and prompt, so a thread in a topic pinned to a model answered on another
+    // one — the very model the thread's detail view was reporting it would use
+    // — and without the instructions the group carries ("work on the repo named
+    // after the topic"), which is what tells the agent where it is.
     const response = await post(`${base}/api/threads/${spy.topic.id}/message`, { text: "ship it" });
     assert.equal(response.status, 202);
     assert.equal(spy.handled.length, 1);
-    assert.deepEqual(spy.handled[0].modelScopes, [
-      { title: "eleven", models: [{ model: "claude-code/opus" }] },
-      { title: "Sesh", topics: { "7": { title: "eleven", models: [{ model: "claude-code/opus" }] } } },
-    ]);
+    // Most specific first: the topic's model sequence beats the group's.
+    assert.deepEqual(spy.handled[0].modelScopes?.map((scope) => (scope as { title?: string } | undefined)?.title), ["eleven", "Sesh"]);
+    // Outermost first: the group sets the scene, the topic narrows it.
+    assert.deepEqual(spy.handled[0].appends, ["work on the repo named after the topic", "this one is TypeScript"]);
   });
 });
 
@@ -280,6 +288,7 @@ test("a thread with no channel of its own carries no scopes — the workspace de
   await withDashboard(async (base, thread, spy) => {
     await post(`${base}/api/threads/${thread.id}/message`, { text: "hello" });
     assert.deepEqual(spy.handled[0].modelScopes, []);
+    assert.deepEqual(spy.handled[0].appends, []);
   });
 });
 

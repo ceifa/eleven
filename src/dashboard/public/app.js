@@ -3035,17 +3035,15 @@ async function viewUsage() {
   view.replaceChildren(
     pageTitle("Usage"),
     h("div", { class: "flex flex-col gap-5" },
-      h("div", { class: "flex items-center gap-3 flex-wrap" },
-        h("p", { class: "text-sm opacity-60", style: "max-width: 38rem" },
-          "Every token eleven has been billed for, read off the transcripts on disk."),
-        h("div", { class: "join ml-auto" }, USAGE_WINDOWS.map((option) =>
-          h("button", {
-            class: `btn btn-sm join-item${option === days ? " btn-primary" : ""}`,
-            onclick: () => { prefs.set("usage.days", String(option)); void render(); },
-          }, `${option}d`))),
-      ),
+      // No blurb: the tiles name themselves, and the line at the bottom says
+      // where the numbers come from.
+      h("div", { class: "join self-start ml-auto" }, USAGE_WINDOWS.map((option) =>
+        h("button", {
+          class: `btn btn-sm join-item${option === days ? " btn-primary" : ""}`,
+          onclick: () => { prefs.set("usage.days", String(option)); void render(); },
+        }, `${option}d`))),
       report.total.responses === 0
-        ? h("div", { class: "alert" }, "Nothing billed in this window — no turns ran, or their session files have been collected.")
+        ? h("div", { class: "alert" }, "Nothing billed in this window. No turns ran, or their transcripts are gone.")
         : h("div", { class: "flex flex-col gap-5" },
             usageTiles(report),
             coldCacheNote(report),
@@ -3069,13 +3067,13 @@ function usageTiles(report) {
     usageTile("Prompt", fmtTokens(prompt),
       `${fmtTokens(total.input)} fresh · ${fmtTokens(total.cacheRead)} cached · ${fmtTokens(total.cacheWrite)} written`),
     usageTile("Output", fmtTokens(total.output),
-      `${fmtTokens(total.reasoning)} of it reasoning · ${total.responses.toLocaleString()} responses`),
-    usageTile("Cache hit", fmtPercent(hit), "share of prompt tokens served from cache",
+      `${fmtTokens(total.reasoning)} reasoning · ${total.responses.toLocaleString()} responses`),
+    usageTile("Cache hit", fmtPercent(hit), "prompt tokens served from cache",
       hit >= 0.9 ? "good" : hit >= 0.7 ? "warn" : "bad"),
-    // Whether this is money or merely weight depends on how the providers are
-    // paid for, which eleven has no way to know — so it says what the number
-    // is and lets the reader place it.
-    usageTile("List price", fmtMoney(total.cost), "at each provider's published rates — the bill on a pay-per-use key, an estimate on a subscription"),
+    // Whether this is money or only weight depends on how the providers are
+    // paid for, and eleven has no way to know. So it says what the number is
+    // and lets the reader place it.
+    usageTile("List price", fmtMoney(total.cost), "at each provider's published rates"),
   );
 }
 
@@ -3095,13 +3093,13 @@ function coldCacheNote(report) {
   const prompt = promptOf(total);
   const share = prompt ? waste.coldTokens / prompt : 0;
   const causes = [
-    waste.idleResponses ? `${waste.idleResponses} after an idle gap over 5 min` : null,
-    waste.modelSwitchResponses ? `${waste.modelSwitchResponses} after a model switch` : null,
+    waste.idleResponses ? `${waste.idleResponses} idle over 5 min` : null,
+    waste.modelSwitchResponses ? `${waste.modelSwitchResponses} on a model switch` : null,
   ].filter(Boolean).join(", ");
   return h("div", { class: "text-sm opacity-60" },
-    h("span", { class: share > 0.1 ? "text-warning" : "" }, `${fmtTokens(waste.coldTokens)} prompt tokens came in cold`),
-    ` (${fmtPercent(share)} of all prompt) across ${waste.coldResponses} responses — ${causes}. `,
-    info("A response is cold when the one before it is older than the prompt cache's five-minute TTL, or ran on a different model. Turns minutes apart are normal for a chat agent, so part of this is the price of the shape rather than a bug."),
+    h("span", { class: share > 0.1 ? "text-warning" : "" }, `${fmtTokens(waste.coldTokens)} cold prompt tokens`),
+    ` (${fmtPercent(share)}) over ${waste.coldResponses} responses: ${causes}. `,
+    info("Cold means the response before it was over 5 minutes old, past the cache TTL, or ran on another model. Only those two causes are counted, so this is a floor."),
   );
 }
 
@@ -3116,7 +3114,7 @@ function usageChartSection(report, series) {
         h("div", {
           class: "usage-stack",
           style: `height:${(tokensOf(day.total) / max) * 100}%`,
-          title: `${day.day} — ${fmtTokens(tokensOf(day.total))} tokens · ${fmtMoney(day.total.cost)}`,
+          title: `${day.day} · ${fmtTokens(tokensOf(day.total))} tokens · ${fmtMoney(day.total.cost)}`,
         }, series.map((model, rank) => {
           const bucket = day.byModel[model];
           if (!bucket) return null;
@@ -3153,7 +3151,7 @@ function usageModelsTable(report, series) {
     )),
     report.compaction.responses
       ? h("div", { class: "text-xs opacity-40" },
-          `The compaction row is ${report.compaction.responses} summarization calls — what the conversations paid to keep talking.`)
+          `compaction: ${report.compaction.responses} summarization calls the threads paid to keep going.`)
       : null,
   );
 }
@@ -3208,15 +3206,13 @@ function usageQuotaSection() {
  *  deletes session files on a retention timer, and what it took with it cannot
  *  be counted. Saying so beats a chart that quietly flattens. */
 function usageCoverage(report, days) {
-  const parts = [`${report.threads} thread${report.threads === 1 ? "" : "s"} in the last ${days} days`];
+  const parts = [`${report.threads} thread${report.threads === 1 ? "" : "s"}`, `${days} days`];
   if (report.oldestAt !== undefined) {
     const oldest = new Date(report.oldestAt).toLocaleDateString();
-    parts.push(report.oldestAt > report.since
-      ? `oldest transcript still on disk is from ${oldest} — anything older was collected`
-      : `transcripts on disk reach back to ${oldest}`);
+    parts.push(report.oldestAt > report.since ? `on disk since ${oldest}, older collected` : `on disk since ${oldest}`);
   }
   return h("div", { class: "text-xs opacity-40", title: `window starts ${new Date(report.since).toLocaleString()}` },
-    `${parts.join(" · ")}.`);
+    parts.join(" · "));
 }
 
 /* ---------- settings view ---------- */

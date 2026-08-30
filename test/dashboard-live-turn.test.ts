@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { elapsed, liveStatus, shownLive, transcriptRows } from "../src/dashboard/public/live-turn.js";
+import { agentDetail, agentMeta, elapsed, hasTasks, liveStatus, shownLive, taskIcon, transcriptRows } from "../src/dashboard/public/live-turn.js";
 
 /* The bug these exist for: a message sent while a turn was running rendered
    above everything that turn had streamed. The transcript region sits above the
@@ -165,4 +165,55 @@ test("the clock is m:ss from the turn's own start", () => {
   assert.equal(elapsed(0, 3_723_000), "62:03");
   // A clock that has run backwards (a corrected system time) says zero, not "-1:59".
   assert.equal(elapsed(10_000, 0), "0:00");
+});
+
+/* The turn's plan and subagents. The board is state, not a log: the daemon
+   folds every event and sends the whole thing, so the page only has to draw it.
+   These cover the drawing rules that decide whether it reads at a glance. */
+
+test("status is the icon, before anyone reads a title", () => {
+  assert.equal(taskIcon({ status: "running" }), "◐");
+  assert.equal(taskIcon({ status: "completed" }), "✓");
+  assert.equal(taskIcon({ status: "failed" }), "✕");
+  assert.equal(taskIcon({ status: "stopped" }), "◼");
+  assert.equal(taskIcon({ status: "pending" }), "○");
+  // A blocked row is not the same as one merely waiting its turn.
+  assert.equal(taskIcon({ status: "pending", blockedBy: ["1"] }), "⏸");
+});
+
+test("a running agent says what it is doing; a finished one says what it cost", () => {
+  assert.deepEqual(
+    agentMeta({ title: "reader", status: "running", lastToolName: "Grep", usage: { totalTokens: 1200 } }),
+    ["Grep", "1.2k tok"],
+  );
+  assert.deepEqual(
+    agentMeta({ title: "reader", status: "completed", lastToolName: "Grep", usage: { totalTokens: 15_000, durationMs: 7000 }, summary: "found two" }),
+    ["15k tok", "7s", "found two"],
+  );
+});
+
+test("a summary that just repeats the title is not shown twice", () => {
+  assert.deepEqual(agentMeta({ title: "Review reuse", status: "completed", summary: "  review reuse " }), []);
+});
+
+test("the detail panel reports only what the runtime actually said", () => {
+  const rows = agentDetail({
+    title: "reader", status: "completed", subagentType: "general-purpose",
+    usage: { totalTokens: 900, toolUses: 3, durationMs: 5000 },
+  });
+  assert.deepEqual(rows, [
+    ["status", "completed"],
+    ["type", "general-purpose"],
+    ["tokens", "900 tok"],
+    ["tool calls", "3"],
+    ["duration", "5s"],
+  ]);
+  // No usage reported means no invented zeroes.
+  assert.deepEqual(agentDetail({ title: "x", status: "running" }), [["status", "running"]]);
+});
+
+test("an empty board earns no region on screen", () => {
+  assert.equal(hasTasks(undefined), false);
+  assert.equal(hasTasks({ plan: [], agents: [] }), false);
+  assert.equal(hasTasks({ plan: [], agents: [{ id: "a", title: "t", status: "running" }] }), true);
 });

@@ -1,7 +1,7 @@
 import { deepStrictEqual, match, ok, strictEqual } from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { Api } from "grammy";
-import { readToolActivity, type TaskActivityEvent } from "../src/agent/task-activity.ts";
+import { readToolActivity, TaskActivityBoard, type TaskActivityEvent } from "../src/agent/task-activity.ts";
 import { TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
 const wrap = (activity: unknown) => ({ content: [{ type: "text", text: "working" }], details: { activity } });
@@ -109,5 +109,46 @@ describe("TelegramTaskProgress plan scoping", () => {
     match(text, /session task/);
     match(text, /second phase/);
     strictEqual(/first phase/.test(text), false);
+  });
+});
+
+describe("TaskActivityBoard", () => {
+  test("agent events merge into the row they name", () => {
+    // The roster reports incrementally — a progress event carries the last tool
+    // but not the type it started with, and losing that would blank the row.
+    const board = new TaskActivityBoard();
+    board.apply({ kind: "agent", task: { id: "a1", title: "reader", status: "running", subagentType: "general-purpose" } });
+    board.apply({ kind: "agent", task: { id: "a1", title: "reader", status: "running", lastToolName: "Grep" } });
+    deepStrictEqual(board.agents, [
+      { id: "a1", title: "reader", status: "running", subagentType: "general-purpose", lastToolName: "Grep" },
+    ]);
+  });
+
+  test("a plan snapshot replaces only its own scope", () => {
+    const board = new TaskActivityBoard();
+    board.apply({ kind: "plan", tasks: [{ id: "1", title: "session", status: "running" }] });
+    board.apply({ kind: "plan", scope: "call-7", tasks: [{ id: "call-7:p1", title: "phase one", status: "running" }] });
+    board.apply({ kind: "plan", scope: "call-7", tasks: [{ id: "call-7:p2", title: "phase two", status: "running" }] });
+    deepStrictEqual(board.plan.map((task) => task.title), ["session", "phase two"]);
+  });
+
+  test("a turn that stops terminates the rows still marked running", () => {
+    // Nobody is left to report them, and a spinner that never resolves is worse
+    // than a row that says it was cut off.
+    const board = new TaskActivityBoard();
+    board.apply({ kind: "agent", task: { id: "a1", title: "one", status: "running" } });
+    board.apply({ kind: "agent", task: { id: "a2", title: "two", status: "completed" } });
+    board.settle("stopped");
+    deepStrictEqual(board.agents.map((task) => task.status), ["stopped", "completed"]);
+  });
+
+  test("an untouched board is empty", () => {
+    const board = new TaskActivityBoard();
+    strictEqual(board.empty, true);
+    board.apply({ kind: "plan", tasks: [] });
+    // An explicit empty plan is still a report, but there is nothing to draw.
+    strictEqual(board.empty, true);
+    board.apply({ kind: "plan", tasks: [{ id: "1", title: "t", status: "pending" }] });
+    strictEqual(board.empty, false);
   });
 });

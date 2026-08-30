@@ -105,6 +105,28 @@ export interface BotHandle {
   stop(): Promise<void>;
 }
 
+/** Remembers handled updates so a redelivery doesn't run the turn twice.
+ *
+ * Keyed by message id — except an ephemeral command ("only visible to the bot")
+ * arrives with `message_id: 0`, because it never becomes a message in the chat.
+ * Every one of them in a chat then looks like the same message, so keying on it
+ * swallowed all but the first for the whole TTL: after any command, /stop and
+ * /new silently did nothing for 20 minutes. Those key on the update id instead,
+ * which is unique per update and identical when Telegram replays one. */
+export function createSeenMessages(now: () => number = Date.now) {
+  // Insertion-ordered so eviction drops the oldest.
+  const seen = new Map<string, number>();
+  return function alreadyHandled(chatId: number, messageId: number, updateId: number): boolean {
+    const key = messageId ? `${chatId}:${messageId}` : `${chatId}:update:${updateId}`;
+    const at = seen.get(key);
+    if (at !== undefined && now() - at < SEEN_MESSAGE_TTL_MS) return true;
+    seen.delete(key);
+    seen.set(key, now());
+    if (seen.size > MAX_SEEN_MESSAGES) seen.delete(seen.keys().next().value!);
+    return false;
+  };
+}
+
 export function startTelegramBot(name: string, token: string, deps: BotDeps): BotHandle {
   const log = logger(`telegram/${name}`);
   const bot = new Bot(token);
@@ -204,17 +226,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   // takes to run that turn again.
   const failovers = new FailoverOffers<{ target: Target; text: string; images: InboundImage[] }>();
 
-  // Handled (chat, message_id) pairs — insertion-ordered so eviction drops the oldest.
-  const seenMessages = new Map<string, number>();
-  function alreadyHandled(chatId: number, messageId: number): boolean {
-    const key = `${chatId}:${messageId}`;
-    const at = seenMessages.get(key);
-    if (at !== undefined && Date.now() - at < SEEN_MESSAGE_TTL_MS) return true;
-    seenMessages.delete(key);
-    seenMessages.set(key, Date.now());
-    if (seenMessages.size > MAX_SEEN_MESSAGES) seenMessages.delete(seenMessages.keys().next().value!);
-    return false;
-  }
+  const alreadyHandled = createSeenMessages();
 
   bot.api.config.use(apiThrottler());
   // Watchdog heartbeat: note every completed getUpdates round-trip.
@@ -281,7 +293,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const message = ctx.message;
     const config = deps.botConfig();
     if (!message || !config || !message.from || message.from.is_bot) return;
-    if (alreadyHandled(ctx.chat!.id, message.message_id)) return;
+    if (alreadyHandled(ctx.chat!.id, message.message_id, ctx.update.update_id)) return;
 
     if (ctx.chat!.type !== "private") maintainGroupRegistry(ctx, config);
 

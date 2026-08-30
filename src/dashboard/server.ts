@@ -16,6 +16,7 @@ import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
 import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
+import { addSample, buildUsageReport, cacheWasteOf, emptyBucket, promptTokens, readSessionUsage, startOfLocalDay } from "../threads/usage.ts";
 import { conversationIdentity } from "../threads/conversation.ts";
 import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
@@ -48,6 +49,12 @@ const SEARCH_THREAD_LIMIT = 40;
 const SEARCH_SNIPPETS = 3;
 const SEARCH_SCAN_LIMIT = 400;
 const SEARCH_BATCH = 8;
+// Token accounting bounds. The default window is a month because that is also
+// roughly how long session files survive gc; the ceiling is only there so a
+// hand-typed query can't ask for a window arithmetic would overflow.
+const DEFAULT_USAGE_DAYS = 30;
+const MAX_USAGE_DAYS = 3650;
+const USAGE_THREAD_LIMIT = 20;
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -495,9 +502,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
-        const [timeline, requests] = await Promise.all([
+        const [timeline, requests, samples] = await Promise.all([
           thread.sessionFile ? readThreadTimeline(thread.sessionFile) : [],
           gateway.requests.list(thread.id),
+          thread.sessionFile ? readSessionUsage(thread.sessionFile) : [],
         ]);
         const messages = timeline.flatMap((item) => (item.kind === "message" ? [item] : []));
         const workspace = config.resolved.workspaces[thread.workspace];
@@ -513,6 +521,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
             lastModel: requests.at(-1)?.model,
             messages: messages.length,
             turns: messages.filter((message) => message.role === "user").length,
+            usage: threadUsage(samples, effectiveModel),
           },
           timeline,
           requests,
@@ -645,6 +654,29 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const providers = [...new Set(config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
         return send(200, await collectProviderUsage(providers));
       }
+      // What the quotas above were spent on. Read off the session transcripts
+      // every time — a full history is about a second of scanning, so there is
+      // no index to keep honest. Only what is still on disk can be counted:
+      // gc deletes session files on a retention timer, and `oldestAt` says
+      // where the data actually begins.
+      if (method === "GET" && path === "/usage/tokens") {
+        const raw = url.searchParams.get("days");
+        const days = raw === null ? DEFAULT_USAGE_DAYS : Number(raw);
+        if (!Number.isInteger(days) || days <= 0 || days > MAX_USAGE_DAYS) throw new ApiError(400, "days must be an integer between 1 and 3650");
+        const report = await buildUsageReport(
+          gateway.threads.list().map((thread) => ({
+            id: thread.id,
+            sessionFile: thread.sessionFile,
+            title: thread.title,
+            workspace: thread.workspace,
+            conversation: identityOf(thread.sessionKey).name,
+          })),
+          startOfLocalDay(Date.now(), days - 1),
+        );
+        // The long tail of threads is dozens of rows nobody reads; the total
+        // above already counts them.
+        return send(200, { ...report, days, byThread: report.byThread.slice(0, USAGE_THREAD_LIMIT) });
+      }
       if (method === "GET" && path === "/providers") {
         const configured = new Set(
           config.resolved.models.map((entry) => entry.model.split("/")[0]).filter(Boolean),
@@ -726,6 +758,27 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         server.close(() => resolve());
       }),
   };
+}
+
+/**
+ * What one conversation has cost so far, plus how full its context window was
+ * on the last response — the number worth watching live, because it says how
+ * close the thread is to a compaction, which is itself a paid call.
+ *
+ * That reading is only offered when the last response was one request. A nested
+ * runtime persists one row per *turn*, summing every request its private tool
+ * loop made, and a sum of prompts is not the size of a window.
+ */
+function threadUsage(samples: Awaited<ReturnType<typeof readSessionUsage>>, effectiveModel: string | undefined) {
+  if (!samples.length) return undefined;
+  const bucket = emptyBucket();
+  for (const sample of samples) addSample(bucket, sample);
+  const last = samples[samples.length - 1];
+  // A compaction carries no model of its own, so fall back to the sequence's
+  // current head rather than reporting a window of unknown size.
+  const contextWindow = findModel(last.model || effectiveModel || "")?.contextWindow;
+  const fill = last.nested || !contextWindow ? undefined : { lastPromptTokens: promptTokens(last), contextWindow };
+  return { ...bucket, waste: cacheWasteOf(samples), lastAt: last.at, lastModel: last.model, ...fill };
 }
 
 /* ---------- HTTP delivery: caching + compression ---------- */

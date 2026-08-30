@@ -767,8 +767,13 @@ async function openThread(id) {
     state.pending = [];
   }
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
-  if (!data || seq !== openSeq) return;
+  if (!data || seq !== openSeq) return false;
   state.activeThread = data.thread;
+  // Keep the address bar on the thread actually open, so it can be reloaded,
+  // bookmarked or linked to from the Usage page. replaceState rather than
+  // assigning to location.hash: that would fire hashchange and rebuild the
+  // whole view underneath the thread we just fetched.
+  if (onThreadsView()) history.replaceState(null, "", `#/threads/${data.thread.id}`);
   // This read is fresher than the last list read — let it correct the halo (and
   // the stop button) for the thread being opened.
   setServerRunning(data.thread.id, data.thread.running);
@@ -792,6 +797,7 @@ async function openThread(id) {
   }
   renderThreadPane();
   renderThreadList();
+  return true;
 }
 
 // A pending bubble is redundant once the same message shows up in the
@@ -1064,6 +1070,7 @@ function threadHeader(thread) {
         h("span", { class: "text-warning shrink-0" }, thread.workspace),
         model ? h("span", { class: "meta-sep" }, "·") : null,
         model ? h("span", { class: "font-mono truncate", title: "model leading this thread" }, model) : null,
+        ...threadUsageMeta(thread.usage),
       ),
     ),
     h("div", { class: "thread-head-actions" },
@@ -1080,6 +1087,37 @@ function threadHeader(thread) {
       threadMenu(thread),
     ),
   );
+}
+
+/**
+ * What this conversation has burned, in the header where its model already is.
+ *
+ * The window figure is the one to watch: how full the context was on the last
+ * response, and so how close the thread is to a compaction — itself a paid
+ * call. The server only sends it when the last response really was one request,
+ * which rules out the runtimes that persist a whole tool loop as a single row.
+ */
+function threadUsageMeta(usage) {
+  if (!usage) return [];
+  const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+  const parts = [`${fmtTokens(prompt + usage.output)} tokens`];
+  if (prompt) parts.push(`${fmtPercent(usage.cacheRead / prompt)} cached`);
+  const fill = usage.contextWindow ? usage.lastPromptTokens / usage.contextWindow : undefined;
+  const nodes = [
+    h("span", { class: "meta-sep" }, "·"),
+    h("span", {
+      class: "shrink-0",
+      title: `${prompt.toLocaleString()} prompt + ${usage.output.toLocaleString()} output tokens · list price ${fmtMoney(usage.cost)}`,
+    }, parts.join(" · ")),
+  ];
+  if (fill !== undefined) {
+    nodes.push(h("span", { class: "meta-sep" }, "·"));
+    nodes.push(h("span", {
+      class: `shrink-0${fill >= 0.85 ? " text-error" : fill >= 0.6 ? " text-warning" : ""}`,
+      title: `last response carried ${usage.lastPromptTokens.toLocaleString()} of ${usage.contextWindow.toLocaleString()} context tokens`,
+    }, `${fmtPercent(fill)} window`));
+  }
+  return nodes;
 }
 
 function toggleRequests() {
@@ -2080,12 +2118,17 @@ async function viewThreads() {
     ),
   );
   renderThreadList();
+  // #/threads/<id> names a thread directly — a reload, a bookmark, a link from
+  // the Usage page. It wins over whatever was last open here.
+  const requested = location.hash.replace("#/", "").split("/")[1];
   // Arriving with nothing open means you came here to say something. The
   // launcher is the landing page, then — an empty pane whose only offer is a
   // button to the launcher was one click of ceremony in front of every session.
-  if (state.activeThread) {
+  if (requested || state.activeThread) {
     renderThreadPane();
-    openThread(state.activeThread.id);
+    // A link to a thread that has since been collected falls back to the
+    // launcher rather than to an empty pane.
+    if (!(await openThread(requested ?? state.activeThread.id))) newThreadDialog();
   } else {
     newThreadDialog();
   }
@@ -2940,6 +2983,225 @@ function providersSection() {
   );
 }
 
+/* ---------- usage view (what the quotas were spent on) ---------- */
+
+/** Windows the page offers. 90 days is deliberately past the default retention:
+ *  asking for it is how you find out how far back the files actually go. */
+const USAGE_WINDOWS = [7, 30, 90];
+/** How many models the chart gives a colour of their own. */
+const SERIES_COLORS = 5;
+
+const tokensOf = (bucket) => bucket.input + bucket.output + bucket.cacheRead + bucket.cacheWrite;
+const promptOf = (bucket) => bucket.input + bucket.cacheRead + bucket.cacheWrite;
+
+/** Token counts run to ten digits here, and nobody reads ten digits. */
+function fmtTokens(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return String(Math.round(n));
+}
+
+const fmtMoney = (n) => `$${n.toLocaleString("en-US", { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
+const fmtPercent = (ratio) => `${Math.round(ratio * 100)}%`;
+const modelLabel = (model) => model || "compaction";
+
+function usageDays() {
+  const stored = Number(prefs.get("usage.days", "30"));
+  return USAGE_WINDOWS.includes(stored) ? stored : 30;
+}
+
+async function viewUsage() {
+  const days = usageDays();
+  // /config is what the quota strip derives its provider list from, and it's
+  // cached — so switching windows costs one request, not two.
+  const [report, config] = await Promise.all([api.get(`/usage/tokens?days=${days}`), cachedGet("/config")]);
+  state.config = config;
+
+  // Chart and legend agree on colour by sharing one ordering: byModel arrives
+  // sorted by spend, so the biggest series is always series-0.
+  const series = report.byModel.map((entry) => entry.model);
+
+  view.replaceChildren(
+    pageTitle("Usage"),
+    h("div", { class: "flex flex-col gap-5" },
+      h("div", { class: "flex items-center gap-3 flex-wrap" },
+        h("p", { class: "text-sm opacity-60", style: "max-width: 38rem" },
+          "Every token eleven has been billed for, read off the transcripts on disk."),
+        h("div", { class: "join ml-auto" }, USAGE_WINDOWS.map((option) =>
+          h("button", {
+            class: `btn btn-sm join-item${option === days ? " btn-primary" : ""}`,
+            onclick: () => { prefs.set("usage.days", String(option)); void render(); },
+          }, `${option}d`))),
+      ),
+      report.total.responses === 0
+        ? h("div", { class: "alert" }, "Nothing billed in this window — no turns ran, or their session files have been collected.")
+        : h("div", { class: "flex flex-col gap-5" },
+            usageTiles(report),
+            coldCacheNote(report),
+            usageChartSection(report, series),
+            usageModelsTable(report, series),
+            usageThreadsTable(report),
+          ),
+      usageQuotaSection(),
+      usageCoverage(report, days),
+    ),
+  );
+  void loadUsage();
+}
+
+/** The four numbers worth having before any breakdown. */
+function usageTiles(report) {
+  const { total } = report;
+  const prompt = promptOf(total);
+  const hit = prompt ? total.cacheRead / prompt : 0;
+  return h("div", { class: "usage-tiles" },
+    usageTile("Prompt", fmtTokens(prompt),
+      `${fmtTokens(total.input)} fresh · ${fmtTokens(total.cacheRead)} cached · ${fmtTokens(total.cacheWrite)} written`),
+    usageTile("Output", fmtTokens(total.output),
+      `${fmtTokens(total.reasoning)} of it reasoning · ${total.responses.toLocaleString()} responses`),
+    usageTile("Cache hit", fmtPercent(hit), "share of prompt tokens served from cache",
+      hit >= 0.9 ? "good" : hit >= 0.7 ? "warn" : "bad"),
+    usageTile("List price", fmtMoney(total.cost), "at published API rates — you pay subscriptions, so this is weight, not spend"),
+  );
+}
+
+function usageTile(label, value, hint, tone) {
+  return h("div", { class: `usage-tile${tone ? ` is-${tone}` : ""}` },
+    h("div", { class: "text-xs dim-label" }, label),
+    h("div", { class: "usage-tile-value" }, value),
+    h("div", { class: "text-xs opacity-40" }, hint),
+  );
+}
+
+/** The one actionable line on the page: prompt tokens a warm cache would have
+ *  served, and what took the warmth away. */
+function coldCacheNote(report) {
+  const { waste, total } = report;
+  if (!waste.coldResponses) return null;
+  const prompt = promptOf(total);
+  const share = prompt ? waste.coldTokens / prompt : 0;
+  const causes = [
+    waste.idleResponses ? `${waste.idleResponses} after an idle gap over 5 min` : null,
+    waste.modelSwitchResponses ? `${waste.modelSwitchResponses} after a model switch` : null,
+  ].filter(Boolean).join(", ");
+  return h("div", { class: "text-sm opacity-60" },
+    h("span", { class: share > 0.1 ? "text-warning" : "" }, `${fmtTokens(waste.coldTokens)} prompt tokens came in cold`),
+    ` (${fmtPercent(share)} of all prompt) across ${waste.coldResponses} responses — ${causes}. `,
+    info("A response is cold when the one before it is older than the prompt cache's five-minute TTL, or ran on a different model. Turns minutes apart are normal for a chat agent, so part of this is the price of the shape rather than a bug."),
+  );
+}
+
+function usageChartSection(report, series) {
+  const max = Math.max(...report.byDay.map((day) => tokensOf(day.total)), 1);
+  // A label under every column is unreadable past a fortnight.
+  const step = Math.ceil(report.byDay.length / 12);
+  return h("div", { class: "flex flex-col gap-2" },
+    sectionLabel("Per day"),
+    h("div", { class: "usage-chart" }, report.byDay.map((day, index) =>
+      h("div", { class: "usage-col" },
+        h("div", {
+          class: "usage-stack",
+          style: `height:${(tokensOf(day.total) / max) * 100}%`,
+          title: `${day.day} — ${fmtTokens(tokensOf(day.total))} tokens · ${fmtMoney(day.total.cost)}`,
+        }, series.map((model, rank) => {
+          const bucket = day.byModel[model];
+          if (!bucket) return null;
+          return h("i", {
+            class: `series-${Math.min(rank, SERIES_COLORS - 1)}`,
+            style: `height:${(tokensOf(bucket) / tokensOf(day.total)) * 100}%`,
+          });
+        })),
+        h("div", { class: "usage-xlabel" }, index % step === 0 ? day.day.slice(5) : ""),
+      ))),
+  );
+}
+
+function usageModelsTable(report, series) {
+  return h("div", { class: "flex flex-col gap-2" },
+    sectionLabel("By model"),
+    h("div", { class: "usage-scroll" }, h("table", { class: "table table-sm" },
+      h("thead", {}, h("tr", {},
+        h("th", {}, "Model"), h("th", {}, "Responses"), h("th", {}, "Prompt"),
+        h("th", {}, "Output"), h("th", {}, "Cache hit"), h("th", {}, "List price"))),
+      h("tbody", {}, report.byModel.map(({ model, bucket }, rank) => {
+        const prompt = promptOf(bucket);
+        return h("tr", {},
+          h("td", { class: "font-mono text-xs" },
+            h("span", { class: `series-swatch series-${Math.min(series.indexOf(model), SERIES_COLORS - 1)}` }),
+            modelLabel(model)),
+          h("td", {}, bucket.responses.toLocaleString()),
+          h("td", {}, fmtTokens(prompt)),
+          h("td", {}, fmtTokens(bucket.output)),
+          h("td", {}, prompt ? fmtPercent(bucket.cacheRead / prompt) : "—"),
+          h("td", {}, fmtMoney(bucket.cost)),
+        );
+      })),
+    )),
+    report.compaction.responses
+      ? h("div", { class: "text-xs opacity-40" },
+          `The compaction row is ${report.compaction.responses} summarization calls — what the conversations paid to keep talking.`)
+      : null,
+  );
+}
+
+function usageThreadsTable(report) {
+  if (!report.byThread.length) return null;
+  return h("div", { class: "flex flex-col gap-2" },
+    sectionLabel("Where it went"),
+    h("div", { class: "usage-scroll" }, h("table", { class: "table table-sm" },
+      h("thead", {}, h("tr", {},
+        h("th", {}, "Thread"), h("th", {}, "Workspace"), h("th", {}, "Tokens"), h("th", {}, "List price"), h("th", {}, "Last model"))),
+      h("tbody", {}, report.byThread.map((thread) =>
+        h("tr", {},
+          h("td", {}, h("a", {
+            class: "link link-hover usage-thread",
+            href: `#/threads/${thread.id}`,
+            title: thread.title ?? thread.conversation ?? thread.id,
+          }, thread.title ?? thread.conversation ?? thread.id.slice(0, 8))),
+          h("td", { class: "text-warning text-xs" }, thread.workspace),
+          h("td", {}, fmtTokens(tokensOf(thread))),
+          h("td", {}, fmtMoney(thread.cost)),
+          h("td", { class: "font-mono text-xs opacity-60" }, modelLabel(thread.lastModel)),
+        ))),
+    )),
+  );
+}
+
+/** The same quota meters the Models page carries, mirrored here so one screen
+ *  answers both halves of the question: what was spent, and what is left. */
+function usageQuotaSection() {
+  const providers = providersInUse();
+  if (!providers.length) return null;
+  return h("div", { class: "flex flex-col gap-2" },
+    sectionLabel("Quota left"),
+    ...providers.map((provider) =>
+      h("div", { class: "flex flex-col gap-1.5 py-1" },
+        h("div", { class: "flex items-center gap-2" },
+          h("span", { class: "font-mono text-sm" }, provider),
+          h("span", { class: "text-xs opacity-50", "data-usage-plan": provider }),
+        ),
+        h("div", { class: "flex flex-col gap-1.5", "data-usage-provider": provider },
+          h("div", { class: "text-xs opacity-40" }, "checking usage…")),
+      )),
+  );
+}
+
+/** Where the data actually begins, which is not where the window does: gc
+ *  deletes session files on a retention timer, and what it took with it cannot
+ *  be counted. Saying so beats a chart that quietly flattens. */
+function usageCoverage(report, days) {
+  const parts = [`${report.threads} thread${report.threads === 1 ? "" : "s"} in the last ${days} days`];
+  if (report.oldestAt !== undefined) {
+    const oldest = new Date(report.oldestAt).toLocaleDateString();
+    parts.push(report.oldestAt > report.since
+      ? `oldest transcript still on disk is from ${oldest} — anything older was collected`
+      : `transcripts on disk reach back to ${oldest}`);
+  }
+  return h("div", { class: "text-xs opacity-40", title: `window starts ${new Date(report.since).toLocaleString()}` },
+    `${parts.join(" · ")}.`);
+}
+
 /* ---------- settings view ---------- */
 
 async function viewSettings() {
@@ -3052,7 +3314,7 @@ async function withLoading(work, { swap = false } = {}) {
 
 /* ---------- router ---------- */
 
-const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, settings: viewSettings, channels: viewWorkspaces };
+const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, usage: viewUsage, settings: viewSettings, channels: viewWorkspaces };
 
 async function render() {
   const name = (location.hash.replace("#/", "") || "threads").split("/")[0];

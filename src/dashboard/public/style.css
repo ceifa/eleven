@@ -1189,6 +1189,61 @@ video.msg-media { max-width: 22rem; }
 .meter.warn > i { background: var(--color-warning); }
 .meter.crit > i { background: var(--color-error); }
 
+/* ---------- usage page: tokens, cache, list price ---------- */
+
+/* Series colours for the daily chart and the table swatches that key it. Five
+   is deliberate: past that the eye stops telling hues apart, and a sixth model
+   is a rounding error on this page anyway — it just reuses the last colour. */
+.series-0 { --series: var(--color-primary); }
+.series-1 { --series: var(--color-accent); }
+.series-2 { --series: var(--color-success); }
+.series-3 { --series: oklch(65% 0.15 250); }
+.series-4 { --series: oklch(68% 0.14 320); }
+
+.usage-tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
+@media (min-width: 900px) { .usage-tiles { grid-template-columns: repeat(4, 1fr); } }
+
+.usage-tile {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--color-base-300); border-radius: var(--radius-box);
+  background: var(--color-base-200);
+}
+.usage-tile-value { font-family: var(--font-mono); font-size: 1.5rem; line-height: 1.2; }
+.usage-tile.is-good .usage-tile-value { color: var(--color-success); }
+.usage-tile.is-warn .usage-tile-value { color: var(--color-warning); }
+.usage-tile.is-bad .usage-tile-value { color: var(--color-error); }
+
+/* Bars are plain flex boxes rather than an SVG: the chart has no axes and no
+   text inside it, so there is nothing a viewBox would buy that percentage
+   heights don't already give — including reflowing with the sidebar. */
+.usage-chart { display: flex; align-items: flex-end; gap: 2px; height: 9rem; }
+.usage-col { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
+.usage-stack {
+  display: flex; flex-direction: column-reverse; /* the leading series on the floor */
+  min-height: 1px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+}
+.usage-stack > i { display: block; background: var(--series, var(--color-base-300)); }
+.usage-col:hover .usage-stack { filter: brightness(1.25); }
+.usage-xlabel {
+  height: 1rem; padding-top: 0.2rem;
+  font-family: var(--font-mono); font-size: 0.6rem; text-align: center;
+  color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+  overflow: hidden; white-space: nowrap;
+}
+
+.series-swatch {
+  display: inline-block; width: 0.5rem; height: 0.5rem; margin-right: 0.4rem;
+  border-radius: 2px; background: var(--series, var(--color-base-300));
+}
+
+/* Six columns don't fit a phone, and wrapping every cell turns the table into
+   an unreadable stack — so it scrolls sideways instead. */
+.usage-scroll { overflow-x: auto; }
+.usage-scroll .table { min-width: 34rem; }
+.usage-thread { display: inline-block; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+
 /* ---------- misc components ---------- */
 
 .divider { height: 1px; background: var(--color-base-300); margin: 1rem 0; }

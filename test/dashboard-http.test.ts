@@ -232,6 +232,60 @@ test("the thread list leaves out the session file path; the detail view keeps it
   });
 });
 
+test("token usage is read off the transcript, per day, per model and per thread", async () => {
+  await withDashboard(async (base, thread) => {
+    const paid = (minutesAgo: number, provider: string, model: string, usage: Record<string, number>) => {
+      const at = Date.now() - minutesAgo * 60_000;
+      return JSON.stringify({
+        type: "message",
+        timestamp: new Date(at).toISOString(),
+        message: {
+          role: "assistant", provider, model, timestamp: at, content: [{ type: "text", text: "answered" }],
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, ...usage, cost: { total: usage.cost ?? 0 } },
+        },
+      });
+    };
+    writeFileSync(thread.sessionFile, [
+      paid(90, "openai-codex", "gpt-5", { input: 4_000, output: 300, cost: 0.1 }),
+      // Long after the cache went cold, and on another model: both at once.
+      paid(10, "claude-code", "opus", { cacheRead: 120_000, cacheWrite: 30_000, output: 900, cost: 1.4 }),
+    ].join("\n") + "\n");
+
+    const response = await get(`${base}/api/usage/tokens?days=7`);
+    assert.equal(response.status, 200);
+    const report = JSON.parse(response.body.toString());
+    assert.equal(report.days, 7);
+    assert.equal(report.total.responses, 2);
+    assert.equal(report.total.cacheRead, 120_000);
+    assert.equal(Math.round(report.total.cost * 100), 150);
+    assert.deepEqual(report.byModel.map((entry: { model: string }) => entry.model), ["claude-code/opus", "openai-codex/gpt-5"]);
+    assert.equal(report.byThread.length, 1);
+    assert.equal(report.byThread[0].id, thread.id);
+    assert.equal(report.waste.coldResponses, 1, "the second response lost the cache to idleness and to a model switch");
+    assert.equal(report.waste.idleResponses, 1);
+    assert.equal(report.waste.modelSwitchResponses, 1);
+    assert.ok(report.byDay.length >= 1 && report.byDay.length <= 2);
+
+    // The same numbers ride along with the thread the transcript belongs to.
+    const detail = JSON.parse((await get(`${base}/api/threads/${thread.id}`)).body.toString());
+    assert.equal(detail.thread.usage.responses, 2);
+    assert.equal(detail.thread.usage.cacheWrite, 30_000);
+    assert.equal(detail.thread.usage.lastModel, "claude-code/opus");
+    // A nested runtime's row sums a whole tool loop, so it is never offered as
+    // a context-window reading.
+    assert.equal(detail.thread.usage.lastPromptTokens, undefined);
+  });
+});
+
+test("a window that isn't a sane number of days is refused rather than guessed at", async () => {
+  await withDashboard(async (base) => {
+    for (const days of ["0", "-3", "1.5", "banana", "99999"]) {
+      assert.equal((await get(`${base}/api/usage/tokens?days=${days}`)).status, 400, `days=${days}`);
+    }
+    assert.equal((await get(`${base}/api/usage/tokens`)).status, 200, "no window means the default one");
+  });
+});
+
 test("a fresh thread can be started inside the conversation on screen — the dashboard's /new", async () => {
   await withDashboard(async (base, thread, spy) => {
     const response = await post(`${base}/api/threads/${thread.id}/new`);

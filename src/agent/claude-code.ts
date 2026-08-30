@@ -25,7 +25,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { WorkspaceTool } from "../config.ts";
+import { BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
@@ -37,16 +37,28 @@ export const CLAUDE_CODE_PROVIDER = "claude-code";
 const MCP_SERVER = "eleven";
 const MCP_PREFIX = `mcp__${MCP_SERVER}__`;
 
+/** Workspace capability -> Claude Code native tools.
+ *
+ * TaskOutput and TaskStop are deliberately absent: both only address tasks
+ * running in the background, and foregroundToolInput strips run_in_background
+ * from every Agent and Bash call, so no such task can exist here. */
+const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
+  read: ["Read", "Glob", "Grep"],
+  bash: ["Bash"],
+  edit: ["Edit"],
+  write: ["Write"],
+  web: ["WebFetch", "WebSearch"],
+  agent: ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
+};
+
 /** Claude Code capabilities intentionally enabled when a workspace omits a
  * policy. This is an allowlist, not a denylist: new Claude tools never appear
  * in eleven by surprise. Product/cloud tools (cron, notifications, worktrees,
- * DesignSync, Workflow, etc.) stay out. */
-const DEFAULT_NATIVE_TOOLS = [
-  "Read", "Glob", "Grep", "Bash", "Edit", "Write",
-  "WebFetch", "WebSearch",
-  "Task", "SendMessage", "TaskOutput", "TaskStop",
-  "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
-] as const;
+ * DesignSync, Workflow, etc.) stay out.
+ *
+ * Derived from POLICY_TO_NATIVE so the unrestricted default and the per-policy
+ * expansion can never drift apart. */
+const DEFAULT_NATIVE_TOOLS: readonly string[] = BUILTIN_TOOLS.flatMap((name) => POLICY_TO_NATIVE[name]);
 
 // Claude Code settles a result for every turn its loop runs, including turns it
 // never sent to a model: a resume that finds background jobs orphaned by the
@@ -81,15 +93,6 @@ function hasModelProse(text: string | undefined): boolean {
   const trimmed = text?.trim();
   return !!trimmed && !SYNTHETIC_RESULT_TEXT.has(trimmed);
 }
-
-const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
-  read: ["Read", "Glob", "Grep"],
-  bash: ["Bash"],
-  edit: ["Edit"],
-  write: ["Write"],
-  web: ["WebFetch", "WebSearch"],
-  agent: ["Task", "SendMessage", "TaskOutput", "TaskStop", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
-};
 
 const EFFORT = {
   minimal: "low",

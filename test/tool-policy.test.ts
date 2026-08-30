@@ -1,6 +1,8 @@
 import { deepStrictEqual } from "node:assert/strict";
 import { describe, test } from "node:test";
 import { activeToolNames, elevenOwnedTools } from "../src/agent/tool-policy.ts";
+import { nativeToolsForPolicy } from "../src/agent/claude-code.ts";
+import { BUILTIN_TOOLS, type WorkspaceTool } from "../src/config.ts";
 
 // pi registers all eight of its builtins but only activates its coding default.
 // The other four exist for pi's read-only preset (grep/find/ls, for a session
@@ -64,5 +66,29 @@ describe("activeToolNames", () => {
 
   test("web and agent gate nothing on pi, and never revoke eleven's tools", () => {
     deepStrictEqual(activeToolNames(piActiveWithOwned, owned, ["web", "agent"]), ["workflow", "telegram"]);
+  });
+});
+
+describe("nativeToolsForPolicy (Claude Code side)", () => {
+  test("never offers a tool that only addresses background tasks", () => {
+    // Regression: TaskOutput and TaskStop shipped in every request, but
+    // foregroundToolInput strips run_in_background from every Agent and Bash
+    // call, so neither ever had a task to read or stop.
+    const background = ["TaskOutput", "TaskStop"];
+    for (const policy of [undefined, ["agent"] as WorkspaceTool[], [...BUILTIN_TOOLS]]) {
+      deepStrictEqual(nativeToolsForPolicy(policy).filter((name) => background.includes(name)), []);
+    }
+  });
+
+  test("the unrestricted default is exactly the full policy expansion", () => {
+    // The two used to be hand-maintained lists and drifted; keep them derived.
+    deepStrictEqual(nativeToolsForPolicy(undefined), nativeToolsForPolicy([...BUILTIN_TOOLS]));
+  });
+
+  test("still carries the agent capability it is meant to carry", () => {
+    deepStrictEqual(
+      nativeToolsForPolicy(["agent"]),
+      ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
+    );
   });
 });

@@ -565,11 +565,21 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const topic = topicOf(ctx.message);
     const sessionKey = sessionKeyFor(chat.id, topic);
     const [command] = text.split(/\s+/);
+    // Commands are rare and act on a session the user can't see; when one seems
+    // to do nothing, this line is the only record of which session it hit.
+    log.info(`command ${command} in ${sessionKey} (message ${ctx.message?.message_id}, thread ${ctx.message?.message_thread_id ?? "-"}, topic message ${ctx.message?.is_topic_message ?? false})`);
     // A command answers the person who typed it — in a group the rest of the
     // chat has no use for a skill list or a "Nothing running."
     const ephemeralTo = chat.type === "private" ? undefined : ctx.from?.id;
+    // Answer *on* the command. Beyond being easier to follow in a busy group,
+    // a reply is what pins the answer to the same forum topic even when the
+    // command arrived without the flags topicOf needs to recognize one.
+    const replyParameters =
+      chat.type === "private" || !ctx.message?.message_id
+        ? undefined
+        : { message_id: ctx.message.message_id, allow_sending_without_reply: true };
     const reply = (markdown: string) =>
-      sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, ephemeralTo }).then(() => true);
+      sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, replyParameters, ephemeralTo }).then(() => true);
 
     switch (command.replace(`@${handle.username}`, "")) {
       case "/start":

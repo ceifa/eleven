@@ -297,6 +297,11 @@ function connectWs() {
       }
       refreshThreads();
     }
+    if (message.type === "thread-started") {
+      // A conversation rotated (here, from Telegram, or in another tab): the
+      // thread this page shows as current isn't anymore.
+      refreshThreads();
+    }
     if (message.type === "activity") {
       // Show the message now instead of at the end of the turn: a Telegram
       // message (or a reply eleven sent on its own) is real the moment the
@@ -1072,7 +1077,7 @@ function threadHeader(thread) {
         "aria-pressed": String(state.showRequests),
         onclick: toggleRequests,
       }, "⚡"),
-      threadMenu(thread.id),
+      threadMenu(thread),
     ),
   );
 }
@@ -1085,15 +1090,39 @@ function toggleRequests() {
 
 /** The ⋯ overflow. Native <details> so Escape and click-outside are the only
  *  things left to wire up, and so it needs no focus bookkeeping of its own. */
-function threadMenu(id) {
+function threadMenu(thread) {
+  const id = thread.id;
   const menu = h("details", { class: "thread-menu" },
     h("summary", { class: "toolbar-icon", title: "more", "aria-label": "More actions" }, "⋯"),
     h("div", { class: "thread-menu-body" },
+      h("button", {
+        class: "menu-item",
+        title: "start a fresh thread in this same conversation — the /new command",
+        onclick: () => { menu.open = false; startFreshThread(thread); },
+      }, "New thread here"),
       h("button", { class: "menu-item", onclick: () => { menu.open = false; copyText(id, "Thread id copied."); } }, "Copy thread id"),
       deleteThreadButton(id),
     ),
   );
   return menu;
+}
+
+/**
+ * Rotate the conversation on screen: the same thing /new does in Telegram, for
+ * the thread you are reading. Nothing is deleted — the old thread stays in the
+ * list, it simply stops being the one the conversation talks to.
+ */
+async function startFreshThread(thread) {
+  let started;
+  try {
+    started = await api.send("POST", `/threads/${thread.id}/new`, {});
+  } catch (error) {
+    return toast(error.message, true);
+  }
+  toast("Fresh thread started.");
+  await refreshThreads();
+  await openThread(started.id);
+  openPaneMobile();
 }
 
 // One listener for every popover on the page: a click that isn't inside an open

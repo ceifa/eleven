@@ -164,6 +164,8 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   gateway.on("turn-done", (event) => broadcast({ type: "turn-done", ...event }));
   gateway.on("turn-error", (event) => broadcast({ type: "turn-error", ...event }));
   gateway.on("turn-rewound", (event) => broadcast({ type: "turn-rewound", ...event }));
+  // A conversation rotated — from here, from Telegram's /new, or in another tab.
+  gateway.on("thread-started", (event) => broadcast({ type: "thread-started", ...event }));
   // The message itself rides along (clipped — the transcript refetch has the
   // full text): a page watching the thread can show an inbound Telegram message
   // the moment it lands, instead of only after the turn finishes.
@@ -553,6 +555,19 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const dropped = gateway.threads.isCurrent(thread.id) && telegram.discardPending(thread.sessionKey);
         const stopped = await gateway.interruptThread(thread.id);
         return send(200, { stopped, dropped });
+      }
+      // The dashboard's /new. The launcher starts a thread in a conversation of
+      // its own, which is no use when what you want is a fresh start *here* —
+      // in the Telegram topic (or DM) this thread belongs to, so the agent's
+      // replies keep landing where the conversation lives.
+      if (method === "POST" && path.match(/^\/threads\/[^/]+\/new$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        // Fresh means fresh, exactly as in Telegram: buffered input and the
+        // in-flight turn belong to the thread being left behind.
+        telegram.discardPending(thread.sessionKey);
+        await gateway.interrupt(thread.sessionKey);
+        const started = gateway.newThread(thread.sessionKey, thread.workspace);
+        return send(201, threadView(started));
       }
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);

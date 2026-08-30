@@ -206,16 +206,31 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     return conversationIdentity(sessionKey, channels);
   }
 
-  /** The owner/topic model scopes a Telegram conversation would run with — the
-   * owner being the group, or the person when the conversation is a DM. */
-  function channelModelScopes(sessionKey: string) {
+  /** The scopes a Telegram conversation is configured under — the owner being
+   * the group, or the person when the conversation is a DM. */
+  function channelScopes(sessionKey: string) {
     const target = parseTelegramSessionKey(sessionKey);
-    if (!target) return [];
+    if (!target) return {};
     const channel = config.channels().find((entry) => entry.channel.name === target.channel)?.channel;
     const key = String(target.chatId);
     const owner = target.chatId > 0 ? channel?.users?.[key] : channel?.groups?.[key];
     const topic = target.topic !== undefined ? owner?.topics?.[String(target.topic)] : undefined;
-    return [topic, owner];
+    return { owner, topic };
+  }
+
+  /** Its model scopes, most specific first — a topic's settings beat its owner's. */
+  function channelModelScopes(sessionKey: string) {
+    const { owner, topic } = channelScopes(sessionKey);
+    return owner || topic ? [topic, owner] : [];
+  }
+
+  /** Its prompt appends, outermost first (owner, then topic) — the same order a
+   * Telegram turn builds them in. These are instructions about the conversation
+   * ("in this group we work on the repo named after the topic"), not about the
+   * channel, so a turn typed here needs them exactly as much as one sent there. */
+  function channelAppends(sessionKey: string): string[] {
+    const { owner, topic } = channelScopes(sessionKey);
+    return [owner?.appendSystemPrompt, topic?.appendSystemPrompt].filter((append): append is string => !!append);
   }
 
   /** A thread as the API describes it. `sessionFile` is an absolute path nobody
@@ -666,8 +681,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         // A thread lives in a conversation, not in the composer that types into
         // it: a message sent from here into a Telegram topic must run on the
         // model that topic is configured with — the same one the detail view
-        // reports as this thread's effective model.
+        // reports as this thread's effective model — and under the instructions
+        // that conversation carries.
         modelScopes: channelModelScopes(sessionKey),
+        appends: channelAppends(sessionKey),
         runtime: {
           channel: source,
           conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",

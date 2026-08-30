@@ -595,7 +595,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/message$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
         if (!composable(thread.sessionKey)) {
-          throw new ApiError(409, `this thread lives in ${identityOf(thread.sessionKey).label} — answer it there, or start a thread of your own here`);
+          throw new ApiError(409, `this thread lives in ${identityOf(thread.sessionKey).label}. Answer it there, or start a thread of your own here.`);
         }
         const request = (await body(req)) as { text: string; attachments?: unknown };
         const { text, images } = await composeInbound(request.text, request.attachments);

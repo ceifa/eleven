@@ -1461,7 +1461,7 @@ function readOnlyComposer(thread) {
   return h("div", { class: "composer composer-readonly" },
     h("div", { class: "composer-box" },
       h("p", { class: "composer-readonly-text" },
-        "This thread lives in ", h("strong", {}, thread.conversation), " — answer it there. A reply typed here would never reach it.",
+        "This thread lives in ", h("strong", {}, thread.conversation), ". Answer it there.",
       ),
       h("button", {
         class: "btn btn-sm",

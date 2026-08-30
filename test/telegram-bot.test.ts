@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
+import { createSeenMessages, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { DraftStream } from "../src/channels/telegram/stream.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
@@ -379,6 +379,25 @@ test("a command answer in a group is addressed to whoever asked", async () => {
 
   assert.deepEqual(payloads[0]?.ephemeral_message_parameters, { receiver_user_id: 4242 });
   assert.equal(payloads[1]?.ephemeral_message_parameters, undefined);
+});
+
+test("consecutive ephemeral commands are all handled, and a replayed update is not", () => {
+  let now = 1_000_000;
+  const alreadyHandled = createSeenMessages(() => now);
+
+  // Ephemeral commands ("only visible to the bot") all arrive with message_id 0.
+  assert.equal(alreadyHandled(-100, 0, 501), false);
+  now += 60_000;
+  assert.equal(alreadyHandled(-100, 0, 502), false);
+  assert.equal(alreadyHandled(-100, 0, 503), false);
+  // Telegram replaying an unacknowledged update still runs the turn only once.
+  assert.equal(alreadyHandled(-100, 0, 502), true);
+
+  // Ordinary messages keep deduping by message id, until the TTL lapses.
+  assert.equal(alreadyHandled(-100, 77, 504), false);
+  assert.equal(alreadyHandled(-100, 77, 505), true);
+  now += 21 * 60_000;
+  assert.equal(alreadyHandled(-100, 77, 506), false);
 });
 
 test("group attribution wraps the complete inbound body while DMs stay bare", () => {

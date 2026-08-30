@@ -817,6 +817,9 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   font-family: var(--font-mono); font-size: 0.7rem;
   color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
 }
+/* Rows a producer capped away. It says how many exist, so this is a real count
+   and not "everything past the fold". */
+.task-more { padding-left: 1.5ch; font-style: italic; opacity: 0.55; }
 .task-open { flex: 0 0 auto; opacity: 0; transition: opacity 0.15s; }
 .task-row.is-clickable:hover .task-open { opacity: 0.7; }
 

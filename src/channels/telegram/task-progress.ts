@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import type { ReplyParameters } from "@grammyjs/types";
-import { TaskActivityBoard, type TaskActivityEvent, type TaskActivityItem } from "../../agent/task-activity.ts";
+import { displayId, TaskActivityBoard, type TaskActivityEvent, type TaskActivityItem, type TaskActivitySection } from "../../agent/task-activity.ts";
 import { logger } from "../../log.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { ephemeralReceiver, noteEphemeralRefused } from "./ephemeral.ts";
@@ -60,6 +60,8 @@ export interface TaskProgressOptions {
  * follows supersedes it. */
 export class TelegramTaskProgress {
   private readonly board = new TaskActivityBoard();
+  /** Tools whose own rows are on screen — their argument preview adds nothing. */
+  private readonly reporting = new Set<string>();
   private readonly startedAt = Date.now();
   private currentTool: RunningStatus["tool"];
   private currentRetry: RetryStatus | undefined;
@@ -110,14 +112,25 @@ export class TelegramTaskProgress {
 
   update(event: TaskActivityEvent): void {
     if (this.dead || this.outcome) return;
-    this.hasTasks = true;
     this.board.apply(event);
+    // A seeded plan is context from an earlier turn: it may be drawn, but it
+    // must not be the reason this turn posts a status message at all.
+    this.hasTasks = this.board.changed;
+    // A tool that reports its own phases has just said more than its arguments
+    // ever could — the "🔧 workflow · script: export const meta…" line under a
+    // live phase list is noise.
+    if (event.kind === "plan" && event.label) {
+      this.reporting.add(event.label);
+      if (this.currentTool?.name === event.label) this.currentTool = undefined;
+    }
     this.rearm();
   }
 
-  /** Note the top-level tool the model just started — shown while the turn runs. */
+  /** Note the top-level tool the model just started — shown while the turn runs.
+   *  Tools that report their own progress are left to their rows. */
   tool(name: string, summary: string): void {
     if (this.dead || this.outcome) return;
+    if (this.reporting.has(name)) return;
     this.currentTool = { name, summary: summary || undefined };
     this.rearm();
   }
@@ -206,11 +219,12 @@ export class TelegramTaskProgress {
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
     let text = renderTaskActivity(
-      this.board.plan,
+      this.board.sections,
       this.board.agents,
       this.outcome,
       running,
       this.currentRetry,
+      this.board.agentTotal,
     );
     if (!text && this.messageId !== undefined) text = "📋 No active tasks";
     if (!text || text === this.lastText || text === this.pendingText || this.dead) return this.draining ?? Promise.resolve();
@@ -304,11 +318,13 @@ export class TelegramTaskProgress {
 }
 
 export function renderTaskActivity(
-  plan: readonly TaskActivityItem[],
+  plan: readonly TaskActivitySection[],
   agents: readonly TaskActivityItem[],
   outcome?: TaskProgressOutcome,
   running?: RunningStatus,
   retry?: RetryStatus,
+  /** Agents that exist, when more of them ran than were reported. */
+  agentTotal = agents.length,
 ): string {
   const elapsed = running && running.elapsedMs >= ELAPSED_MIN_MS ? ` · ${formatDuration(running.elapsedMs)}` : "";
   const header = outcome === "failed"
@@ -325,27 +341,39 @@ export function renderTaskActivity(
   const head = lines.join("\n");
   // A bare running header is the whole point of an event-less turn: it says the
   // message arrived. Only a call with nothing at all to report renders empty.
-  if (!plan.length && !agents.length) return outcome || running || retry ? head : "";
+  const planRows = plan.reduce((sum, section) => sum + section.tasks.length, 0);
+  if (!planRows && !agents.length) return outcome || running || retry ? head : "";
   const sections = [head];
-  if (plan.length) sections.push(renderSection("📋 Plan", plan, MAX_PLAN_ROWS, renderPlanRow));
-  if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow));
+  // The session's plan and a tool's internal phases are different things and
+  // get different headings — merged, a reader cannot tell which is theirs.
+  for (const section of plan) {
+    if (!section.tasks.length) continue;
+    const title = section.label ? `⚙️ ${section.label}` : "📋 Plan";
+    sections.push(renderSection(title, section.tasks, MAX_PLAN_ROWS, renderPlanRow, section.tasks.length));
+  }
+  if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow, agentTotal));
   const text = sections.join("\n\n");
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
 }
 
+/** `total` is how many exist, which is not always how many arrived: a producer
+ *  may cap the rows it sends. Counting the rows instead would understate a
+ *  40-agent fan-out as "… 2 more". */
 function renderSection(
   title: string,
   tasks: readonly TaskActivityItem[],
   limit: number,
   row: (task: TaskActivityItem) => string,
+  total: number,
 ): string {
   const visible = tasks.slice(0, limit).map(row);
-  if (tasks.length > limit) visible.push(`… ${tasks.length - limit} more`);
+  const hidden = total - Math.min(tasks.length, limit);
+  if (hidden > 0) visible.push(`… ${hidden} more`);
   return `${title}\n${visible.join("\n")}`;
 }
 
 function renderPlanRow(task: TaskActivityItem): string {
-  const blocked = task.blockedBy?.length ? ` · blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}` : "";
+  const blocked = task.blockedBy?.length ? ` · blocked by ${task.blockedBy.map((id) => `#${displayId(id)}`).join(", ")}` : "";
   return `${statusIcon(task)} ${compact(task.title)}${blocked}`;
 }
 

@@ -1,7 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
 import { syncChildren } from "./dom.js";
-import { agentDetail, agentMeta, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
+import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { presentMessage, sameMessage } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
@@ -22,7 +22,7 @@ const state = {
   /** The running turn's plan and subagents. State, not a log: the daemon sends
    *  the whole board on every change, so this is replaced rather than appended
    *  to — and a page opened mid-turn gets the same shape from the catch-up. */
-  tasks: { plan: [], agents: [] },
+  tasks: { plan: [], agents: [], agentTotal: 0 },
   /** Messages that exist but haven't landed in the transcript yet — just sent
    *  from here, or just arrived from a channel, with no turn running to hold
    *  them. */
@@ -251,7 +251,7 @@ function connectWs() {
         liveEpoch++;
         state.live = [];
         state.liveStartedAt = Date.now();
-        state.tasks = { plan: [], agents: [] };
+        state.tasks = { plan: [], agents: [], agentTotal: 0 };
         renderLive(true);
         renderTasks();
       }
@@ -288,7 +288,7 @@ function connectWs() {
       markThreadLive(message.threadId);
       // The whole board arrives folded — store it, don't reduce it.
       if (active) {
-        state.tasks = message.tasks ?? { plan: [], agents: [] };
+        state.tasks = message.tasks ?? { plan: [], agents: [], agentTotal: 0 };
         renderTasks();
       }
     }
@@ -778,7 +778,7 @@ async function openThread(id) {
     // Switching threads: nothing from the old one survives the move.
     state.live = [];
     state.liveStartedAt = 0;
-    state.tasks = { plan: [], agents: [] };
+    state.tasks = { plan: [], agents: [], agentTotal: 0 };
     state.pending = [];
   }
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
@@ -1047,25 +1047,34 @@ function liveNode(item) {
 function renderTasks() {
   const region = document.getElementById("tasks");
   if (!region) return;
-  const { plan = [], agents = [] } = state.tasks ?? {};
-  sticky(() => region.replaceChildren(...[
-    plan.length ? taskSection("Plan", plan, planRow) : null,
-    agents.length ? taskSection("Agents", agents, agentRow) : null,
-  ].filter(Boolean)));
+  const { plan = [], agents = [], agentTotal } = state.tasks ?? {};
+  // The plan arrives grouped by producer: the session's own (unlabelled) and
+  // one group per tool reporting its internal phases. Merged into one list, a
+  // reader cannot tell the work they asked for from a tool's bookkeeping.
+  const sections = plan
+    .filter((section) => section?.tasks?.length)
+    .map((section) => taskSection(section.label ?? "Plan", section.tasks, planRow));
+  if (agents.length) sections.push(taskSection("Agents", agents, agentRow, agentTotal ?? agents.length));
+  sticky(() => region.replaceChildren(...sections));
 }
 
-const taskSection = (title, tasks, row) =>
-  h("div", { class: "task-section" },
+/** `total` is how many exist, not how many arrived — a producer may cap the
+ *  rows it sends, and counting the rows would understate a wide fan-out. */
+function taskSection(title, tasks, row, total = tasks.length) {
+  const hidden = total - tasks.length;
+  return h("div", { class: "task-section" },
     h("div", { class: "task-section-title" }, title),
     ...tasks.map(row),
+    hidden > 0 ? h("div", { class: "task-row task-more" }, `… ${hidden} more`) : null,
   );
+}
 
 const planRow = (task) =>
   h("div", { class: `task-row is-${task.status}` },
     h("span", { class: "task-icon", "aria-hidden": "true" }, taskIcon(task)),
     h("span", { class: "task-title" }, task.title),
     task.blockedBy?.length
-      ? h("span", { class: "task-meta" }, `blocked by ${task.blockedBy.map((id) => `#${id}`).join(", ")}`)
+      ? h("span", { class: "task-meta" }, `blocked by ${task.blockedBy.map((id) => `#${displayId(id)}`).join(", ")}`)
       : null,
   );
 

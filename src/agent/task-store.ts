@@ -153,11 +153,18 @@ export class TaskStore {
     this.listener?.(this.snapshot());
   }
 
+  /** Work this plan is still carrying. A plan that is entirely done is history:
+   *  it should not follow the conversation into every later turn. */
+  get unfinished(): boolean {
+    return this.state.tasks.some((task) => task.status !== "completed");
+  }
+
   /** The plan as the channels render it. Unscoped: this *is* the session's plan,
    *  as opposed to a tool reporting its own internal phases. */
-  snapshot(): TaskActivityEvent {
+  snapshot(seeded = false): TaskActivityEvent {
     return {
       kind: "plan",
+      ...(seeded ? { seeded: true } : {}),
       tasks: this.state.tasks.map((task): TaskActivityItem => {
         const blockedBy = this.openBlockers(task);
         return {

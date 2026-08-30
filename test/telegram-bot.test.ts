@@ -38,11 +38,13 @@ test("Telegram command sync removes stale group-scoped commands", async () => {
 
 test("Telegram task progress renders plan and agent lifecycle compactly", () => {
   const text = renderTaskActivity(
-    [
-      { id: "1", title: "Inspect adapter", status: "completed" },
-      { id: "2", title: "Wire Telegram", status: "running" },
-      { id: "3", title: "Tests", status: "pending", blockedBy: ["2"] },
-    ],
+    [{
+      tasks: [
+        { id: "1", title: "Inspect adapter", status: "completed" },
+        { id: "2", title: "Wire Telegram", status: "running" },
+        { id: "3", title: "Tests", status: "pending", blockedBy: ["2"] },
+      ],
+    }],
     [
       { id: "a", title: "Review reuse", status: "completed", summary: "Found one duplicate", usage: { durationMs: 7200 } },
       { id: "b", title: "Check efficiency", status: "running", lastToolName: "Grep", usage: { totalTokens: 1400 } },
@@ -60,6 +62,47 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
     "✅ Review reuse · 7s · Found one duplicate",
     "⏳ Check efficiency · Grep · 1.4k tok",
   ].join("\n"));
+});
+
+test("a tool's phases are their own section, under the tool's name", () => {
+  // Regression: scope existed for correctness (one snapshot must not evict
+  // another) but was ignored when rendering, so a workflow's internal phases
+  // sat in the user's plan as if they were tasks the user asked for.
+  const text = renderTaskActivity(
+    [
+      { tasks: [{ id: "1", title: "Ship it", status: "running" }] },
+      { label: "workflow", tasks: [{ id: "w:phase-0", title: "scout", status: "completed" }] },
+    ],
+    [],
+  );
+  assert.equal(text, [
+    "⚙️ Agent working",
+    "",
+    "📋 Plan",
+    "⏳ Ship it",
+    "",
+    "⚙️ workflow",
+    "✅ scout",
+  ].join("\n"));
+});
+
+test("the hidden-row count is how many exist, not how many arrived", () => {
+  // Regression: a fan-out caps the rows it sends (10), the section shows 8, and
+  // the count was computed from what arrived — so 40 agents rendered as
+  // "… 2 more". The producer reports its real total; that is what counts.
+  const agents = Array.from({ length: 10 }, (_, i) => ({ id: `a${i}`, title: `agent ${i}`, status: "completed" as const }));
+  const text = renderTaskActivity([], agents, undefined, undefined, undefined, 40);
+  assert.match(text, /… 32 more/);
+  // Without a reported total it still degrades to counting the rows it has.
+  assert.match(renderTaskActivity([], agents), /… 2 more/);
+});
+
+test("a blocker id is shown without the scope it was namespaced with", () => {
+  const text = renderTaskActivity(
+    [{ label: "workflow", tasks: [{ id: "call-7:p2", title: "dig", status: "pending", blockedBy: ["call-7:p1"] }] }],
+    [],
+  );
+  assert.match(text, /blocked by #p1$/m);
 });
 
 /** Fake bot API recording every raw call; messages are created with id 77, and

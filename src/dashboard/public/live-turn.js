@@ -98,12 +98,19 @@ export function agentDetail(task) {
   if (task.usage?.totalTokens !== undefined) rows.push(["tokens", fmtTokens(task.usage.totalTokens)]);
   if (task.usage?.toolUses !== undefined) rows.push(["tool calls", String(task.usage.toolUses)]);
   if (task.usage?.durationMs !== undefined) rows.push(["duration", fmtDuration(task.usage.durationMs)]);
-  if (task.blockedBy?.length) rows.push(["blocked by", task.blockedBy.map((id) => `#${id}`).join(", ")]);
+  if (task.blockedBy?.length) rows.push(["blocked by", task.blockedBy.map((id) => `#${displayId(id)}`).join(", ")]);
   return rows;
 }
 
-/** Does the board have anything worth a region on screen? */
-export const hasTasks = (tasks) => !!(tasks?.plan?.length || tasks?.agents?.length);
+/** Does the board have anything worth a region on screen? A plan arrives as
+ *  sections (the session's own, plus one per tool reporting its phases), and an
+ *  empty section is not content. */
+export const hasTasks = (tasks) =>
+  !!(tasks?.agents?.length || (tasks?.plan ?? []).some((section) => section?.tasks?.length));
+
+/** A row's id without its scope prefix — namespaced for correctness, but
+ *  "blocked by #call-7:p1" is not something anyone should have to read. */
+export const displayId = (id) => (id.includes(":") ? id.slice(id.lastIndexOf(":") + 1) : id);
 
 export const startOfDay = (ts) => new Date(ts).setHours(0, 0, 0, 0);
 

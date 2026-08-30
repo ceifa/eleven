@@ -152,3 +152,67 @@ describe("TaskActivityBoard", () => {
     strictEqual(board.empty, false);
   });
 });
+
+describe("inherited plans and reporting tools", () => {
+  test("a plan seeded from an earlier turn does not earn a status message", async () => {
+    // The plan is durable now, so a later turn starts with work already on it.
+    // Drawing that is useful; posting a status box for every "hi" in a thread
+    // with an open plan is not.
+    const { api, sent } = fakeApi();
+    const progress = new TelegramTaskProgress(api, 1);
+    progress.update({ kind: "plan", seeded: true, tasks: [{ id: "1", title: "carried over", status: "pending" }] });
+    await progress.finish("completed");
+    deepStrictEqual(sent, []);
+  });
+
+  test("but a plan this turn actually changed does", async () => {
+    const { api, sent } = fakeApi();
+    const progress = new TelegramTaskProgress(api, 1);
+    progress.update({ kind: "plan", seeded: true, tasks: [{ id: "1", title: "carried over", status: "pending" }] });
+    progress.update({ kind: "plan", tasks: [{ id: "1", title: "carried over", status: "in_progress" as never }] });
+    await progress.finish("completed");
+    strictEqual(sent.length, 1);
+    match(sent[0], /carried over/);
+  });
+
+  /** The tool line only exists while the turn runs, so these read the live
+   *  render rather than the finished one. */
+  const whileRunning = async (drive: (progress: TelegramTaskProgress) => void) => {
+    const { api, sent } = fakeApi();
+    const progress = new TelegramTaskProgress(api, 1);
+    drive(progress);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    progress.cancel();
+    return sent.at(-1) ?? "";
+  };
+
+  test("a tool reporting its own phases loses its argument preview", async () => {
+    // "🔧 workflow · script: export const meta = { name: …" says nothing that
+    // the phase list under it doesn't say better.
+    const text = await whileRunning((progress) => {
+      progress.tool("workflow", "script: export const meta = { name: \"research\" }");
+      progress.update({ kind: "plan", scope: "call-7", label: "workflow", tasks: [{ id: "call-7:p1", title: "scout", status: "running" }] });
+    });
+    match(text, /⚙️ workflow/);
+    match(text, /scout/);
+    strictEqual(/🔧/.test(text), false);
+    strictEqual(/export const meta/.test(text), false);
+  });
+
+  test("a tool that reports nothing keeps its status line", async () => {
+    const text = await whileRunning((progress) => {
+      progress.update({ kind: "plan", tasks: [{ id: "1", title: "task", status: "running" }] });
+      progress.tool("Bash", "npm test");
+    });
+    match(text, /🔧 Bash · npm test/);
+  });
+
+  test("a tool that reported once stays suppressed for the rest of the turn", async () => {
+    // Claude re-announces a tool call; the phases are still the better story.
+    const text = await whileRunning((progress) => {
+      progress.update({ kind: "plan", scope: "call-7", label: "workflow", tasks: [{ id: "call-7:p1", title: "scout", status: "running" }] });
+      progress.tool("workflow", "script: …");
+    });
+    strictEqual(/🔧/.test(text), false);
+  });
+});

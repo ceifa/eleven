@@ -248,7 +248,11 @@ export class Gateway extends EventEmitter {
   /** Start a fresh thread for a conversation (the /new command). Keeps prefs. */
   newThread(sessionKey: string, workspaceHint?: string): ThreadEntry {
     const workspace = this.workspaceFor(sessionKey, workspaceHint);
-    return this.threads.rotate(sessionKey, workspace.name, this.threads.current(sessionKey));
+    const thread = this.threads.rotate(sessionKey, workspace.name, this.threads.current(sessionKey));
+    // Whoever rotated it, every watcher's idea of the conversation's current
+    // thread just went stale — a /new typed in Telegram included.
+    this.emit("thread-started", { threadId: thread.id, workspace: thread.workspace });
+    return thread;
   }
 
   /**

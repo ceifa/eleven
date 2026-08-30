@@ -36,8 +36,31 @@ function get(url: string, headers: Record<string, string> = {}) {
   });
 }
 
+/** A JSON request with a body — the state-changing half of the API. */
+function post(url: string, body: unknown = {}) {
+  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body));
+    const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", "content-length": payload.length } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
+/** What the fakes below recorded, so a test can assert on side effects that
+ *  never leave the daemon (a rotation, an abort, a dropped input burst). */
+interface Spy {
+  rotated: { sessionKey: string; workspace?: string }[];
+  interrupted: string[];
+  discarded: string[];
+  fresh: { id: string; sessionKey: string; workspace: string };
+}
+
 /** Enough of a daemon for the HTTP layer: one workspace, one thread, no bots. */
-async function withDashboard(run: (base: string, thread: { id: string; sessionFile: string }) => Promise<void>) {
+async function withDashboard(run: (base: string, thread: { id: string; sessionFile: string }, spy: Spy) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "eleven-dashboard-http-"));
   const sessionFile = join(dir, "session.jsonl");
   writeFileSync(sessionFile, "");
@@ -59,22 +82,34 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     configuredModelRefs: () => [],
     on: () => {},
   };
+  const spy: Spy = {
+    rotated: [],
+    interrupted: [],
+    discarded: [],
+    fresh: { id: "99999999-8888-7777-6666-555555555555", sessionKey: thread.sessionKey, workspace: thread.workspace },
+  };
   const gateway = {
     on: () => {},
     threads: {
       list: () => [thread],
-      get: (id: string) => (id === thread.id ? thread : undefined),
-      isCurrent: () => true,
+      get: (id: string) => (id === thread.id ? thread : id === spy.fresh.id ? spy.fresh : undefined),
+      isCurrent: (id: string) => id !== thread.id || !spy.rotated.length,
       current: () => thread,
     },
     isThreadRunning: () => false,
     requests: { list: async () => [] },
     liveTurn: () => undefined,
+    interrupt: async (sessionKey: string) => (spy.interrupted.push(sessionKey), true),
+    newThread: (sessionKey: string, workspace?: string) => (spy.rotated.push({ sessionKey, workspace }), spy.fresh),
   };
-  const telegram = { status: () => [], pairing: { list: () => [], on: () => {} } };
+  const telegram = {
+    status: () => [],
+    pairing: { list: () => [], on: () => {} },
+    discardPending: (sessionKey: string) => (spy.discarded.push(sessionKey), true),
+  };
   const dashboard = startDashboard(config as never, gateway as never, telegram as never);
   try {
-    await run(`http://127.0.0.1:${port}`, thread);
+    await run(`http://127.0.0.1:${port}`, thread, spy);
   } finally {
     await dashboard.close();
     rmSync(dir, { recursive: true, force: true });
@@ -161,6 +196,31 @@ test("the thread list leaves out the session file path; the detail view keeps it
 
     const detail = JSON.parse((await get(`${base}/api/threads/${thread.id}`)).body.toString());
     assert.equal(detail.thread.sessionFile, thread.sessionFile);
+  });
+});
+
+test("a fresh thread can be started inside the conversation on screen — the dashboard's /new", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    const response = await post(`${base}/api/threads/${thread.id}/new`);
+    assert.equal(response.status, 201);
+    const started = JSON.parse(response.body);
+    // The new thread belongs to the *same* conversation — that is the whole
+    // point: the launcher already knows how to mint a dashboard-only one.
+    assert.equal(started.id, spy.fresh.id);
+    assert.equal(started.sessionKey, thread.sessionKey);
+    assert.deepEqual(spy.rotated, [{ sessionKey: thread.sessionKey, workspace: "agent" }]);
+    // Fresh means fresh, as in Telegram: the in-flight turn and any buffered
+    // input stay with the thread being left behind.
+    assert.deepEqual(spy.interrupted, [thread.sessionKey]);
+    assert.deepEqual(spy.discarded, [thread.sessionKey]);
+  });
+});
+
+test("starting a fresh thread on an unknown thread is a 404, not a rotation", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    const response = await post(`${base}/api/threads/00000000-0000-0000-0000-000000000000/new`);
+    assert.equal(response.status, 404);
+    assert.deepEqual(spy.rotated, []);
   });
 });
 

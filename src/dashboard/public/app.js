@@ -3033,15 +3033,15 @@ async function viewUsage() {
   const series = report.byModel.map((entry) => entry.model);
 
   view.replaceChildren(
-    pageTitle("Usage"),
-    h("div", { class: "flex flex-col gap-5" },
-      // No blurb: the tiles name themselves, and the line at the bottom says
-      // where the numbers come from.
-      h("div", { class: "join self-start ml-auto" }, USAGE_WINDOWS.map((option) =>
+    pageTitle("Usage",
+      h("div", { class: "join ml-auto" }, USAGE_WINDOWS.map((option) =>
         h("button", {
           class: `btn btn-sm join-item${option === days ? " btn-primary" : ""}`,
           onclick: () => { prefs.set("usage.days", String(option)); void render(); },
-        }, `${option}d`))),
+        }, `${option}d`)))),
+    // No blurb under the title: the tiles name themselves, and the line at the
+    // bottom of the page says where the numbers come from.
+    h("div", { class: "flex flex-col gap-5" },
       report.total.responses === 0
         ? h("div", { class: "alert" }, "Nothing billed in this window. No turns ran, or their transcripts are gone.")
         : h("div", { class: "flex flex-col gap-5" },
@@ -3269,8 +3269,13 @@ async function viewSettings() {
 
 /* ---------- shared bits ---------- */
 
-function pageTitle(title) {
-  return h("div", { class: "mb-6" }, h("h1", { class: "page-title" }, title));
+/** `actions` ride on the title's own line, which is where a control that
+ *  belongs to the whole page goes instead of into a row of its own. */
+function pageTitle(title, ...actions) {
+  return h("div", { class: "mb-6 flex items-center gap-3 flex-wrap" },
+    h("h1", { class: "page-title" }, title),
+    ...actions,
+  );
 }
 
 const sectionLabel = (text) => h("div", { class: "section-label" }, text);

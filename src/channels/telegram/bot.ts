@@ -9,7 +9,6 @@ import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
 import { collectInboundMedia, download, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
-import { DraftStream } from "./stream.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
 import { forgetEphemeralRefusal } from "./ephemeral.ts";
@@ -51,8 +50,8 @@ interface Target {
   chatId: number;
   topic?: number;
   isPrivate: boolean;
-  /** Sender of the message that started the turn — who an ephemeral status in a
-   * group is addressed to. (In a DM the chat id is the user id already.) */
+  /** Sender of the message that started the turn — who the turn's status is
+   * addressed to where the chat can hide it from everyone else. */
   userId?: number;
   /** Message to ack/reply to, when a specific one triggered the turn. */
   triggerMessageId?: number;
@@ -218,10 +217,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     return true;
   }
 
-  // Live draft previews by `chatId:draftId` — the key Telegram sends back when
-  // the user presses the draft's stop button.
-  const draftStops = new Map<string, string>();
-
   // Manual failover buttons hanging off failure messages, each holding what it
   // takes to run that turn again.
   const failovers = new FailoverOffers<{ target: Target; text: string; images: InboundImage[] }>();
@@ -274,9 +269,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     sequentialize((ctx) => {
       const chat = ctx.chat?.id;
       if (chat === undefined) return undefined;
-      // Stops bypass the lane: both spellings of "stop" must reach the gateway
-      // without waiting behind a slow preparation (e.g. a long transcription).
-      if (ctx.message?.text?.trim().startsWith("/stop") || ctx.update.stopped_message_generation) return `${chat}:control`;
+      // Stops bypass the lane: /stop must reach the gateway without waiting
+      // behind a slow preparation (e.g. a long transcription).
+      if (ctx.message?.text?.trim().startsWith("/stop")) return `${chat}:control`;
       const topic = topicOf(ctx.message);
       return topic !== undefined ? `${chat}:topic:${topic}` : String(chat);
     }),
@@ -284,7 +279,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   bot.on("message", (ctx) => handleMessage(ctx));
   bot.on("callback_query:data", (ctx) => handleCallback(ctx));
-  bot.on("stopped_message_generation", (ctx) => handleGenerationStopped(ctx));
   // The bot's own rights in a chat just changed — a promotion to admin is what
   // makes ephemeral delivery possible, so drop the memo of an earlier refusal.
   bot.on("my_chat_member", (ctx) => forgetEphemeralRefusal(ctx.chat.id));
@@ -399,17 +393,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     }
   }
 
-  /** The user pressed the stop button on a streaming draft — the same thing
-   * /stop does, minus the confirmation (the client already shows it). */
-  async function handleGenerationStopped(ctx: Context) {
-    const stopped = ctx.update.stopped_message_generation!;
-    const sessionKey = draftStops.get(`${stopped.chat.id}:${stopped.draft_id}`);
-    if (!sessionKey) return;
-    log.info(`stop button pressed in ${sessionKey}`);
-    discardBurst(sessionKey);
-    await deps.gateway.interrupt(sessionKey);
-  }
-
   /** `retry` is set by a manual failover: its own model plan for this turn
    * alone, and the failed attempt a restart branches away first. */
   async function runTurn(target: Target, text: string, images: InboundImage[], retry?: { models: ModelEntry[]; rewind?: TurnRewind }) {
@@ -421,14 +404,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
     void bot.api.sendChatAction(chatId, "typing", { message_thread_id: topic }).catch(() => {});
 
-    // Native draft streaming previews the reply as it generates, and carries the
-    // turn's stop button (private chats only).
-    const stream = isPrivate ? new DraftStream(bot.api, chatId, topic) : undefined;
-    const draftKey = stream && `${chatId}:${stream.draftId}`;
-    if (draftKey) draftStops.set(draftKey, sessionKey);
-    // Say something from the start: the bubble the reply will land in appears
-    // right away, thinking, and can be stopped from there.
-    stream?.thinking();
     const blocks: string[] = [];
     let current = "";
     let flushedEarly = false;
@@ -438,20 +413,16 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const sendOptions = {
       messageThreadId: topic,
       replyParameters:
-        !isPrivate && target.triggerMessageId !== undefined
+        target.triggerMessageId !== undefined
           ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
           : undefined,
     };
     const taskProgress = new TelegramTaskProgress(bot.api, chatId, {
       topic,
       replyParameters: sendOptions.replyParameters,
-      // In a shared chat the status belongs to whoever asked, not to everyone.
-      ephemeralTo: isPrivate ? undefined : target.userId,
-      // Where a draft is streaming, it already says "working" — in the very
-      // bubble the answer will land in. A second message would just be noise;
-      // plan/agent content and retries still earn one.
-      toolRenderDelayMs: stream ? Infinity : undefined,
-      idleRenderDelayMs: stream ? Infinity : undefined,
+      // The status belongs to whoever asked, not to everyone. In a DM there is
+      // nobody else, and sendRich falls back to an ordinary message there.
+      ephemeralTo: target.userId,
     });
     // A turn that produces no event at all (a provider stalling on the first
     // request) still owes the chat a sign of life — the typing action expires in
@@ -487,7 +458,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         events: {
           onDelta: (delta) => {
             current += delta;
-            stream?.update([...blocks, current].join("\n\n"));
           },
           onAssistantText: () => {
             if (current.trim()) blocks.push(current.trim());
@@ -509,11 +479,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             current = "";
           },
           onTaskActivity: (activity) => taskProgress.update(activity),
-          onToolCall: (name, args) => {
-            taskProgress.tool(name, summarizeToolArgs(args));
-            // The name only: arguments can carry anything the model just read.
-            stream?.thinking(`Using ${name}…`);
-          },
+          onToolCall: (name, args) => taskProgress.tool(name, summarizeToolArgs(args)),
           onRetry: (notice) => taskProgress.retry(notice),
         },
         // The final send runs inside the turn's durable window: the pending
@@ -547,11 +513,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         replyMarkup: keyboard,
       }).catch(() => {});
     } finally {
-      // The turn is over — stop the draft preview so a throttled/flood-delayed
-      // flush can't re-post a stale draft after the final reply has landed, and
-      // retire its stop button with it.
-      stream?.cancel();
-      if (draftKey) draftStops.delete(draftKey);
       taskProgress.cancel();
     }
   }
@@ -585,14 +546,15 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     log.info(`command ${command} in ${sessionKey} (message ${ctx.message?.message_id}, thread ${ctx.message?.message_thread_id ?? "-"}, topic message ${ctx.message?.is_topic_message ?? false})`);
     // A command answers the person who typed it — in a group the rest of the
     // chat has no use for a skill list or a "Nothing running."
-    const ephemeralTo = chat.type === "private" ? undefined : ctx.from?.id;
+    const ephemeralTo = ctx.from?.id;
     // Answer *on* the command. Beyond being easier to follow in a busy group,
     // a reply is what pins the answer to the same forum topic even when the
     // command arrived without the flags topicOf needs to recognize one.
-    const replyParameters =
-      chat.type === "private" || !ctx.message?.message_id
-        ? undefined
-        : { message_id: ctx.message.message_id, allow_sending_without_reply: true };
+    // (An ephemeral command never becomes a message, so there is nothing to
+    // reply to — hence the message_id check, not a chat-type one.)
+    const replyParameters = ctx.message?.message_id
+      ? { message_id: ctx.message.message_id, allow_sending_without_reply: true }
+      : undefined;
     const reply = (markdown: string) =>
       sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, replyParameters, ephemeralTo }).then(() => true);
 

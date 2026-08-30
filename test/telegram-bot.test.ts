@@ -3,7 +3,7 @@ import test from "node:test";
 import { InputFile } from "grammy";
 import { createSeenMessages, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
-import { DraftStream } from "../src/channels/telegram/stream.ts";
+import { ephemeralReceiver } from "../src/channels/telegram/ephemeral.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
@@ -288,29 +288,27 @@ test("an infinite hold-off keeps tool status off the chat until real tasks appea
   assert.match(String(calls[0]?.payload.text), /Ship it/);
 });
 
-test("a draft says it is thinking before it has prose, and never overwrites prose with it", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  const api = { raw: { sendRichMessageDraft: async (payload: Record<string, unknown>) => { calls.push(payload); return true; } } };
-  const stream = new DraftStream(api as never, 99);
+test("a DM gets the same status a group does, as an ordinary message", async () => {
+  const { calls, api } = fakeApi();
+  // Callers pass the asker either way; a private chat (positive id) is where the
+  // status used to be suppressed in favour of a draft preview, and where an
+  // ephemeral wrapper would be both pointless and rejected.
+  const progress = new TelegramTaskProgress(api, 4242, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
+  progress.tool("Bash", "npm test");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await progress.finish("completed");
+  progress.cancel();
+  for (let i = 0; i < 50 && calls.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
 
-  stream.thinking();
-  await new Promise((resolve) => setTimeout(resolve, 1_200));
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0]?.rich_message, { blocks: [{ type: "thinking", text: "Thinking…" }] });
-  // The placeholder carries the turn's stop button, keyed by draft id.
-  assert.equal(calls[0]?.can_stop, true);
-  assert.equal(calls[0]?.draft_id, stream.draftId);
+  assert.deepEqual(calls.map((call) => call.method), ["send", "delete"]);
+  assert.equal(calls[0]?.payload.ephemeral_message_parameters, undefined);
+  assert.match(String(calls[0]?.payload.text), /🔧 Bash · npm test/);
+});
 
-  stream.update("x".repeat(80));
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1]?.rich_message, { markdown: "x".repeat(80) });
-
-  // A tool starting after the reply began must not wipe what the user can read.
-  stream.thinking("Using Bash…");
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
-  assert.equal(calls.length, 2);
-  stream.cancel();
+test("ephemeral delivery is a group affair — a DM never even asks for it", () => {
+  assert.equal(ephemeralReceiver(-100, 4242), 4242);
+  assert.equal(ephemeralReceiver(4242, 4242), undefined);
+  assert.equal(ephemeralReceiver("4242", 4242), undefined);
 });
 
 /** Fake API for the channel tool: records rich sends and the classic media

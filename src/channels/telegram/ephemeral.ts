@@ -10,10 +10,16 @@
  */
 const refused = new Set<string>();
 
-/** The user to deliver ephemerally to, or `undefined` where this chat has
- * already refused — the caller then sends an ordinary message. */
+/** The user to deliver ephemerally to, or `undefined` where the chat can't take
+ * one — the caller then sends an ordinary message.
+ *
+ * Callers don't branch on chat type: a private chat has nobody to hide a message
+ * from, and every message in it is already for one pair of eyes. Telegram ids
+ * tell the two apart — a private chat's id is the user's own and is positive,
+ * groups and channels are negative — so a DM is answered like a group whose
+ * ephemeral was refused, without spending a rejected call to find out. */
 export function ephemeralReceiver(chatId: number | string, receiver: number | undefined): number | undefined {
-  if (receiver === undefined || refused.has(String(chatId))) return undefined;
+  if (receiver === undefined || Number(chatId) > 0 || refused.has(String(chatId))) return undefined;
   return receiver;
 }
 

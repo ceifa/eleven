@@ -45,11 +45,9 @@ export interface TaskProgressOptions {
   /** Post the status as an ephemeral message only this user sees. Status is
    * scaffolding, not conversation — in a shared group nobody else needs it. */
   ephemeralTo?: number;
-  /** Hold-off before a tool-status-only message appears; `Infinity` suppresses
-   * it entirely (a draft preview already covers that job in private chats). */
+  /** Hold-off before a tool-status-only message appears. */
   toolRenderDelayMs?: number;
-  /** Hold-off before an event-less turn reports that it is working; `Infinity`
-   * suppresses it entirely. */
+  /** Hold-off before an event-less turn reports that it is working. */
   idleRenderDelayMs?: number;
 }
 

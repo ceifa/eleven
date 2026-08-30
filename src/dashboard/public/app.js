@@ -1100,6 +1100,11 @@ function threadMenu(thread) {
         title: "start a fresh thread in this same conversation — the /new command",
         onclick: () => { menu.open = false; startFreshThread(thread); },
       }, "New thread here"),
+      h("button", {
+        class: "menu-item",
+        title: "the skills a turn in this thread can load — the /skills command",
+        onclick: () => { menu.open = false; openSkillsModal(thread); },
+      }, "Skills"),
       h("button", { class: "menu-item", onclick: () => { menu.open = false; copyText(id, "Thread id copied."); } }, "Copy thread id"),
       deleteThreadButton(id),
     ),
@@ -1822,6 +1827,51 @@ async function openToolCallModal(name, args, callId) {
     ? await api.get(`/threads/${state.activeThread.id}/toolresult?call=${encodeURIComponent(callId)}`).catch(() => undefined)
     : undefined;
   showToolCallModal(name, args, result);
+}
+
+/**
+ * What the agent can reach for in this thread — Telegram's /skills, for the
+ * thread on screen. Skills are discovered from the workspace's directory, so
+ * the workspace read is the answer; the list is exactly what a turn here would
+ * be offered, names and one-line descriptions included.
+ */
+async function openSkillsModal(thread) {
+  let workspace;
+  try {
+    workspace = await withLoading(() => api.get(`/workspaces/${encodeURIComponent(thread.workspace)}`));
+  } catch (error) {
+    return toast(error.message, true);
+  }
+  const skills = workspace.skills ?? [];
+  const rows = skills.map((skill) =>
+    h("div", { class: "skill-row" },
+      h("div", { class: "skill-name font-mono" }, skill.name),
+      h("div", { class: "skill-desc" }, skill.description),
+    ),
+  );
+  const body = h("div", { class: "overflow-auto", style: "max-height: 72vh" },
+    rows.length
+      ? h("div", { class: "skill-list" }, rows)
+      : h("div", { class: "opacity-60 text-sm" }, `No skills are loaded for ${thread.workspace}.`),
+  );
+  // A workspace can carry dozens of them, and you open this list looking for
+  // one — the filter is the difference between reading and scanning.
+  const toolbar = rows.length > 8
+    ? [h("input", {
+        class: "input input-sm skill-filter",
+        type: "search",
+        placeholder: "filter",
+        "aria-label": "Filter skills",
+        oninput: (event) => {
+          const needle = event.target.value.trim().toLowerCase();
+          rows.forEach((row, index) => {
+            const skill = skills[index];
+            row.hidden = !!needle && !`${skill.name}\n${skill.description}`.toLowerCase().includes(needle);
+          });
+        },
+      })]
+    : [];
+  openModal("🧩 skills", `${thread.workspace} · ${skills.length}`, toolbar, body);
 }
 
 // Abort the running turn — the dashboard's /stop. The button lives in the

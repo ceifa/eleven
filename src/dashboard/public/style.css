@@ -1294,6 +1294,20 @@ video.msg-media { max-width: 22rem; }
 }
 .toolcall-result.is-error { color: var(--color-error); }
 
+/* The thread's skills. A reference list, so it reads as one: the name is the
+   handle you go looking for, the description the line that tells you whether
+   this is the one. */
+.skill-list { display: flex; flex-direction: column; }
+.skill-row { padding: 0.55rem 0.1rem; border-bottom: 1px solid var(--color-base-300); }
+.skill-row:last-child { border-bottom: 0; }
+.skill-name { font-size: 0.8rem; color: color-mix(in oklab, var(--color-warning) 75%, var(--color-base-content)); }
+.skill-desc {
+  font-size: 0.85rem; line-height: 1.5;
+  color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+}
+/* Sits in the modal's toolbar, where the width is whatever is left over. */
+.skill-filter { width: 9rem; }
+
 /* A turn that failed, sitting in the transcript where it failed. Deliberately
    not a chat bubble: nobody said this — it is the gateway reporting that the
    conversation stopped here. */

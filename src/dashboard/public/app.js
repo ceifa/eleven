@@ -2757,7 +2757,12 @@ async function loadUsage() {
     slot.replaceChildren();
     if (!report) continue;
     if (report.unsupported) {
-      slot.append(h("div", { class: "text-xs opacity-40" }, "this provider doesn't report subscription usage"));
+      // A provider billed per use has no quota to report, and saying so is only
+      // worth the room where the provider itself is the subject. Anywhere the
+      // slot is marked optional (the Usage page's strip), the row just goes.
+      const optional = slot.closest("[data-usage-optional]");
+      if (optional) optional.remove();
+      else slot.append(h("div", { class: "text-xs opacity-40" }, "this provider doesn't report subscription usage"));
       continue;
     }
     if (report.error) {
@@ -2771,6 +2776,11 @@ async function loadUsage() {
     // The plan lands in the card header, next to the provider's name.
     const plan = document.querySelector(`[data-usage-plan="${report.provider}"]`);
     if (plan && usage.plan) plan.textContent = `${usage.provider} · ${usage.plan}`;
+  }
+  // A strip whose every row turned out to have no quota is a heading over
+  // nothing: it goes too.
+  for (const section of document.querySelectorAll("[data-usage-strip]")) {
+    if (!section.querySelector("[data-usage-optional]")) section.remove();
   }
 }
 
@@ -3062,7 +3072,10 @@ function usageTiles(report) {
       `${fmtTokens(total.reasoning)} of it reasoning · ${total.responses.toLocaleString()} responses`),
     usageTile("Cache hit", fmtPercent(hit), "share of prompt tokens served from cache",
       hit >= 0.9 ? "good" : hit >= 0.7 ? "warn" : "bad"),
-    usageTile("List price", fmtMoney(total.cost), "at published API rates — you pay subscriptions, so this is weight, not spend"),
+    // Whether this is money or merely weight depends on how the providers are
+    // paid for, which eleven has no way to know — so it says what the number
+    // is and lets the reader place it.
+    usageTile("List price", fmtMoney(total.cost), "at each provider's published rates — the bill on a pay-per-use key, an estimate on a subscription"),
   );
 }
 
@@ -3169,14 +3182,18 @@ function usageThreadsTable(report) {
 }
 
 /** The same quota meters the Models page carries, mirrored here so one screen
- *  answers both halves of the question: what was spent, and what is left. */
+ *  answers both halves of the question: what was spent, and what is left.
+ *
+ *  Only the second half is optional — a provider billed per use has no window
+ *  to run out of — so every row here is provisional until /usage answers, and
+ *  loadUsage drops the ones (and the strip) that turn out to have nothing. */
 function usageQuotaSection() {
   const providers = providersInUse();
   if (!providers.length) return null;
-  return h("div", { class: "flex flex-col gap-2" },
+  return h("div", { class: "flex flex-col gap-2", "data-usage-strip": true },
     sectionLabel("Quota left"),
     ...providers.map((provider) =>
-      h("div", { class: "flex flex-col gap-1.5 py-1" },
+      h("div", { class: "flex flex-col gap-1.5 py-1", "data-usage-optional": true },
         h("div", { class: "flex items-center gap-2" },
           h("span", { class: "font-mono text-sm" }, provider),
           h("span", { class: "text-xs opacity-50", "data-usage-plan": provider }),

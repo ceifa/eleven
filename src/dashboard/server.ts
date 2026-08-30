@@ -654,11 +654,14 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const providers = [...new Set(config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
         return send(200, await collectProviderUsage(providers));
       }
-      // What the quotas above were spent on. Read off the session transcripts
-      // every time — a full history is about a second of scanning, so there is
-      // no index to keep honest. Only what is still on disk can be counted:
-      // gc deletes session files on a retention timer, and `oldestAt` says
-      // where the data actually begins.
+      // The other half of the question the endpoint above answers: not what a
+      // provider has left, but what was spent getting there — which is the only
+      // half that exists at all for a provider billed per use.
+      //
+      // Read off the session transcripts every time: a full history is about a
+      // second of scanning, so there is no index to keep honest. Only what is
+      // still on disk can be counted — gc deletes session files on a retention
+      // timer, and `oldestAt` says where the data actually begins.
       if (method === "GET" && path === "/usage/tokens") {
         const raw = url.searchParams.get("days");
         const days = raw === null ? DEFAULT_USAGE_DAYS : Number(raw);

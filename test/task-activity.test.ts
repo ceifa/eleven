@@ -193,7 +193,7 @@ describe("inherited plans and reporting tools", () => {
       progress.tool("workflow", "script: export const meta = { name: \"research\" }");
       progress.update({ kind: "plan", scope: "call-7", label: "workflow", tasks: [{ id: "call-7:p1", title: "scout", status: "running" }] });
     });
-    match(text, /⚙️ workflow/);
+    match(text, /📋 workflow/);
     match(text, /scout/);
     strictEqual(/🔧/.test(text), false);
     strictEqual(/export const meta/.test(text), false);

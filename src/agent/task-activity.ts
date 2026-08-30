@@ -162,7 +162,16 @@ const STATUSES = new Set<string>(["pending", "running", "completed", "failed", "
  */
 export function readToolActivity(partialResult: unknown, scope: string, label?: string): TaskActivityEvent[] {
   const details = (asRecord(partialResult).details ?? {}) as Record<string, unknown>;
-  const raw = details.activity;
+  return normalizeActivity(details.activity, scope, label);
+}
+
+/**
+ * The same validation for activity that did not come from a tool result — a
+ * workspace extension reporting outside a tool call (see host-api.ts). Kept
+ * together with `readToolActivity` so both producers get identical treatment;
+ * an extension is not more trusted than a tool just because it skipped one.
+ */
+export function normalizeActivity(raw: unknown, scope: string, label?: string): TaskActivityEvent[] {
   if (!Array.isArray(raw)) return [];
   const events: TaskActivityEvent[] = [];
   for (const entry of raw) {
@@ -170,7 +179,13 @@ export function readToolActivity(partialResult: unknown, scope: string, label?: 
     if (event.kind === "plan") {
       if (!Array.isArray(event.tasks)) continue;
       const tasks = event.tasks.map((task) => readItem(task, scope)).filter((task): task is TaskActivityItem => !!task);
-      events.push({ kind: "plan", scope, tasks, ...(label ? { label } : {}) });
+      events.push({
+        kind: "plan",
+        scope,
+        tasks,
+        ...(label ? { label } : {}),
+        ...(event.seeded === true ? { seeded: true as const } : {}),
+      });
     } else if (event.kind === "agent") {
       const task = readItem(event.task, scope);
       if (task) events.push({ kind: "agent", task });

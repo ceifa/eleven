@@ -186,9 +186,7 @@ test("Claude Code exposes stable moving aliases and an explicit native tool poli
   assert.deepEqual(nativeToolsForPolicy(["read"]), ["Read", "Glob", "Grep"]);
   assert.deepEqual(nativeToolsForPolicy(["bash", "write"]), ["Bash", "Write"]);
   assert.ok(nativeToolsForPolicy(undefined).includes("WebSearch"));
-  // Delegation and the plan are eleven's own tools now, on every provider — the
-  // unrestricted default must not smuggle a second, Claude-only surface back in.
-  assert.equal(nativeToolsForPolicy(undefined).includes("Task"), false);
+  assert.ok(nativeToolsForPolicy(undefined).includes("Task"));
   assert.equal(cleanToolName("mcp__eleven__telegram"), "telegram");
   assert.equal(cleanToolName("Read"), "Read");
 });

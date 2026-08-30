@@ -11,6 +11,29 @@ export type WorkspaceTool = (typeof BUILTIN_TOOLS)[number];
 /** The subset implemented by Pi itself. */
 export const PI_BUILTIN_TOOLS = ["read", "bash", "edit", "write"] as const;
 
+/**
+ * Capability -> the runtime's own tools, for runtimes that bring their own
+ * (Claude Code today). This lives with the config vocabulary rather than with
+ * the adapter because it is what a workspace writes `excludeNativeTools`
+ * against — the names have to be nameable before they can be withheld.
+ *
+ * An allowlist, not a denylist: a new tool in the runtime never appears in
+ * eleven by surprise. TaskOutput and TaskStop are deliberately absent — both
+ * only address background tasks, and eleven forces every native task into the
+ * foreground.
+ */
+export const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
+  read: ["Read", "Glob", "Grep"],
+  bash: ["Bash"],
+  edit: ["Edit"],
+  write: ["Write"],
+  web: ["WebFetch", "WebSearch"],
+  agent: ["Task", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"],
+};
+
+/** Every native tool name a workspace may withhold. */
+export const NATIVE_TOOLS: readonly string[] = [...new Set(Object.values(POLICY_TO_NATIVE).flat())];
+
 export const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 /** What a ModelEntry without an explicit reasoning level runs at. The daemon
@@ -81,6 +104,13 @@ export interface WorkspaceConfig extends ModelScope {
   path: string;
   /** Provider-neutral capability allowlist. Omit for the curated full set. */
   tools?: WorkspaceTool[];
+  /**
+   * Runtime-native tools this workspace withholds, by name. For a workspace
+   * that ships its own plan or its own delegation as an extension: two tools
+   * for one job means the model has to choose between them, and they report
+   * differently. eleven ships the natives; the workspace decides.
+   */
+  excludeNativeTools?: string[];
   /** Custom personality/style block; omit to use the built-in gateway prompt. */
   systemPrompt?: string;
   /** Chat channels routed to this workspace. */
@@ -247,6 +277,16 @@ function validateTools(tools: WorkspaceTool[] | undefined, where: string) {
   }
 }
 
+/** A misspelled name here would silently withhold nothing, which is the one
+ *  failure mode this list must not have. */
+function validateExclusions(names: string[] | undefined, where: string) {
+  for (const name of names ?? []) {
+    if (!(NATIVE_TOOLS as readonly string[]).includes(name)) {
+      throw new Error(`${where}: unknown native tool "${name}" in excludeNativeTools`);
+    }
+  }
+}
+
 function validateSequence(entries: ModelEntry[] | undefined, where: string) {
   if (entries === undefined) return;
   if (!Array.isArray(entries)) throw new Error(`${where}: models must be an array`);
@@ -267,6 +307,7 @@ export function validate(config: ElevenConfig) {
   for (const [workspace, w] of Object.entries(config.workspaces)) {
     validateSequence(w.models, `workspace "${workspace}" models`);
     validateTools(w.tools, `workspace "${workspace}"`);
+    validateExclusions(w.excludeNativeTools, `workspace "${workspace}"`);
     for (const channel of w.channels ?? []) {
       for (const group of Object.values(channel.groups ?? {})) {
         validateSequence(group.models, `group "${group.title ?? "?"}" models`);

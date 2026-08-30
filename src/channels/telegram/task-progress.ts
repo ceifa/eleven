@@ -348,7 +348,7 @@ export function renderTaskActivity(
   // get different headings — merged, a reader cannot tell which is theirs.
   for (const section of plan) {
     if (!section.tasks.length) continue;
-    const title = section.label ? `⚙️ ${section.label}` : "📋 Plan";
+    const title = `📋 ${section.label ?? "Plan"}`;
     sections.push(renderSection(title, section.tasks, MAX_PLAN_ROWS, renderPlanRow, section.tasks.length));
   }
   if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow, agentTotal));

@@ -25,7 +25,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BUILTIN_TOOLS, type WorkspaceTool } from "../config.ts";
+import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
@@ -36,30 +36,6 @@ const log = logger("claude-code");
 export const CLAUDE_CODE_PROVIDER = "claude-code";
 const MCP_SERVER = "eleven";
 const MCP_PREFIX = `mcp__${MCP_SERVER}__`;
-
-/** Workspace capability -> Claude Code native tools.
- *
- * TaskOutput and TaskStop are deliberately absent: both only address tasks
- * running in the background, and foregroundToolInput strips run_in_background
- * from every Agent and Bash call, so no such task can exist here. */
-const POLICY_TO_NATIVE: Record<WorkspaceTool, readonly string[]> = {
-  read: ["Read", "Glob", "Grep"],
-  bash: ["Bash"],
-  edit: ["Edit"],
-  write: ["Write"],
-  web: ["WebFetch", "WebSearch"],
-  // Nothing native. Delegation is the `workflow` tool and the plan is
-  // task-tools.ts — both eleven's, both on every provider. The natives were a
-  // second surface for the same two jobs, available on exactly one provider:
-  // the model had to choose, the two reported differently, and eleven had to
-  // neuter the Agent tool anyway (foregroundToolInput strips run_in_background
-  // and isolation, because a Pi turn cannot outlive its provider stream).
-  //
-  // The capability itself stays: it is what gates eleven's plan tools. Putting
-  // the natives back is this line — the normalizer that renders their roster
-  // (emitAgentTaskActivity) is still here and still tested.
-  agent: [],
-};
 
 /** Claude Code capabilities intentionally enabled when a workspace omits a
  * policy. This is an allowlist, not a denylist: new Claude tools never appear
@@ -117,6 +93,8 @@ export interface ClaudeSessionRegistration {
   cwd: string;
   /** Workspace policy as written in eleven.json. Undefined means the curated default. */
   workspaceTools?: WorkspaceTool[];
+  /** Native tools this workspace withholds, by name — it supplies its own. */
+  excludeNativeTools?: readonly string[];
   /** Executable, request-bound tools (Telegram today), never Pi's builtin tools. */
   customTools: AgentTool[];
 }
@@ -281,9 +259,17 @@ export function setClaudeTaskListener(
   if (session) session.onTaskActivity = listener;
 }
 
-export function nativeToolsForPolicy(policy: WorkspaceTool[] | undefined): string[] {
-  if (policy === undefined) return [...DEFAULT_NATIVE_TOOLS];
-  return [...new Set(policy.flatMap((name) => POLICY_TO_NATIVE[name] ?? []))];
+/**
+ * The native tools a policy enables, minus the ones the workspace withholds.
+ *
+ * A workspace that brings its own plan or its own delegation (an extension
+ * tool) needs a way to say so: two tools for one job means the model picks, and
+ * the two report differently. Withholding is by tool name and per workspace —
+ * eleven ships the natives, and the workspace decides whether it wants them.
+ */
+export function nativeToolsForPolicy(policy: WorkspaceTool[] | undefined, exclude: readonly string[] = []): string[] {
+  const enabled = policy === undefined ? DEFAULT_NATIVE_TOOLS : [...new Set(policy.flatMap((name) => POLICY_TO_NATIVE[name] ?? []))];
+  return exclude.length ? enabled.filter((name) => !exclude.includes(name)) : [...enabled];
 }
 
 function nativeToolsForNestedContext(toolNames: string[]): string[] {
@@ -524,7 +510,7 @@ async function consumeClaudeQuery(
     // AsyncLocalStorage but never its side-effectful MCP tools or session state.
     const nativeTools = isolated
       ? nativeToolsForNestedContext(context.tools?.map((tool) => tool.name) ?? [])
-      : nativeToolsForPolicy(registration.workspaceTools);
+      : nativeToolsForPolicy(registration.workspaceTools, registration.excludeNativeTools);
     const mcpServer = buildMcpServer(customTools, ownerSessionId, markTool);
     const qualifiedTools = customTools.map((tool) => `${MCP_PREFIX}${tool.name}`);
 

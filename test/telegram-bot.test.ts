@@ -64,7 +64,7 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
   ].join("\n"));
 });
 
-test("a tool's phases are their own section, under the tool's name", () => {
+test("a producer's rows are their own section, under its own name", () => {
   // Regression: scope existed for correctness (one snapshot must not evict
   // another) but was ignored when rendering, so a workflow's internal phases
   // sat in the user's plan as if they were tasks the user asked for.
@@ -81,7 +81,7 @@ test("a tool's phases are their own section, under the tool's name", () => {
     "📋 Plan",
     "⏳ Ship it",
     "",
-    "⚙️ workflow",
+    "📋 workflow",
     "✅ scout",
   ].join("\n"));
 });

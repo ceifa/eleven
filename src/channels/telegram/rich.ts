@@ -1,10 +1,6 @@
 import { InputFile, type Api } from "grammy";
 import type { InlineKeyboardMarkup, InputRichMessageMedia, ReplyParameters } from "@grammyjs/types";
 import { withRetry } from "./retry.ts";
-import { ephemeralReceiver, isEphemeralRejected, noteEphemeralRefused } from "./ephemeral.ts";
-import { logger } from "../../log.ts";
-
-const log = logger("telegram/rich");
 
 /** Bot API rich message limit is 32768; keep headroom. The slack also pays for
  * the fence markers balanceFences adds when a code block spans two chunks. */
@@ -25,8 +21,6 @@ export interface RichSendOptions {
   replyParameters?: ReplyParameters;
   replyMarkup?: InlineKeyboardMarkup;
   silent?: boolean;
-  /** Deliver as an ephemeral message, visible only to this user (groups only). */
-  ephemeralTo?: number;
   /** Files to embed at the top of the message; two or more become a collage. */
   media?: RichMedia[];
 }
@@ -51,10 +45,6 @@ export function fitsOneRichMessage(markdown: string): boolean {
 export async function sendRich(api: Api, chatId: number | string, markdown: string, options: RichSendOptions = {}) {
   const attachments = buildMedia(options.media);
   const chunks = splitRich(attachments ? `${attachments.blocks}\n\n${markdown}`.trim() : markdown);
-  // Ephemeral delivery requires the bot to be a chat admin. Where it isn't, the
-  // whole message used to be dropped — which is how /stop and /new went silent
-  // in a group: they did their work, the confirmation just never arrived.
-  let ephemeralTo = ephemeralReceiver(chatId, options.ephemeralTo);
   let last;
   for (const [index, chunk] of chunks.entries()) {
     const isLast = index === chunks.length - 1;
@@ -63,7 +53,6 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
         api.raw.sendRichMessage({
           chat_id: chatId,
           message_thread_id: options.messageThreadId,
-          ephemeral_message_parameters: ephemeralTo ? { receiver_user_id: ephemeralTo } : undefined,
           // Uploads ride with the chunk that references them — the first one.
           rich_message: attachments && index === 0 ? { markdown: text, media: attachments.media } : { markdown: text },
           // Reply on the first chunk, keyboard on the last.
@@ -75,14 +64,6 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
     try {
       last = await send(chunk);
     } catch (error) {
-      if (ephemeralTo !== undefined && isEphemeralRejected(error)) {
-        // Ephemeral is a courtesy to the rest of the chat, not the point.
-        log.warn(`ephemeral rich message rejected in chat ${chatId}, posting normally: ${error}`);
-        noteEphemeralRefused(chatId);
-        ephemeralTo = undefined;
-        last = await send(chunk);
-        continue;
-      }
       // Degenerate markdown can parse to nothing (e.g. a bare "42." reads as an
       // ordered-list item with no content). Still a rich message — just escaped.
       if (!isRichMessageEmpty(error)) throw error;

@@ -3,7 +3,6 @@ import type { ReplyParameters } from "@grammyjs/types";
 import { displayId, TaskActivityBoard, type TaskActivityEvent, type TaskActivityItem, type TaskActivitySection } from "../../agent/task-activity.ts";
 import { logger } from "../../log.ts";
 import { isNoop, withRetry } from "./retry.ts";
-import { ephemeralReceiver, noteEphemeralRefused } from "./ephemeral.ts";
 
 const log = logger("telegram/tasks");
 const FIRST_RENDER_DELAY_MS = 250;
@@ -18,10 +17,22 @@ const IDLE_FIRST_RENDER_DELAY_MS = 12_000;
 // once the turn stops feeling instant.
 const ELAPSED_TICK_MS = 10_000;
 const ELAPSED_MIN_MS = 10_000;
+// Spacing between edits of the status card. A DM tolerates roughly one message
+// per second; a group is flood-limited at about twenty per minute, and going
+// faster earns a 429 that stalls everything else queued for that chat.
 const THROTTLE_MS = 900;
+const GROUP_THROTTLE_MS = 3_000;
 const MAX_PLAN_ROWS = 12;
 const MAX_AGENT_ROWS = 8;
 const MAX_TEXT = 4_000;
+
+/** When each group last had its status card written to. A group's flood limit is
+ * per chat, not per turn: two turns running in the same group each kept their own
+ * cadence, doubled the rate, and tripped it. One budget, shared.
+ *
+ * Groups only — a DM's limit is per user and looser, and the API throttler
+ * already spaces those out on its own. */
+const lastGroupEditAt = new Map<number, number>();
 
 export type TaskProgressOutcome = "completed" | "failed" | "stopped";
 
@@ -42,9 +53,8 @@ export interface RetryStatus {
 export interface TaskProgressOptions {
   topic?: number;
   replyParameters?: ReplyParameters;
-  /** Post the status as an ephemeral message only this user sees. Status is
-   * scaffolding, not conversation — in a shared group nobody else needs it. */
-  ephemeralTo?: number;
+  /** Spacing between edits; defaults to what the chat kind tolerates. */
+  throttleMs?: number;
   /** Hold-off before a tool-status-only message appears. */
   toolRenderDelayMs?: number;
   /** Hold-off before an event-less turn reports that it is working. */
@@ -66,7 +76,6 @@ export class TelegramTaskProgress {
   /** Plan/agent content appeared — the message is worth keeping after finish. */
   private hasTasks = false;
   private messageId: number | undefined;
-  private ephemeralMessageId: number | undefined;
   private timer: NodeJS.Timeout | undefined;
   private ticker: NodeJS.Timeout | undefined;
   private lastSentAt = 0;
@@ -79,7 +88,7 @@ export class TelegramTaskProgress {
   private readonly chatId: number;
   private readonly topic: number | undefined;
   private readonly replyParameters: ReplyParameters | undefined;
-  private ephemeralTo: number | undefined;
+  private readonly throttleMs: number;
   private readonly toolRenderDelayMs: number;
   private readonly idleRenderDelayMs: number;
 
@@ -88,7 +97,9 @@ export class TelegramTaskProgress {
     this.chatId = chatId;
     this.topic = options.topic;
     this.replyParameters = options.replyParameters;
-    this.ephemeralTo = ephemeralReceiver(chatId, options.ephemeralTo);
+    // Telegram ids tell the two apart: a private chat's id is the user's own and
+    // is positive, groups and channels are negative.
+    this.throttleMs = options.throttleMs ?? (chatId < 0 ? GROUP_THROTTLE_MS : THROTTLE_MS);
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
     this.idleRenderDelayMs = options.idleRenderDelayMs ?? IDLE_FIRST_RENDER_DELAY_MS;
   }
@@ -143,13 +154,7 @@ export class TelegramTaskProgress {
       void Promise.resolve(this.draining).then(() => {
         if (!this.posted) return;
         return withRetry("idempotent", "delete task progress", () =>
-          this.ephemeralMessageId !== undefined
-            ? this.api.raw.deleteEphemeralMessage({
-              chat_id: this.chatId,
-              receiver_user_id: this.ephemeralTo!,
-              ephemeral_message_id: this.ephemeralMessageId,
-            })
-            : this.api.raw.deleteMessage({ chat_id: this.chatId, message_id: this.messageId! }),
+          this.api.raw.deleteMessage({ chat_id: this.chatId, message_id: this.messageId! }),
         );
       }).catch((error) => {
         if (!isNoop(error)) log.warn(`status cleanup failed for chat ${this.chatId}: ${error}`);
@@ -172,9 +177,9 @@ export class TelegramTaskProgress {
     return this.hasTasks || !!this.currentRetry;
   }
 
-  /** The status message exists in the chat — ephemeral or ordinary. */
+  /** The status message exists in the chat. */
   private get posted(): boolean {
-    return this.messageId !== undefined || this.ephemeralMessageId !== undefined;
+    return this.messageId !== undefined;
   }
 
   private stopTimers(): void {
@@ -204,7 +209,7 @@ export class TelegramTaskProgress {
     // its own; richer content re-arms with a finite one.
     if (!this.posted && !Number.isFinite(hold)) return;
     const delay = this.lastSentAt
-      ? Math.max(0, THROTTLE_MS - (Date.now() - this.lastSentAt))
+      ? Math.max(0, this.throttleMs - (Date.now() - this.lastSentAt))
       : Math.max(0, this.startedAt + hold - Date.now());
     this.timer = setTimeout(() => {
       this.timer = undefined;
@@ -238,13 +243,17 @@ export class TelegramTaskProgress {
       while (this.pendingText !== undefined && !this.dead) {
         const text = this.pendingText;
         this.pendingText = undefined;
-        const wait = this.lastSentAt ? Math.max(0, this.lastSentAt + THROTTLE_MS - Date.now()) : 0;
+        // Wait out whichever came last: this card's own edit or another turn's
+        // in the same group.
+        const floor = Math.max(this.lastSentAt, lastGroupEditAt.get(this.chatId) ?? 0);
+        const wait = floor ? Math.max(0, floor + this.throttleMs - Date.now()) : 0;
         if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
         if (this.dead) return;
         if (!this.posted) await this.post(text);
         else await this.repost(text);
         this.lastText = text;
         this.lastSentAt = Date.now();
+        if (this.chatId < 0) lastGroupEditAt.set(this.chatId, this.lastSentAt);
       }
     } catch (error) {
       this.dead = true;
@@ -253,40 +262,18 @@ export class TelegramTaskProgress {
     }
   }
 
-  /** First render: post the message, ephemeral when asked for. */
+  /** First render: post the message. */
   private async post(text: string): Promise<void> {
-    const common = {
-      chat_id: this.chatId,
-      message_thread_id: this.topic,
-      text,
-      reply_parameters: this.replyParameters,
-      disable_notification: true,
-    };
-    if (this.ephemeralTo !== undefined) {
-      try {
-        const message = await withRetry("send", "send ephemeral task progress", () =>
-          this.api.raw.sendMessage({ ...common, ephemeral_message_parameters: { receiver_user_id: this.ephemeralTo! } }),
-        );
-        // A chat where ephemeral delivery didn't apply answers with an ordinary
-        // message — carry on editing it as one.
-        if (message.ephemeral_message_id !== undefined) this.ephemeralMessageId = message.ephemeral_message_id;
-        else {
-          this.messageId = message.message_id;
-          noteEphemeralRefused(this.chatId);
-          this.ephemeralTo = undefined;
-        }
-      } catch (error) {
-        // Ephemeral is a courtesy to the other people in the chat, not the
-        // point: a chat that refuses it still deserves to see the status.
-        log.warn(`ephemeral status rejected in chat ${this.chatId}, posting normally: ${error}`);
-        noteEphemeralRefused(this.chatId);
-        this.ephemeralTo = undefined;
-      }
-    }
-    if (!this.posted) {
-      const message = await withRetry("send", "send task progress", () => this.api.raw.sendMessage(common));
-      this.messageId = message.message_id;
-    }
+    const message = await withRetry("send", "send task progress", () =>
+      this.api.raw.sendMessage({
+        chat_id: this.chatId,
+        message_thread_id: this.topic,
+        text,
+        reply_parameters: this.replyParameters,
+        disable_notification: true,
+      }),
+    );
+    this.messageId = message.message_id;
     // From here on the running header shows elapsed time — keep it honest
     // between events. queueRender directly: the tick always exceeds the
     // throttle, which drain() enforces anyway.
@@ -300,14 +287,7 @@ export class TelegramTaskProgress {
   private async repost(text: string): Promise<void> {
     try {
       await withRetry("idempotent", "edit task progress", () =>
-        this.ephemeralMessageId !== undefined
-          ? this.api.raw.editEphemeralMessageText({
-            chat_id: this.chatId,
-            receiver_user_id: this.ephemeralTo!,
-            ephemeral_message_id: this.ephemeralMessageId,
-            text,
-          })
-          : this.api.raw.editMessageText({ chat_id: this.chatId, message_id: this.messageId!, text }),
+        this.api.raw.editMessageText({ chat_id: this.chatId, message_id: this.messageId!, text }),
       );
     } catch (error) {
       if (!isNoop(error)) throw error;

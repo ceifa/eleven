@@ -3,7 +3,6 @@ import test from "node:test";
 import { InputFile } from "grammy";
 import { createSeenMessages, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
-import { ephemeralReceiver } from "../src/channels/telegram/ephemeral.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
 
@@ -25,11 +24,15 @@ test("Telegram command sync removes stale group-scoped commands", async () => {
   assert.deepEqual(calls, [
     {
       method: "set",
+      // No is_ephemeral: an ephemeral command never becomes a message in the
+      // chat, and Telegram replayed a whole day of them in one burst — fourteen
+      // /new in eleven seconds, each rotating a live conversation. As ordinary
+      // messages they carry a message id, which is what the dedupe below needs.
       value: [
-        { command: "new", description: "Start a fresh thread", is_ephemeral: true },
-        { command: "skills", description: "List the skills the agent can use here", is_ephemeral: true },
-        { command: "usage", description: "Show model subscription usage", is_ephemeral: true },
-        { command: "stop", description: "Abort the running turn", is_ephemeral: true },
+        { command: "new", description: "Start a fresh thread" },
+        { command: "skills", description: "List the skills the agent can use here" },
+        { command: "usage", description: "Show model subscription usage" },
+        { command: "stop", description: "Abort the running turn" },
       ],
     },
     { method: "delete", value: { scope: { type: "all_group_chats" } } },
@@ -105,26 +108,14 @@ test("a blocker id is shown without the scope it was namespaced with", () => {
   assert.match(text, /blocked by #p1$/m);
 });
 
-/** Fake bot API recording every raw call; messages are created with id 77, and
- * ephemeral ones with ephemeral id 501. `rejectEphemeral` plays a chat where
- * ephemeral delivery isn't available. */
-function fakeApi(options: { rejectEphemeral?: boolean } = {}) {
+/** Fake bot API recording every raw call; messages are created with id 77. */
+function fakeApi() {
   const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
   const api = {
     raw: {
       sendMessage: async (payload: Record<string, unknown>) => {
         calls.push({ method: "send", payload });
-        if (!payload.ephemeral_message_parameters) return { message_id: 77 };
-        if (options.rejectEphemeral) throw new Error("Bad Request: EPHEMERAL_MESSAGES_UNAVAILABLE");
-        return { message_id: 77, ephemeral_message_id: 501 };
-      },
-      editEphemeralMessageText: async (payload: Record<string, unknown>) => {
-        calls.push({ method: "edit-ephemeral", payload });
-        return true;
-      },
-      deleteEphemeralMessage: async (payload: Record<string, unknown>) => {
-        calls.push({ method: "delete-ephemeral", payload });
-        return true;
+        return { message_id: 77 };
       },
       editMessageText: async (payload: Record<string, unknown>) => {
         calls.push({ method: "edit", payload });
@@ -141,7 +132,7 @@ function fakeApi(options: { rejectEphemeral?: boolean } = {}) {
 
 test("Telegram task progress sends once then edits the same quiet message", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, -100, { topic: 42, replyParameters: { message_id: 9 } });
+  const progress = new TelegramTaskProgress(api, -100, { topic: 42, replyParameters: { message_id: 9 }, throttleMs: 200 });
   progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
   await new Promise((resolve) => setTimeout(resolve, 300));
   progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "completed" } });
@@ -239,9 +230,9 @@ test("a provider retry is announced live and kept after the turn", async () => {
   assert.match(String(calls[1]?.payload.text), /\u2705 Turn completed\n\ud83d\udd01 Retry 1\/3/);
 });
 
-test("in a group the status is ephemeral, edited and deleted as one", async () => {
+test("in a group the status is one message, sent once and edited in place", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, -100, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
+  const progress = new TelegramTaskProgress(api, -101, { toolRenderDelayMs: 30, throttleMs: 200 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
   progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
@@ -249,27 +240,32 @@ test("in a group the status is ephemeral, edited and deleted as one", async () =
   await progress.finish("completed");
   progress.cancel();
 
-  assert.deepEqual(calls.map((call) => call.method), ["send", "edit-ephemeral", "edit-ephemeral"]);
-  assert.deepEqual(calls[0]?.payload.ephemeral_message_parameters, { receiver_user_id: 4242 });
-  assert.equal(calls[1]?.payload.ephemeral_message_id, 501);
-  assert.equal(calls[1]?.payload.receiver_user_id, 4242);
+  assert.deepEqual(calls.map((call) => call.method), ["send", "edit", "edit"]);
+  assert.equal(calls[0]?.payload.chat_id, -101);
+  assert.equal(calls[1]?.payload.message_id, 77);
 });
 
-test("a chat that refuses ephemeral status still gets the status", async () => {
-  const { calls, api } = fakeApi({ rejectEphemeral: true });
-  // Its own chat id: a refusal is remembered per chat for the life of the
-  // process, so sharing -100 would disable ephemeral in the tests that follow.
-  const progress = new TelegramTaskProgress(api, -101, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
-  progress.tool("Bash", "npm test");
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  await progress.finish("completed");
-  progress.cancel();
-  for (let i = 0; i < 50 && calls.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+test("two turns in one chat share a single edit budget", async () => {
+  // Regression: the cadence was per card, so two turns in the same group wrote
+  // at twice the rate — which is how a pair of concurrent turns earned a 429 and
+  // ended up with the status disabled for that chat entirely.
+  const { calls, api } = fakeApi();
+  const options = { toolRenderDelayMs: 0, throttleMs: 300 };
+  const first = new TelegramTaskProgress(api, -102, options);
+  const second = new TelegramTaskProgress(api, -102, options);
+  const at: number[] = [];
+  const started = Date.now();
+  first.update({ kind: "plan", tasks: [{ id: "1", title: "Ship it", status: "running" }] });
+  second.update({ kind: "plan", tasks: [{ id: "2", title: "Ship it too", status: "running" }] });
+  for (let i = 0; i < 200 && calls.length < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    while (calls.length > at.length) at.push(Date.now() - started);
+  }
+  first.cancel();
+  second.cancel();
 
-  // The rejected ephemeral send, the plain one that replaced it, and the cleanup.
-  assert.deepEqual(calls.map((call) => call.method), ["send", "send", "delete"]);
-  assert.equal(calls[1]?.payload.ephemeral_message_parameters, undefined);
-  assert.equal(calls[2]?.payload.message_id, 77);
+  assert.equal(calls.length, 2);
+  assert.ok(at[1]! - at[0]! >= 250, `the second card wrote ${at[1]! - at[0]!}ms after the first`);
 });
 
 test("an infinite hold-off keeps tool status off the chat until real tasks appear", async () => {
@@ -288,12 +284,11 @@ test("an infinite hold-off keeps tool status off the chat until real tasks appea
   assert.match(String(calls[0]?.payload.text), /Ship it/);
 });
 
-test("a DM gets the same status a group does, as an ordinary message", async () => {
+test("a DM gets the same status a group does", async () => {
   const { calls, api } = fakeApi();
-  // Callers pass the asker either way; a private chat (positive id) is where the
-  // status used to be suppressed in favour of a draft preview, and where an
-  // ephemeral wrapper would be both pointless and rejected.
-  const progress = new TelegramTaskProgress(api, 4242, { ephemeralTo: 4242, toolRenderDelayMs: 30 });
+  // A private chat (positive id) is where the status used to be suppressed in
+  // favour of a draft preview.
+  const progress = new TelegramTaskProgress(api, 4242, { toolRenderDelayMs: 30 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
   await progress.finish("completed");
@@ -301,14 +296,7 @@ test("a DM gets the same status a group does, as an ordinary message", async () 
   for (let i = 0; i < 50 && calls.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.deepEqual(calls.map((call) => call.method), ["send", "delete"]);
-  assert.equal(calls[0]?.payload.ephemeral_message_parameters, undefined);
   assert.match(String(calls[0]?.payload.text), /🔧 Bash · npm test/);
-});
-
-test("ephemeral delivery is a group affair — a DM never even asks for it", () => {
-  assert.equal(ephemeralReceiver(-100, 4242), 4242);
-  assert.equal(ephemeralReceiver(4242, 4242), undefined);
-  assert.equal(ephemeralReceiver("4242", 4242), undefined);
 });
 
 /** Fake API for the channel tool: records rich sends and the classic media
@@ -411,34 +399,26 @@ test("a topic registers and names itself under whoever owns it — a group or a 
   assert.equal(registerTopic(user, undefined), false);
 });
 
-test("a command answer in a group is addressed to whoever asked", async () => {
-  const payloads: Array<Record<string, unknown>> = [];
-  const api = { raw: { sendRichMessage: async (payload: Record<string, unknown>) => { payloads.push(payload); return { message_id: 1 }; } } };
-
-  await sendRich(api as never, -100, "Nothing running.", { ephemeralTo: 4242 });
-  await sendRich(api as never, -100, "Nothing running.");
-
-  assert.deepEqual(payloads[0]?.ephemeral_message_parameters, { receiver_user_id: 4242 });
-  assert.equal(payloads[1]?.ephemeral_message_parameters, undefined);
-});
-
-test("consecutive ephemeral commands are all handled, and a replayed update is not", () => {
+test("a replayed command is deduped like any other message", () => {
   let now = 1_000_000;
   const alreadyHandled = createSeenMessages(() => now);
 
-  // Ephemeral commands ("only visible to the bot") all arrive with message_id 0.
-  assert.equal(alreadyHandled(-100, 0, 501), false);
+  // Regression: while commands were answered ephemerally they arrived with
+  // message_id 0 — no message id to dedupe on, so a replay of one was
+  // indistinguishable from a fresh command and ran again. A command is an
+  // ordinary message again, so its own id is what identifies it.
+  assert.equal(alreadyHandled(-100, 4242), false);
   now += 60_000;
-  assert.equal(alreadyHandled(-100, 0, 502), false);
-  assert.equal(alreadyHandled(-100, 0, 503), false);
-  // Telegram replaying an unacknowledged update still runs the turn only once.
-  assert.equal(alreadyHandled(-100, 0, 502), true);
+  assert.equal(alreadyHandled(-100, 4243), false);
+  assert.equal(alreadyHandled(-100, 4242), true);
+  assert.equal(alreadyHandled(-100, 4243), true);
+  // A different chat is a different message, same id or not.
+  assert.equal(alreadyHandled(-200, 4242), false);
 
-  // Ordinary messages keep deduping by message id, until the TTL lapses.
-  assert.equal(alreadyHandled(-100, 77, 504), false);
-  assert.equal(alreadyHandled(-100, 77, 505), true);
+  // The memory lapses with the TTL — Telegram is not expected to redeliver
+  // anything that old.
   now += 21 * 60_000;
-  assert.equal(alreadyHandled(-100, 77, 506), false);
+  assert.equal(alreadyHandled(-100, 4242), false);
 });
 
 test("group attribution wraps the complete inbound body while DMs stay bare", () => {

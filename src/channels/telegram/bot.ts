@@ -11,7 +11,6 @@ import { collectInboundMedia, download, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
-import { forgetEphemeralRefusal } from "./ephemeral.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
@@ -29,6 +28,9 @@ const MAX_AVATAR_BYTES = 128 * 1024;
 // message re-arms the quiet window; the cap bounds the total added latency.
 const BURST_QUIET_MS = 1_500;
 const BURST_MAX_WAIT_MS = 5_000;
+// Telegram flood-limits a group at roughly twenty messages a minute, counting
+// edits — one call every three seconds is the sustained rate that fits.
+const GROUP_MIN_INTERVAL_MS = 3_000;
 // Telegram can redeliver updates after reconnects/restarts; remember handled
 // message ids long enough to swallow those instead of running double turns.
 const SEEN_MESSAGE_TTL_MS = 20 * 60 * 1000;
@@ -50,21 +52,18 @@ interface Target {
   chatId: number;
   topic?: number;
   isPrivate: boolean;
-  /** Sender of the message that started the turn — who the turn's status is
-   * addressed to where the chat can hide it from everyone else. */
+  /** Sender whose per-user append applies (DMs). */
   userId?: number;
   /** Message to ack/reply to, when a specific one triggered the turn. */
   triggerMessageId?: number;
 }
 
-/** Registered with Telegram (the client's "/" menu) and handled in handleCommand.
- * Every answer is for the sender alone — in groups they are delivered as
- * ephemeral messages, which `is_ephemeral` announces up front in the menu. */
+/** Registered with Telegram (the client's "/" menu) and handled in handleCommand. */
 const COMMANDS = [
-  { command: "new", description: "Start a fresh thread", is_ephemeral: true },
-  { command: "skills", description: "List the skills the agent can use here", is_ephemeral: true },
-  { command: "usage", description: "Show model subscription usage", is_ephemeral: true },
-  { command: "stop", description: "Abort the running turn", is_ephemeral: true },
+  { command: "new", description: "Start a fresh thread" },
+  { command: "skills", description: "List the skills the agent can use here" },
+  { command: "usage", description: "Show model subscription usage" },
+  { command: "stop", description: "Abort the running turn" },
 ] as const;
 
 /** Keep one canonical command list. Telegram gives group-specific scopes
@@ -104,19 +103,12 @@ export interface BotHandle {
   stop(): Promise<void>;
 }
 
-/** Remembers handled updates so a redelivery doesn't run the turn twice.
- *
- * Keyed by message id — except an ephemeral command ("only visible to the bot")
- * arrives with `message_id: 0`, because it never becomes a message in the chat.
- * Every one of them in a chat then looks like the same message, so keying on it
- * swallowed all but the first for the whole TTL: after any command, /stop and
- * /new silently did nothing for 20 minutes. Those key on the update id instead,
- * which is unique per update and identical when Telegram replays one. */
+/** Remembers handled messages so a redelivery doesn't run the turn twice. */
 export function createSeenMessages(now: () => number = Date.now) {
   // Insertion-ordered so eviction drops the oldest.
   const seen = new Map<string, number>();
-  return function alreadyHandled(chatId: number, messageId: number, updateId: number): boolean {
-    const key = messageId ? `${chatId}:${messageId}` : `${chatId}:update:${updateId}`;
+  return function alreadyHandled(chatId: number, messageId: number): boolean {
+    const key = `${chatId}:${messageId}`;
     const at = seen.get(key);
     if (at !== undefined && now() - at < SEEN_MESSAGE_TTL_MS) return true;
     seen.delete(key);
@@ -223,7 +215,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   const alreadyHandled = createSeenMessages();
 
-  bot.api.config.use(apiThrottler());
+  // The default group bucket (20 per minute, one per second) hands out its whole
+  // minute in the first twenty seconds — and Telegram's flood control reads a
+  // sliding window, so that burst is exactly what earns a 429. Space them out at
+  // the rate the limit actually allows instead.
+  bot.api.config.use(apiThrottler({ group: { maxConcurrent: 1, minTime: GROUP_MIN_INTERVAL_MS } }));
   // Watchdog heartbeat: note every completed getUpdates round-trip.
   bot.api.config.use(async (prev, method, payload, signal) => {
     const result = await prev(method, payload, signal);
@@ -279,15 +275,12 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   bot.on("message", (ctx) => handleMessage(ctx));
   bot.on("callback_query:data", (ctx) => handleCallback(ctx));
-  // The bot's own rights in a chat just changed — a promotion to admin is what
-  // makes ephemeral delivery possible, so drop the memo of an earlier refusal.
-  bot.on("my_chat_member", (ctx) => forgetEphemeralRefusal(ctx.chat.id));
 
   async function handleMessage(ctx: Context) {
     const message = ctx.message;
     const config = deps.botConfig();
     if (!message || !config || !message.from || message.from.is_bot) return;
-    if (alreadyHandled(ctx.chat!.id, message.message_id, ctx.update.update_id)) return;
+    if (alreadyHandled(ctx.chat!.id, message.message_id)) return;
 
     if (ctx.chat!.type !== "private") maintainGroupRegistry(ctx, config);
 
@@ -420,9 +413,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const taskProgress = new TelegramTaskProgress(bot.api, chatId, {
       topic,
       replyParameters: sendOptions.replyParameters,
-      // The status belongs to whoever asked, not to everyone. In a DM there is
-      // nobody else, and sendRich falls back to an ordinary message there.
-      ephemeralTo: target.userId,
     });
     // A turn that produces no event at all (a provider stalling on the first
     // request) still owes the chat a sign of life — the typing action expires in
@@ -544,19 +534,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     // Commands are rare and act on a session the user can't see; when one seems
     // to do nothing, this line is the only record of which session it hit.
     log.info(`command ${command} in ${sessionKey} (message ${ctx.message?.message_id}, thread ${ctx.message?.message_thread_id ?? "-"}, topic message ${ctx.message?.is_topic_message ?? false})`);
-    // A command answers the person who typed it — in a group the rest of the
-    // chat has no use for a skill list or a "Nothing running."
-    const ephemeralTo = ctx.from?.id;
     // Answer *on* the command. Beyond being easier to follow in a busy group,
     // a reply is what pins the answer to the same forum topic even when the
     // command arrived without the flags topicOf needs to recognize one.
-    // (An ephemeral command never becomes a message, so there is nothing to
-    // reply to — hence the message_id check, not a chat-type one.)
     const replyParameters = ctx.message?.message_id
       ? { message_id: ctx.message.message_id, allow_sending_without_reply: true }
       : undefined;
     const reply = (markdown: string) =>
-      sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, replyParameters, ephemeralTo }).then(() => true);
+      sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, replyParameters }).then(() => true);
 
     switch (command.replace(`@${handle.username}`, "")) {
       case "/start":

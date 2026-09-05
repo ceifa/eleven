@@ -224,6 +224,33 @@ test("fonts are cached forever and left alone — woff2 is already compressed", 
   });
 });
 
+// Everything the SPA fallback doesn't recognise is answered with index.html,
+// which is the right default and exactly wrong for these two: a manifest served
+// as text/html is ignored and a worker served as text/html is refused — both
+// silently, leaving an app that never becomes installable and no error anywhere
+// saying why.
+test("the manifest and the worker are served as themselves, not as the app shell", async () => {
+  await withDashboard(async (base) => {
+    const manifest = await get(`${base}/manifest.webmanifest`);
+    assert.equal(manifest.status, 200);
+    assert.equal(manifest.headers["content-type"], "application/manifest+json");
+    assert.equal(JSON.parse(manifest.body.toString()).start_url, "/#/threads");
+
+    const worker = await get(`${base}/sw.js`, { "accept-encoding": "identity" });
+    assert.equal(worker.status, 200);
+    assert.match(String(worker.headers["content-type"]), /^text\/javascript/);
+    assert.match(worker.body.toString(), /addEventListener\("fetch"/);
+    // And it revalidates rather than sitting in the browser's cache: it is the
+    // one file that decides what every other one is allowed to be.
+    assert.equal(worker.headers["cache-control"], "no-cache");
+
+    const icon = await get(`${base}/icons/icon-192.png`, { "accept-encoding": "br, gzip" });
+    assert.equal(icon.headers["content-type"], "image/png");
+    assert.equal(icon.headers["content-encoding"], undefined); // a PNG is compressed already
+    assert.equal(icon.body.subarray(1, 4).toString(), "PNG");
+  });
+});
+
 test("an unknown path still renders the app shell", async () => {
   await withDashboard(async (base) => {
     const response = await get(`${base}/does/not/exist`);

@@ -24,7 +24,21 @@ import { logger } from "../log.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
-const SHELL_FILES = ["index.html", "app.js", "dom.js", "live-turn.js", "markdown.js", "message-display.js", "waveform.js", "style.css"];
+const SHELL_FILES = [
+  "index.html",
+  "app.js",
+  "dom.js",
+  "live-turn.js",
+  "markdown.js",
+  "message-display.js",
+  "waveform.js",
+  "style.css",
+  // The PWA half of the shell. sw.js is in here so that editing the worker
+  // reloads the open pages too — otherwise the new one installs but the page
+  // that would register it never restarts to notice.
+  "sw.js",
+  "manifest.webmanifest",
+];
 // Newest mtime among the app-shell files. Read per connection rather than
 // once: running from a checkout, the files change under the daemon, and a
 // handful of stats when a socket opens is nothing next to announcing a shell
@@ -64,6 +78,11 @@ const MIME: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
+  ".png": "image/png",
+  ".json": "application/json",
+  // Not application/json: a manifest served as anything else is ignored, and
+  // the install prompt then never appears with no error to explain why.
+  ".webmanifest": "application/manifest+json",
 };
 // What a composer may upload in one file. Telegram tops out at 20 MB; this is
 // the same order of magnitude, and the ceiling a browser is held to so a slip of

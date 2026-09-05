@@ -1,0 +1,51 @@
+<!-- The app icon: the wordmark's E over the wall of lights, neon red on the
+     void. Drawn as geometry rather than type so it renders identically without
+     Grenze installed. maskable.svg is the same letter, alone and inset for
+     Android's mask.
+
+     The PNGs beside these files are what the manifest actually ships (Safari
+     will not take an SVG for the home screen), and nothing regenerates them at
+     runtime. After editing either drawing:
+
+       rsvg-convert -w 192 -h 192 icon.svg     -o icon-192.png
+       rsvg-convert -w 512 -h 512 icon.svg     -o icon-512.png
+       rsvg-convert -w 180 -h 180 icon.svg     -o apple-touch-icon.png
+       rsvg-convert -w 512 -h 512 maskable.svg -o maskable-512.png
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="void" cx="50%" cy="0%" r="95%">
+      <stop offset="0%" stop-color="#2a1012" />
+      <stop offset="60%" stop-color="#140909" />
+      <stop offset="100%" stop-color="#0e0707" />
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="soft" />
+      <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="bloom" />
+      <feMerge>
+        <feMergeNode in="bloom" />
+        <feMergeNode in="soft" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#void)" />
+
+  <!-- the wire the sidebar's string lights hang from, sagging under the letter -->
+  <path d="M34 418 C 148 460 258 396 348 430 S 456 442 478 414" fill="none" stroke="#4a2f24" stroke-width="6" stroke-linecap="round" />
+  <g opacity="0.75">
+    <circle cx="112" cy="440" r="11" fill="#f7a224" />
+    <circle cx="208" cy="437" r="11" fill="#ea2126" />
+    <circle cx="306" cy="414" r="11" fill="#f7a224" />
+    <circle cx="400" cy="438" r="11" fill="#6fd08c" />
+  </g>
+
+  <!-- E: stem with wedge serifs, three arms with terminal serifs -->
+  <g fill="#ea2126" filter="url(#glow)" transform="translate(256 240) scale(0.8) translate(-256 -256)">
+    <path d="M126 92 h132 v34 h-40 v260 h40 v34 h-132 v-34 h40 v-260 h-40 z" />
+    <path d="M186 92 h190 l8 84 h-32 l-14 -50 h-152 z" />
+    <path d="M186 236 h124 l6 62 h-28 l-10 -28 h-92 z" />
+    <path d="M186 386 h152 l16 -58 h32 l-10 92 h-190 z" />
+  </g>
+</svg>

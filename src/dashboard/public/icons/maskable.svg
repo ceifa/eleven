@@ -1,0 +1,30 @@
+<!-- The maskable variant: the same E, alone and centred, small enough to survive
+     Android cropping it to a circle. No wire — a row of bulbs sliced off by the
+     mask reads as a rendering bug, not as decoration. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="void" cx="50%" cy="10%" r="95%">
+      <stop offset="0%" stop-color="#2a1012" />
+      <stop offset="60%" stop-color="#140909" />
+      <stop offset="100%" stop-color="#0e0707" />
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="soft" />
+      <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="bloom" />
+      <feMerge>
+        <feMergeNode in="bloom" />
+        <feMergeNode in="soft" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#void)" />
+
+  <g fill="#ea2126" filter="url(#glow)" transform="translate(256 256) scale(0.62) translate(-256 -256)">
+    <path d="M126 92 h132 v34 h-40 v260 h40 v34 h-132 v-34 h40 v-260 h-40 z" />
+    <path d="M186 92 h190 l8 84 h-32 l-14 -50 h-152 z" />
+    <path d="M186 236 h124 l6 62 h-28 l-10 -28 h-92 z" />
+    <path d="M186 386 h152 l16 -58 h32 l-10 92 h-190 z" />
+  </g>
+</svg>

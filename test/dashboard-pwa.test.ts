@@ -109,3 +109,48 @@ test("the phone layout subtracts the chrome it actually has", () => {
   assert.match(app, /visualViewport/);
   assert.match(app, /setProperty\("--keyboard"/);
 });
+
+/** Split a CSS shorthand into its sides, keeping calc(…) whole. */
+function sides(value: string) {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of value.trim()) {
+    if (char === "(") depth++;
+    if (char === ")") depth--;
+    if (/\s/.test(char) && depth === 0) {
+      if (current) parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+test("an open conversation cancels the view's padding exactly", () => {
+  const css = read("style.css");
+  const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+
+  // The conversation runs edge to edge on a phone: no card, no gutter. It gets
+  // there with negative margins, which only works while they are the view's own
+  // padding with the sign flipped — widen #view's gutter and forget these, and
+  // the pane hangs off the side of the screen with a scrollbar under it.
+  const padding = mobile.match(/#view \{\s*padding: ([^;]+);/);
+  const margin = mobile.match(/\.threads-layout\.pane-open \{\s*margin: ([^;]+);/);
+  assert.ok(padding && margin, "the mobile block should set both #view's padding and the open pane's margin");
+
+  const [, right, bottom, left] = sides(padding[1]);
+  const [, marginRight, marginBottom, marginLeft] = sides(margin[1]);
+  // Not the top: the bar up there is fixed, so the pane has to keep clearing it
+  // — only the gap under it is cancelled.
+  const negated = (value: string) => value.replace("calc(", "calc(-").replace(" + ", " - ");
+  assert.equal(marginRight, negated(right));
+  assert.equal(marginBottom, negated(bottom));
+  assert.equal(marginLeft, negated(left));
+
+  // And with the pane reaching the bottom edge, the room the home indicator
+  // needs stops being the view's to leave and becomes the composer's.
+  assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
+});

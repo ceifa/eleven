@@ -1735,6 +1735,22 @@ video.msg-media { max-width: 22rem; }
   .threads-layout.pane-open .threads-list-col { display: none; }
   .threads-layout.pane-open #thread-pane { display: flex; width: 100%; }
 
+  /* An open conversation takes the screen edge to edge. The panel it sits in —
+     a rounded card with a border, inset by the view's own padding — is what
+     tells a desktop where one pane ends and the other begins; on a phone there
+     is no other pane, so all it does is spend four sides of the scarce thing.
+     The margins cancel #view's padding exactly, so the pane can only ever be as
+     wide as the view was (test: "cancels the view's padding exactly"). */
+  .threads-layout.pane-open {
+    margin: -0.75rem calc(-1rem - var(--safe-r)) calc(-1.25rem - var(--safe-b)) calc(-1rem - var(--safe-l));
+    height: calc(100dvh - var(--topbar) - var(--keyboard, 0px));
+  }
+  .threads-layout.pane-open #thread-pane { border: 0; border-radius: 0; }
+  /* The pane now reaches the bottom of the screen, so the room the home
+     indicator needs stops being the view's to leave and becomes the composer's. */
+  .threads-layout.pane-open .composer { padding-bottom: calc(0.7rem + var(--safe-b)); }
+  .threads-layout.pane-open .new-thread { padding-bottom: calc(0.75rem + var(--safe-b)); }
+
   /* The conversation gets the whole phone: less chrome, wider bubbles, and a
      composer that sits where a thumb already is. */
   .thread-head { padding: 0.55rem 0.6rem; gap: 0.4rem; }

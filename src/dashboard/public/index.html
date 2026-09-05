@@ -2,8 +2,23 @@
 <html lang="en" data-theme="hawkins">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover puts the page under the notch and the home indicator,
+       which is the only way an installed app looks installed; every edge of
+       chrome then pays for it with an env(safe-area-inset-*) in style.css. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>eleven</title>
+  <!-- the void, so the browser's own bars — and the splash screen an install
+       generates — are the same black the page is -->
+  <meta name="theme-color" content="#0e0707" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <!-- iOS reads its own spelling of the same two things. black-translucent is
+       what lets the page own the status bar area, matching viewport-fit. -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="eleven" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="/style.css" />
   <!-- the wordmark's weight, which is on screen before anything is fetched: without
        this the browser only discovers it after parsing the stylesheet, and the sign

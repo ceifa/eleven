@@ -590,7 +590,7 @@ function buildThreadCard(thread, older) {
       // The full reading (channel · group · topic) is one hover away; the card
       // itself only has room for the part that identifies it.
       title: thread.conversation,
-      onclick: () => { openThread(thread.id); openPaneMobile(); },
+      onclick: () => { openThread(thread.id); openPaneMobile(thread.id); },
     },
     h("div", { class: "card-body py-3 px-4" },
       // What you recognize a thread by: the forum topic, the group, or the
@@ -787,8 +787,10 @@ async function openThread(id) {
   // Keep the address bar on the thread actually open, so it can be reloaded,
   // bookmarked or linked to from the Usage page. replaceState rather than
   // assigning to location.hash: that would fire hashchange and rebuild the
-  // whole view underneath the thread we just fetched.
-  if (onThreadsView()) history.replaceState(null, "", `#/threads/${data.thread.id}`);
+  // whole view underneath the thread we just fetched. The entry's own state
+  // rides along untouched — it is what says this is a pane the back gesture
+  // may close (see openPaneMobile).
+  if (onThreadsView()) history.replaceState(history.state, "", `#/threads/${data.thread.id}`);
   // This read is fresher than the last list read — let it correct the halo (and
   // the stop button) for the thread being opened.
   setServerRunning(data.thread.id, data.thread.running);
@@ -869,8 +871,37 @@ function scheduleReconcile() {
 
 // On mobile the list and the conversation share one screen; these swap between
 // them (a no-op on desktop, where both panes are always visible side by side).
-const openPaneMobile = () => document.getElementById("threads-layout")?.classList.add("pane-open");
-const closePaneMobile = () => document.getElementById("threads-layout")?.classList.remove("pane-open");
+const threadsLayout = () => document.getElementById("threads-layout");
+const showPane = () => threadsLayout()?.classList.add("pane-open");
+
+/**
+ * Open the conversation pane over the list — and, on a phone, record that as a
+ * navigation.
+ *
+ * Two screens the reader moves between are two history entries, or the back
+ * gesture means "leave eleven" the whole time a thread is open. Installed as an
+ * app that is worse still: Android's back button is the only one there is, and
+ * it would close the app rather than return to the list. The entry carries a
+ * `pane` marker so a back that lands *outside* it (a deep link opened cold) can
+ * be told from one this page pushed.
+ */
+function openPaneMobile(threadId) {
+  const layout = threadsLayout();
+  if (!layout) return;
+  if (isPhone() && !layout.classList.contains("pane-open")) {
+    history.pushState({ pane: true }, "", threadId ? `#/threads/${threadId}` : "#/threads");
+  }
+  layout.classList.add("pane-open");
+}
+
+/** Back to the list. Through history when the pane got there through history,
+ *  so the ‹ button and the back gesture leave the same trail behind them. */
+function closePaneMobile() {
+  const layout = threadsLayout();
+  if (!layout?.classList.contains("pane-open")) return;
+  if (history.state?.pane) return history.back(); // popstate below drops the class
+  layout.classList.remove("pane-open");
+}
 // Mobile-only ‹ that returns from the conversation/compose pane to the list.
 const backButton = () =>
   h("button", { class: "btn btn-ghost btn-sm mobile-only px-2", "aria-label": "Back to threads", onclick: closePaneMobile },
@@ -1621,7 +1652,7 @@ function threadComposer(thread) {
     // The composer is per thread, so the draft is too — id, not "the composer".
     "data-thread": thread.id,
     oninput: (e) => drafts.set(thread.id, e.target.value),
-    onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.target.form.requestSubmit(); } },
+    onkeydown: (e) => { if (sendsOnEnter(e)) { e.preventDefault(); e.target.form.requestSubmit(); } },
   }));
   // Before autoGrow's first fit (a frame away), so the box opens at the height
   // the restored draft needs instead of snapping to it.
@@ -1762,6 +1793,17 @@ function renderThreadPane() {
 // to share a constant, so the two have to be kept in sync by hand.
 const phoneQuery = matchMedia("(max-width: 768px)");
 const isPhone = () => phoneQuery.matches;
+
+/**
+ * Whether this Enter means "send".
+ *
+ * On a keyboard it does, and Shift+Enter is the newline. A soft keyboard has no
+ * Shift to hold, so there the return key has to be the newline and the send
+ * button is the only way to send — otherwise a message on a phone can never be
+ * more than one line long. And an Enter that is closing an IME candidate is
+ * choosing a word, not finishing a sentence.
+ */
+const sendsOnEnter = (event) => event.key === "Enter" && !event.shiftKey && !event.isComposing && !isPhone();
 
 /* The "↓ Latest" pill. It exists because the transcript follows a running turn
    only while the reader is at the bottom — scroll up to read something and the
@@ -2223,6 +2265,11 @@ async function viewThreads() {
     // A link to a thread that has since been collected falls back to the
     // launcher rather than to an empty pane.
     if (!(await openThread(requested ?? state.activeThread.id))) newThreadDialog();
+    // A URL that names a thread is a request to read it, so on a phone it opens
+    // the conversation rather than the list it is buried in. No history entry:
+    // this *is* the entry — a back from here belongs to whatever came before
+    // eleven, not to a list the reader never saw.
+    else if (requested) showPane();
   } else {
     newThreadDialog();
   }
@@ -2280,7 +2327,7 @@ function newThreadDialog(preferred) {
     oninput: (event) => { drafts.set(NEW_THREAD_DRAFT, event.target.value); refreshStart(); },
     onkeydown: (event) => {
       if (event.key === "Escape") return cancel();
-      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); start(); }
+      if (sendsOnEnter(event)) { event.preventDefault(); start(); }
     },
   }));
   // The launcher is where a session lands, so its box is the one most likely to
@@ -3348,6 +3395,7 @@ async function viewSettings() {
         ),
       ),
     ),
+    installCard(),
     h("div", { class: "card bg-base-200 border max-w-3xl" },
       h("div", { class: "card-body gap-3" },
         sectionLabel("Voice transcription"),
@@ -3357,6 +3405,41 @@ async function viewSettings() {
             c.transcription?.command ?? ""),
           "Runs locally for each incoming voice note. {{file}} is the audio path; stdout becomes the message text. Leave empty to disable."),
       ),
+    ),
+  );
+}
+
+/**
+ * Putting eleven on the home screen. Which of the three states you get is the
+ * browser's decision, not ours: already installed, installable right now (the
+ * only case where a button can do anything — see beforeinstallprompt), or a
+ * browser that installs from its own menu and tells us nothing, which is every
+ * one on iOS.
+ */
+function installCard() {
+  const installed = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const button = h("button", {
+    class: "btn btn-sm btn-primary self-start",
+    onclick: async (event) => {
+      const prompt = installPrompt;
+      if (!prompt) return;
+      installPrompt = null; // a prompt is good for exactly one showing
+      event.target.disabled = true;
+      await prompt.prompt().catch(() => {});
+    },
+  }, "Install");
+  return h("div", { class: "card bg-base-200 border max-w-3xl mb-4" },
+    h("div", { class: "card-body gap-3" },
+      sectionLabel("App"),
+      !installed && installPrompt ? button : null,
+      h("p", { class: "text-xs opacity-50" },
+        installed
+          ? "Running as an installed app."
+          : installPrompt
+            ? "Puts eleven in its own window, on the home screen or in the app list."
+            : "This browser installs from its own menu — Share → Add to Home Screen on iOS, or the install icon in the address bar. It needs the dashboard on https or on localhost."),
+      h("p", { class: "text-xs opacity-50" },
+        "Installed or not, the interface itself is cached and opens without the network. The conversations in it still need the daemon."),
     ),
   );
 }
@@ -3376,8 +3459,10 @@ const sectionLabel = (text) => h("div", { class: "section-label" }, text);
 
 const INFO_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="info"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7.2" x2="8" y2="11.2"/><circle cx="8" cy="4.7" r="0.9" fill="currentColor" stroke="none"/></svg>`;
 
-/** Hoverable ⓘ — the place for the longer explanation the label doesn't need. */
-const info = (tip) => h("span", { class: "tooltip tooltip-right info-icon", "data-tip": tip, html: INFO_ICON });
+/** The ⓘ — the place for the longer explanation the label doesn't need. A
+ *  button rather than a span so a finger can reach it: nothing hovers on a
+ *  phone, and the tip also shows on focus (.tooltip:focus in style.css). */
+const info = (tip) => h("button", { type: "button", class: "tooltip tooltip-right info-icon", "data-tip": tip, "aria-label": tip, html: INFO_ICON });
 
 function labeled(label, control, tip) {
   return h("div", {},
@@ -3429,6 +3514,9 @@ async function withLoading(work, { swap = false } = {}) {
 const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, usage: viewUsage, settings: viewSettings, channels: viewWorkspaces };
 
 async function render() {
+  // Whatever moved the address bar — a link in the drawer, the back gesture, a
+  // toast — the drawer has said its piece and the page underneath it changed.
+  setNav(false);
   const name = (location.hash.replace("#/", "") || "threads").split("/")[0];
   const route = routes[name] ?? viewThreads;
   for (const link of document.querySelectorAll("aside .menu a")) {
@@ -3451,7 +3539,7 @@ async function render() {
       await route();
     }, { swap: true });
   } catch (error) {
-    view.replaceChildren(h("div", { class: "alert alert-error" }, `Could not load: ${error.message}`));
+    view.replaceChildren(loadFailure(error));
   }
   for (const id of openCollapses) {
     const input = view.querySelector(`.collapse[data-collapse="${CSS.escape(id)}"] > input`);
@@ -3459,7 +3547,50 @@ async function render() {
   }
 }
 
-window.addEventListener("hashchange", render);
+/**
+ * A hash change is usually a route change — but not when it only moves between
+ * the thread list and a conversation. Those are two halves of the threads view
+ * that is already on screen (two *screens* on a phone), and re-rendering would
+ * refetch the list and tear the pane down under whoever is reading it. This is
+ * the path the back gesture takes, so it happens constantly on mobile.
+ */
+/**
+ * The view when the first read of a page fails.
+ *
+ * Worth its own shape now that the shell is cached: an installed eleven opens
+ * on a train with no signal and paints perfectly, and then every number on it
+ * is missing. "Failed to fetch" reads as a bug in the page; the page is fine,
+ * and what is actually wrong — no network, or a daemon that isn't running — is
+ * two different problems with two different fixes.
+ */
+function loadFailure(error) {
+  const offline = !navigator.onLine;
+  const unreachable = offline || error instanceof TypeError; // fetch rejects with a TypeError
+  return h("div", { class: "flex flex-col gap-3 self-start" },
+    h("div", { class: "alert alert-error" },
+      offline ? "This device is offline. The interface is cached; the conversations in it are not."
+        : unreachable ? "Can't reach the eleven daemon — check that it is running."
+        : `Could not load: ${error.message}`),
+    h("button", { class: "btn btn-sm self-start", onclick: () => render() }, "Try again"),
+  );
+}
+
+window.addEventListener("hashchange", () => {
+  const layout = threadsLayout();
+  const [route, id] = location.hash.replace(/^#\/?/, "").split("/");
+  if (!layout || (route || "threads") !== "threads") return render();
+  setNav(false);
+  layout.classList.toggle("pane-open", Boolean(id));
+  if (id && id !== state.activeThread?.id) openThread(id);
+});
+
+// The other half of the back gesture: the launcher opens the pane without
+// changing the hash (it has no thread to name yet), so backing out of it fires
+// popstate alone. `pane` marks the entries this page pushed for that — landing
+// on anything else means the pane is not what the reader is on anymore.
+window.addEventListener("popstate", () => {
+  if (!history.state?.pane) threadsLayout()?.classList.remove("pane-open");
+});
 
 /* ---------- mobile nav drawer ---------- */
 
@@ -3475,6 +3606,60 @@ document.getElementById("sidebar")?.addEventListener("click", (e) => { if (e.tar
 // state.
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
 phoneQuery.addEventListener("change", (e) => { if (!e.matches) setNav(false); });
+
+/* ---------- the phone's viewport ---------- */
+
+// dvh knows about the browser's own bars but not about the on-screen keyboard:
+// iOS slides that over the page instead of resizing the page, so the composer
+// ends up behind the keys while the transcript still claims the whole screen.
+// The visual viewport is the part actually visible, and the difference between
+// it and the window is what the keyboard is covering — style.css subtracts
+// --keyboard from the threads screen's height. Where the browser does resize
+// the layout instead (most Android ones), the difference is zero and this
+// costs nothing.
+const viewport = window.visualViewport;
+if (viewport) {
+  let covered = 0;
+  const measure = () => {
+    // offsetTop counts the page the browser scrolled up to reveal the focused
+    // field: those pixels are hidden by the keyboard just the same.
+    const next = Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+    if (Math.abs(next - covered) < 2) return; // sub-pixel jitter while a bar animates
+    const opening = next > covered;
+    covered = next;
+    document.documentElement.style.setProperty("--keyboard", `${next}px`);
+    // Typing shouldn't bury the message you are answering.
+    if (opening) requestAnimationFrame(() => scrollToBottom());
+  };
+  viewport.addEventListener("resize", measure);
+  viewport.addEventListener("scroll", measure);
+  measure();
+}
+
+/* ---------- installable app ---------- */
+
+// The worker is what makes eleven installable, and what answers a cold start
+// with no network with something other than an error page. Registered after
+// load so it never competes with the first paint; failures are silent, because
+// a dashboard reached over plain http on a LAN address cannot have one and
+// works perfectly well without it.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+}
+
+// Chromium hands the install over exactly once, through this event, and only
+// when it decides the page qualifies. Holding on to it is the only way to put
+// the offer somewhere the user might look for it (Settings) rather than
+// wherever the browser felt like putting its own.
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+  // Settings may already be on screen saying this browser installs from its own
+  // menu — which just stopped being true.
+  if (location.hash.startsWith("#/settings")) render();
+});
+window.addEventListener("appinstalled", () => { installPrompt = null; });
 
 initStringLights();
 connectWs();

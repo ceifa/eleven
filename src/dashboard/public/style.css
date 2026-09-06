@@ -1803,6 +1803,21 @@ video.msg-media { max-width: 22rem; }
     gap: 0;
   }
   .threads-layout.pane-open #thread-pane { border: 0; border-radius: 0; }
+
+  /* An open conversation brings its own header and its own way out: the ‹ lands
+     on the list, which is where the menu lives anyway. The bar above it is then
+     3.25rem of the scarcest thing on a phone spent saying "eleven" a second
+     time — so it goes, and --topbar drops to what is honestly above the pane:
+     the notch. Everything sized by subtraction (this layout's height, #view's
+     padding, a modal's cap) reads that one variable and follows.
+     The menu is not lost with the hamburger: the drawer still comes out on a
+     swipe from the left edge, here as everywhere. And these two must stay one
+     condition — a bar hidden while the layout still subtracts its height leaves
+     a dead 3.25rem band at the top of the conversation.
+     :root:has() is how a variable at the top reacts to a class four levels
+     under it; a browser without :has() drops both rules and keeps the bar. */
+  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); }
+  body:has(.threads-layout.pane-open) .topbar { display: none; }
   /* The toolbar was riding on the view's gutter, which the list no longer has. */
   .threads-toolbar, .threads-filters { padding-inline: 0.75rem; }
   /* The pane now reaches the bottom of the screen, so the room the home

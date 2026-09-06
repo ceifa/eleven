@@ -131,6 +131,38 @@ test("the phone layout subtracts the chrome it actually has", () => {
   assert.match(app, /setProperty\("--keyboard"/);
 });
 
+test("an open conversation stops paying for the bar it no longer shows", () => {
+  const css = read("style.css");
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const mobileAt = css.indexOf("@media (max-width: 768px)");
+  const mobile = css.slice(mobileAt);
+
+  // The conversation has a header of its own and a ‹ back to the list, so the
+  // bar above it is 3.25rem spent on a second wordmark. It goes — but hiding it
+  // is only half: --topbar is what every height on this screen subtracts, so a
+  // bar that disappears while the variable still holds its height leaves a dead
+  // band at the top. Both facts have to move together, on the same condition.
+  const hide = mobile.match(/([^\n{}]*\.topbar)\s*\{\s*display: none;\s*\}/);
+  assert.ok(hide, "the mobile block should hide the top bar over an open conversation");
+  const condition = hide[1].replace(/\s*\.topbar$/, "").trim();
+  assert.match(condition, /:has\(\.threads-layout\.pane-open\)/);
+
+  const override = mobile.match(/([^\n{}]*):has\(\.threads-layout\.pane-open\)[^\n{}]*\{\s*--topbar: ([^;]+);/);
+  assert.ok(override, "hiding the bar has to drop --topbar too, or the height stays reserved");
+  assert.match(override[2], /env\(safe-area-inset-top/); // the notch is all that is left above the pane
+  assert.doesNotMatch(override[2], /3\.25rem/, "--topbar must stop counting a bar that is not on screen");
+
+  // …and it has to be read *after* the base value, or the cascade quietly keeps
+  // the bar's height.
+  const base = mobile.indexOf("--topbar: calc(");
+  assert.ok(base >= 0 && base < mobile.indexOf(override[0]), "the override must come after the :root default");
+
+  // What makes the bar expendable is that the pane has another way back to the
+  // list — the menu lives there, and the hamburger is now the only other door.
+  assert.match(app, /"aria-label": "Back to threads"/);
+  assert.match(app, /class: "thread-head"[\s\S]{0,80}backButton\(\)/);
+});
+
 /** Split a CSS shorthand into its sides, keeping calc(…) whole. */
 function sides(value: string) {
   const parts: string[] = [];

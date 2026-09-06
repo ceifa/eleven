@@ -2502,11 +2502,15 @@ function pairingAvatar(request, title) {
 function workspaceCard(name, workspace) {
   return h("div", { class: "card bg-base-200 border mb-6" },
     h("div", { class: "card-body gap-5" },
-      h("div", { class: "flex items-center gap-3 wrap-mobile" },
+      // scope-head, not wrap-mobile: wrapping sent "remove workspace" to a line
+      // of its own, so a phone spent a whole row on a button nobody presses.
+      // The path is what gives way instead — it truncates.
+      h("div", { class: "scope-head flex items-center gap-3" },
         h("h2", { class: "display text-xl" }, name),
         h("span", { class: "text-xs opacity-50 font-mono truncate min-w-0" }, workspace.path),
-        h("button", { class: "btn btn-ghost btn-xs ml-auto text-error", onclick: () =>
-          queueSave((next) => { delete next.workspaces[name]; return next; }, { structural: true }) }, "remove workspace"),
+        h("button", { class: "btn btn-ghost btn-xs ml-auto shrink-0 text-error", onclick: () =>
+          queueSave((next) => { delete next.workspaces[name]; return next; }, { structural: true }) },
+          h("span", { class: "hide-mobile" }, "remove workspace"), h("span", { class: "mobile-only" }, "remove")),
       ),
 
       // -- channels: how the world reaches this workspace --
@@ -2558,20 +2562,22 @@ function channelCard(workspaceName, channel, index) {
   });
   return h("div", { class: "card bg-base-100 border" },
     h("div", { class: "card-body gap-4 p-4" },
-      h("div", { class: "flex items-center gap-2 wrap-mobile" },
-        h("span", { html: CHANNEL_ICONS[channel.type] ?? "" }),
-        h("span", { class: "font-mono font-semibold" }, channel.name),
+      h("div", { class: "scope-head flex items-center gap-2" },
+        h("span", { class: "shrink-0", html: CHANNEL_ICONS[channel.type] ?? "" }),
+        h("span", { class: "font-mono font-semibold truncate min-w-0" }, channel.name),
         status?.username
-          ? h("a", { class: "text-xs link link-hover opacity-60", href: `https://t.me/${status.username}`, target: "_blank", rel: "noopener" }, `@${status.username}`)
+          ? h("a", { class: "text-xs link link-hover opacity-60 hide-mobile", href: `https://t.me/${status.username}`, target: "_blank", rel: "noopener" }, `@${status.username}`)
           : null,
-        h("span", { class: `badge badge-sm ${status?.connected ? "badge-success" : "badge-error"} badge-soft ml-2` }, status?.connected ? "polling" : "offline"),
-        h("button", { class: "btn btn-ghost btn-xs ml-auto text-error", onclick: () =>
+        h("span", { class: `badge badge-sm shrink-0 ${status?.connected ? "badge-success" : "badge-error"} badge-soft ml-2` }, status?.connected ? "polling" : "offline"),
+        h("button", { class: "btn btn-ghost btn-xs ml-auto shrink-0 text-error", onclick: () =>
           updateWorkspace(workspaceName, (ws) => { ws.channels = (ws.channels ?? []).filter((_, i) => i !== index); }, { structural: true }) }, "remove"),
       ),
-      h("div", { class: "grid-3 gap-4" },
+      // No grid here: the two empty cells that used to keep the token in the
+      // first third of a grid-3 became two empty *rows* the moment the grid
+      // collapsed to one column, which is a finger's worth of blank screen.
+      h("div", { class: "field-third" },
         labeled("Bot token", h("input", { type: "password", class: "input input-sm w-full font-mono", value: channel.token,
           onchange: (e) => save({ token: e.target.value }) })),
-        h("div", {}), h("div", {}), // grid fillers — users and groups get full-width blocks below
       ),
       h("div", { class: "flex flex-col gap-2" },
         h("div", { class: "text-xs dim-label flex items-center gap-1.5" }, "Users",
@@ -2598,11 +2604,18 @@ function systemPromptField(name, workspace) {
   // Switching built-in/custom swaps which editor renders, so it re-renders;
   // typing in the custom editor updates in place.
   const setPrompt = (value, structural) => updateWorkspace(name, (ws) => { ws.systemPrompt = value; }, { structural });
+  // prompt-editor: eight rows of monospace is a third of a phone screen, and
+  // CSS cuts it down on a narrow one. It stays draggable either way.
+  //
+  // On built-in the block is read-only reference — the same text, printed once
+  // per workspace, in front of the settings you came for — so it folds. The
+  // custom one is the thing being edited and stays open.
   const editor = custom
-    ? h("textarea", { class: "textarea w-full font-mono text-xs", rows: "8", placeholder: "your custom personality/style block…",
+    ? h("textarea", { class: "textarea prompt-editor w-full font-mono text-xs", rows: "8", placeholder: "your custom personality/style block…",
         onchange: (e) => setPrompt(e.target.value, false) }, workspace.systemPrompt ?? "")
-    : h("textarea", { class: "textarea w-full font-mono text-xs opacity-60", rows: "8", readonly: true },
-        state.overview?.builtinSystemPrompt ?? "");
+    : disclosure("show the built-in prompt",
+        h("textarea", { class: "textarea prompt-editor w-full font-mono text-xs opacity-60", rows: "8", readonly: true },
+          state.overview?.builtinSystemPrompt ?? ""));
   return h("div", { class: "flex flex-col gap-2" },
     h("div", { class: "flex items-center gap-4" },
       h("span", { class: "text-xs dim-label flex items-center gap-1.5" }, "System prompt",
@@ -2695,7 +2708,7 @@ function topicsSection(workspaceName, owner, inherited, select) {
       info("Each topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them — in a forum group, or in the DM of a bot with topic mode enabled.")),
     ...Object.entries(owner.topics ?? {}).map(([topicId, topic]) =>
       h("div", { class: "border border-base-300 rounded-box p-3 flex flex-col gap-2" },
-        h("div", { class: "flex items-center gap-2" },
+        h("div", { class: "topic-head flex items-center gap-2" },
           h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: "topic name (optional)",
             onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
           h("span", { class: "font-mono text-xs opacity-50" }, `topic ${topicId}`),
@@ -2752,7 +2765,10 @@ function groupRow(workspaceName, chIndex, id, group) {
       h("span", { class: "font-mono text-xs opacity-50" }, id),
       group.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
       modelsBadge(group),
-      h("span", { class: "text-xs opacity-50 ml-auto mr-2" }, group.requireMention === false ? "replies freely" : "@mention required"),
+      // Hidden on a phone: it is a setting, and the row that carries it already
+      // has a name, an id and two badges fighting over 300 pixels. Open the row
+      // and the toggle it describes is the first thing in there.
+      h("span", { class: "text-xs opacity-50 ml-auto mr-2 hide-mobile" }, group.requireMention === false ? "replies freely" : "@mention required"),
     ),
     h("div", { class: "collapse-content flex flex-col gap-3" },
       h("div", { class: "flex items-center gap-4" },
@@ -2777,16 +2793,29 @@ function addChannelForm(workspaceName) {
   const type = h("select", { class: "select select-sm w-32" }, types.map((t) => h("option", { value: t }, t)));
   const name = h("input", { class: "input input-sm w-28 font-mono", placeholder: "name" });
   const token = h("input", { class: "input input-sm flex-1 font-mono", placeholder: "bot token from @BotFather" });
-  return h("div", { class: "flex gap-2 items-center stack-mobile" },
-    type, name, token,
-    h("button", { class: "btn btn-sm", onclick: () => {
-      if (!name.value.trim() || !token.value.trim()) return;
-      return updateWorkspace(workspaceName, (ws) => {
-        ws.channels = [...(ws.channels ?? []), { type: type.value, name: name.value.trim(), token: token.value.trim(), users: {} }];
-      }, { structural: true });
-    } }, "Add"),
+  return disclosure("Add channel",
+    h("div", { class: "flex gap-2 items-center stack-mobile" },
+      type, name, token,
+      h("button", { class: "btn btn-sm", onclick: () => {
+        if (!name.value.trim() || !token.value.trim()) return;
+        return updateWorkspace(workspaceName, (ws) => {
+          ws.channels = [...(ws.channels ?? []), { type: type.value, name: name.value.trim(), token: token.value.trim(), users: {} }];
+        }, { structural: true });
+      } }, "Add"),
+    ),
   );
 }
+
+/**
+ * A form that is not what the page is about, folded away until it is.
+ *
+ * This one appears once per workspace and is four empty fields each; on a phone
+ * that is most of a screen, repeated, in front of the channels you came to
+ * look at. On a desktop it is merely noise, which is why the fold is not
+ * mobile-only.
+ */
+const disclosure = (label, ...children) =>
+  h("details", { class: "disclosure" }, h("summary", {}, label), ...children);
 
 function addWorkspaceForm() {
   const name = h("input", { class: "input input-sm w-36 font-mono", placeholder: "name" });

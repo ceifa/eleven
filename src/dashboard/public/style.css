@@ -574,9 +574,44 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 
 .label { display: inline-flex; align-items: center; }
 
+/* ---------- disclosure (a folded-away form) ---------- */
+
+/* Reads as a link with a sign in front of it, not as a control: what it opens
+   is a form, and a button in front of a form is one thing too many. */
+.disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.85rem;
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  transition: color 0.15s;
+}
+.disclosure > summary::-webkit-details-marker { display: none; }
+.disclosure > summary:hover { color: var(--color-base-content); }
+.disclosure > summary::before {
+  content: "+";
+  font-family: var(--font-mono);
+  line-height: 1;
+  opacity: 0.8;
+}
+.disclosure[open] > summary { margin-bottom: 0.6rem; }
+.disclosure[open] > summary::before { content: "–"; }
+
 /* ---------- collapse (checkbox-driven disclosure) ---------- */
 
-.collapse { display: grid; border-radius: var(--radius-box); }
+/* min-width on both the box and its cell, because a collapse is a grid sitting
+   in a flex column and *both* of those size themselves to their content by
+   default. Without it one un-shrinkable row deep inside — a fixed-width input,
+   a long model ref — pushes the whole subtree wider than the screen, and every
+   ancestor overflows along with it. Which is exactly what an expanded group did
+   on a phone. */
+.collapse { display: grid; min-width: 0; border-radius: var(--radius-box); }
+.collapse > .collapse-content { min-width: 0; }
+.collapse > .collapse-content > * { min-width: 0; }
 .collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; opacity: 0; cursor: pointer; margin: 0; }
 .collapse-title { grid-area: 1 / 1; z-index: 1; position: relative; padding: 0.5rem 0.9rem; padding-right: 2rem; }
 /* .collapse > … keeps this one notch more specific than the .flex utility the
@@ -1548,6 +1583,13 @@ video.msg-media { max-width: 22rem; }
 @media (min-width: 640px) { .grid-2 { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 1024px) { .grid-3 { grid-template-columns: repeat(3, 1fr); } }
 
+/* One field that wants the width a .grid-3 cell would have given it, without
+   being in a grid. Filling the other two cells with empty divs to get the same
+   result costs nothing on three columns and two blank rows on one — which is
+   a thumb's worth of empty screen on a phone. */
+.field-third { width: 100%; }
+@media (min-width: 1024px) { .field-third { width: calc((100% - 2rem) / 3); } }
+
 .gap-1 { gap: 0.25rem; }
 .gap-1\.5 { gap: 0.375rem; }
 .gap-2 { gap: 0.5rem; }
@@ -1631,6 +1673,9 @@ video.msg-media { max-width: 22rem; }
 .topbar { display: none; }
 .nav-backdrop { display: none; }
 .mobile-only { display: none; }
+/* .hide-mobile is the other half of .mobile-only — detail that earns its place
+   on a desktop row and loses the argument at 390px. It has no desktop rule on
+   purpose: whatever display the element already had is the right one. */
 
 /* ---------- responsive: phones + narrow tablets ---------- */
 
@@ -1714,8 +1759,10 @@ video.msg-media { max-width: 22rem; }
 
   /* main content clears the fixed top bar and gets phone-sized padding
      (#view's id already outranks the .p-6 utility — no !important needed) */
+  /* A narrower gutter than the desktop's 1.5rem: at 390px every card inside
+     this pays for it twice over, once here and again in its own padding. */
   #view {
-    padding: calc(var(--topbar) + 0.75rem) calc(1rem + var(--safe-r)) calc(1.25rem + var(--safe-b)) calc(1rem + var(--safe-l));
+    padding: calc(var(--topbar) + 0.75rem) calc(0.6rem + var(--safe-r)) calc(1.25rem + var(--safe-b)) calc(0.6rem + var(--safe-l));
     overscroll-behavior: contain;
   }
   .page-title { font-size: 1.4rem; }
@@ -1726,30 +1773,34 @@ video.msg-media { max-width: 22rem; }
   /* Threads: swap between the list and the open conversation instead of
      showing both side by side. These rules sit after the utilities they
      override, so source order wins without !important. */
-  .threads-layout {
-    height: calc(100dvh - var(--topbar) - 0.75rem - 1.25rem - var(--safe-b) - var(--keyboard, 0px));
-    gap: 0;
-  }
   .threads-list-col { width: 100%; }
   #thread-pane { display: none; }
   .threads-layout.pane-open .threads-list-col { display: none; }
   .threads-layout.pane-open #thread-pane { display: flex; width: 100%; }
 
-  /* An open conversation takes the screen edge to edge. The panel it sits in —
-     a rounded card with a border, inset by the view's own padding — is what
-     tells a desktop where one pane ends and the other begins; on a phone there
-     is no other pane, so all it does is spend four sides of the scarce thing.
-     The margins cancel #view's padding exactly, so the pane can only ever be as
-     wide as the view was (test: "cancels the view's padding exactly"). */
-  .threads-layout.pane-open {
-    margin: -0.75rem calc(-1rem - var(--safe-r)) calc(-1.25rem - var(--safe-b)) calc(-1rem - var(--safe-l));
+  /* Whichever of the two is showing, it takes the screen edge to edge. The
+     panel a pane sits in — a card, inset by the view's own padding — is what
+     tells a desktop where one ends and the other begins; on a phone there is
+     only ever one, so all it does is spend four sides of the scarce thing. The
+     margins cancel #view's padding exactly, so this can only ever be as wide as
+     the view was (test: "cancels the view's padding exactly"). */
+  .threads-layout {
+    margin: -0.75rem calc(-0.6rem - var(--safe-r)) calc(-1.25rem - var(--safe-b)) calc(-0.6rem - var(--safe-l));
     height: calc(100dvh - var(--topbar) - var(--keyboard, 0px));
+    gap: 0;
   }
   .threads-layout.pane-open #thread-pane { border: 0; border-radius: 0; }
+  /* The toolbar was riding on the view's gutter, which the list no longer has. */
+  .threads-toolbar, .threads-filters { padding-inline: 0.75rem; }
   /* The pane now reaches the bottom of the screen, so the room the home
      indicator needs stops being the view's to leave and becomes the composer's. */
   .threads-layout.pane-open .composer { padding-bottom: calc(0.7rem + var(--safe-b)); }
   .threads-layout.pane-open .new-thread { padding-bottom: calc(0.75rem + var(--safe-b)); }
+  .thread-scroll { padding: 0.4rem 0.5rem calc(0.4rem + var(--safe-b)); }
+  /* Denser rows: at this width the card's own 1rem gutter is a fifth of the
+     line the title has to fit in, and the title is the whole point of the row. */
+  .thread-scroll .card-body { padding: 0.5rem 0.7rem; }
+  #thread-list { gap: 0.35rem; }
 
   /* The conversation gets the whole phone: less chrome, wider bubbles, and a
      composer that sits where a thumb already is. */
@@ -1779,6 +1830,8 @@ video.msg-media { max-width: 22rem; }
   .msg-media-frame, video.msg-media { max-width: 100%; }
   .msg-media { max-height: 15rem; }
 
+  .hide-mobile { display: none; }
+
   /* Config forms: fixed-width field rows stack into full-width columns. The
      child rule sits after the .w-28/.w-36 utilities it overrides, so it wins
      on source order. */
@@ -1787,6 +1840,40 @@ video.msg-media { max-width: 22rem; }
 
   /* Crowded single-line rows are allowed to wrap on narrow screens. */
   .wrap-mobile { flex-wrap: wrap; }
+
+  /* ---- the configuration screens ---- */
+
+  /* Workspaces is cards inside cards inside cards — a workspace holds channels
+     hold users hold topics — and every level was charging a desktop's gutter
+     for the privilege. Three levels deep that was 6rem of the 24 a phone has,
+     spent on nothing but nesting. */
+  .card-body { padding: 0.85rem; gap: 0.8rem; }
+  .card-body.p-4 { padding: 0.75rem; }
+  .card .card .card-body { padding: 0.7rem; }
+  .card-body.gap-5 { gap: 1rem; }
+  .collapse-title { padding: 0.5rem 0.6rem; padding-right: 1.7rem; }
+  .collapse > .collapse-content { padding: 0 0.6rem 0.6rem; }
+  .collapse-arrow > .collapse-title::after { right: 0.7rem; }
+  .border.rounded-box.p-3 { padding: 0.6rem; } /* the topic boxes */
+  /* A name field, an id, two badges and a remove button do not share 280px.
+     The field takes the line and the rest follows underneath. */
+  .topic-head { flex-wrap: wrap; }
+  .topic-head > .input { width: 100%; }
+
+  /* The head of a workspace or a channel: a name, some detail, and the button
+     that deletes it. Letting it wrap put that button alone on a line of its
+     own — a whole row spent on the one control nobody wants to press. The
+     detail gives way instead. */
+  .scope-head { flex-wrap: nowrap; min-width: 0; }
+  .scope-head > .display { flex-shrink: 0; }
+
+  /* Eight rows of monospace is a third of the screen, and the built-in prompt
+     is read-only text nobody scrolled here to read. Still draggable. */
+  .prompt-editor { height: 7rem; }
+
+  /* A row of five checkboxes fits, barely — but only once it stops being asked
+     to fit a label's worth of padding around each one. */
+  .label { padding: 0; }
 
   /* 16px inputs stop iOS from auto-zooming on focus (.input covers .input-sm,
      which always carries .input too); .input-xs stays compact. Roomier taps. */

@@ -96,12 +96,19 @@ test("the phone layout subtracts the chrome it actually has", () => {
   const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
 
   // The threads screen is sized by subtraction, so every term has to be there:
-  // the top bar (notch included), the home indicator, and the keyboard.
+  // the top bar (notch included) and the keyboard.
   const layout = css.match(/@media \(max-width: 768px\)[\s\S]*?\.threads-layout \{([\s\S]*?)\}/);
   assert.ok(layout, "the mobile block should still size .threads-layout");
-  for (const term of ["100dvh", "var(--topbar)", "var(--safe-b)", "var(--keyboard, 0px)"]) {
+  for (const term of ["100dvh", "var(--topbar)", "var(--keyboard, 0px)"]) {
     assert.ok(layout[1].includes(term), `.threads-layout must account for ${term}`);
   }
+
+  // Not the home indicator, though: the screen runs to the bottom edge now, so
+  // the strip it needs is left by whatever ends up sitting against that edge —
+  // the last card of the list, and the composer of an open conversation.
+  const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+  assert.match(mobile, /\.thread-scroll \{ padding: [^;]*var\(--safe-b\)\); \}/);
+  assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 
   // …and --keyboard only ever holds a number if app.js measures it. iOS slides
   // the keyboard over the page instead of resizing it, so dvh keeps reporting
@@ -129,28 +136,47 @@ function sides(value: string) {
   return parts;
 }
 
-test("an open conversation cancels the view's padding exactly", () => {
+test("an expanded group cannot push the page wider than the screen", () => {
+  const css = read("style.css");
+
+  // A collapse is a grid inside a flex column, and both of those size
+  // themselves to their content unless told otherwise. So one un-shrinkable row
+  // deep inside an open group — the topic name field is a fixed 11rem, and it
+  // sits next to an id, two badges and a remove button — used to widen the
+  // collapse, then the channel card, then the workspace card, until the whole
+  // page overflowed sideways and every `truncate` above it stopped truncating.
+  // Layout is not something these tests can run, so this holds the two
+  // declarations that prevent it instead.
+  assert.match(css, /\.collapse \{ display: grid; min-width: 0;/);
+  assert.match(css, /\.collapse > \.collapse-content \{ min-width: 0; \}/);
+  assert.match(css, /\.collapse > \.collapse-content > \* \{ min-width: 0; \}/);
+
+  // And the row that started it wraps rather than insisting on its width.
+  const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+  assert.match(mobile, /\.topic-head \{ flex-wrap: wrap; \}/);
+  assert.match(mobile, /\.topic-head > \.input \{ width: 100%; \}/);
+  assert.match(readFileSync(join(PUBLIC_DIR, "app.js"), "utf8"), /class: "topic-head/);
+});
+
+test("the threads screen cancels the view's padding exactly", () => {
   const css = read("style.css");
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
 
-  // The conversation runs edge to edge on a phone: no card, no gutter. It gets
-  // there with negative margins, which only works while they are the view's own
-  // padding with the sign flipped — widen #view's gutter and forget these, and
-  // the pane hangs off the side of the screen with a scrollbar under it.
+  // The list and the conversation each run edge to edge on a phone: no card,
+  // no gutter. They get there with negative margins, which only works while
+  // those are the view's own padding with the sign flipped — widen #view's
+  // gutter and forget these, and the screen hangs off the side with a
+  // horizontal scrollbar under it.
   const padding = mobile.match(/#view \{\s*padding: ([^;]+);/);
-  const margin = mobile.match(/\.threads-layout\.pane-open \{\s*margin: ([^;]+);/);
-  assert.ok(padding && margin, "the mobile block should set both #view's padding and the open pane's margin");
+  const margin = mobile.match(/\.threads-layout \{\s*margin: ([^;]+);/);
+  assert.ok(padding && margin, "the mobile block should set both #view's padding and the threads layout's margin");
 
   const [, right, bottom, left] = sides(padding[1]);
   const [, marginRight, marginBottom, marginLeft] = sides(margin[1]);
-  // Not the top: the bar up there is fixed, so the pane has to keep clearing it
-  // — only the gap under it is cancelled.
+  // Not the top: the bar up there is fixed, so the screen has to keep clearing
+  // it — only the gap under it is cancelled.
   const negated = (value: string) => value.replace("calc(", "calc(-").replace(" + ", " - ");
   assert.equal(marginRight, negated(right));
   assert.equal(marginBottom, negated(bottom));
   assert.equal(marginLeft, negated(left));
-
-  // And with the pane reaching the bottom edge, the room the home indicator
-  // needs stops being the view's to leave and becomes the composer's.
-  assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 });

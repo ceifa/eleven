@@ -1748,12 +1748,25 @@ video.msg-media { max-width: 22rem; }
     transition: opacity 0.24s ease;
   }
   body.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
+  /* Mid-swipe the drawer is wherever the finger put it and nothing animates:
+     the transition is there to cover a tap, and here the position *is* the
+     gesture. --nav-progress runs 0 (shut) to 1 (all the way out). These carry
+     the same specificity as the .nav-open pair above, so they only win by
+     sitting below them. */
+  body.nav-dragging #sidebar {
+    transform: translateX(calc(-100% + var(--nav-progress, 0) * 100%));
+    transition: none;
+    box-shadow: 0 0 40px oklch(0% 0 0 / 0.6);
+  }
+  body.nav-dragging .nav-backdrop { opacity: var(--nav-progress, 0); transition: none; }
   @media (prefers-reduced-motion: reduce) {
     #sidebar, .nav-backdrop { transition: none; }
   }
   /* Don't animate what nobody sees: the closed drawer's lights and sign idle
-     until it slides open (the top-bar wordmark keeps carrying the live glow). */
-  body:not(.nav-open) #sidebar .bulb, body:not(.nav-open) #sidebar .wordmark { animation-play-state: paused; }
+     until it slides open (the top-bar wordmark keeps carrying the live glow) —
+     though a drawer halfway out on a fingertip is very much seen. */
+  body:not(.nav-open):not(.nav-dragging) #sidebar .bulb,
+  body:not(.nav-open):not(.nav-dragging) #sidebar .wordmark { animation-play-state: paused; }
   /* A drawer wide enough for a thumb also wants rows a thumb can hit. */
   #sidebar .menu li a { padding: 0.6rem 0.7rem; }
 

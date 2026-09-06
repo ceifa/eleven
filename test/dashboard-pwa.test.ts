@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -60,10 +60,24 @@ test("the worker precaches files that are actually there", () => {
     if (path === "/") continue; // the SPA fallback, served as index.html
     assert.ok(existsSync(join(PUBLIC_DIR, path.slice(1))), `sw.js precaches ${path}, which does not exist`);
   }
-  // Everything the shell imports has to be in there, or a cold offline start
-  // paints the page and then dies on a missing module.
-  for (const module of ["/app.js", "/dom.js", "/live-turn.js", "/markdown.js", "/message-display.js", "/waveform.js", "/style.css", "/index.html"]) {
+  // Everything the shell is made of has to be in there, or a cold offline start
+  // paints the page and then dies on a missing module. Read off the directory
+  // rather than listed here: the failure this catches is somebody adding a
+  // module and forgetting the worker, and a hand-written list has the same bug.
+  const modules = readdirSync(PUBLIC_DIR)
+    .filter((name) => name.endsWith(".js") && name !== "sw.js") // the worker isn't cached by itself
+    .map((name) => `/${name}`);
+  for (const module of [...modules, "/style.css", "/index.html"]) {
     assert.ok(paths.includes(module), `${module} is part of the shell and is not precached`);
+  }
+  // And the daemon has to know about them too: SHELL_FILES is what the shell
+  // version is stamped from, so a module missing from it is one whose edits
+  // never tell an open page to reload.
+  const server = readFileSync(join(import.meta.dirname, "..", "src", "dashboard", "server.ts"), "utf8");
+  const served = server.match(/const SHELL_FILES = \[([\s\S]*?)\n\];/);
+  assert.ok(served, "server.ts should still declare SHELL_FILES");
+  for (const module of modules) {
+    assert.ok(served[1].includes(`"${module.slice(1)}"`), `${module} is part of the shell and server.ts doesn't list it`);
   }
 });
 

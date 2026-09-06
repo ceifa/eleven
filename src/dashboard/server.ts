@@ -31,6 +31,7 @@ const SHELL_FILES = [
   "live-turn.js",
   "markdown.js",
   "message-display.js",
+  "nav-drag.js",
   "waveform.js",
   "style.css",
   // The PWA half of the shell. sw.js is in here so that editing the worker

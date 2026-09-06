@@ -27,6 +27,7 @@ const SHELL = [
   "/live-turn.js",
   "/markdown.js",
   "/message-display.js",
+  "/nav-drag.js",
   "/waveform.js",
   "/style.css",
   "/manifest.webmanifest",

@@ -3,6 +3,7 @@
 import { syncChildren } from "./dom.js";
 import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
+import { navDrag } from "./nav-drag.js";
 import { presentMessage, sameMessage } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
 
@@ -3635,6 +3636,63 @@ document.getElementById("sidebar")?.addEventListener("click", (e) => { if (e.tar
 // state.
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
 phoneQuery.addEventListener("change", (e) => { if (!e.matches) setNav(false); });
+
+/* And the drawer follows the finger: out from the left edge, back from anywhere
+   on it. The hamburger sits in the top-left corner, which is the one spot a
+   thumb on a phone can't reach without regripping — and the drawer is the whole
+   navigation, so that's a stretch several times a session. */
+const drag = navDrag();
+/** Something the finger could be scrolling sideways instead — a code block, a
+ *  wide table. It was there first; the drawer doesn't get to take the gesture. */
+function scrollsSideways(node) {
+  for (let el = node; el && el !== document.body; el = el.parentElement) {
+    if (el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== "visible") return true;
+  }
+  return false;
+}
+/** Hand the position to CSS. While this class is on, the drawer sits wherever
+ *  the finger left it and nothing animates — the transition is for taps. */
+const paintDrag = (progress) => {
+  document.body.classList.add("nav-dragging");
+  document.body.style.setProperty("--nav-progress", String(progress));
+};
+const dropDrag = () => {
+  document.body.classList.remove("nav-dragging");
+  document.body.style.removeProperty("--nav-progress");
+};
+document.addEventListener("touchstart", (e) => {
+  if (!isPhone() || e.touches.length > 1) { drag.cancel(); dropDrag(); return; }
+  const open = document.body.classList.contains("nav-open");
+  // While it's open, only the drawer and its backdrop can be swiped away: the
+  // page is behind both of them, not under the finger.
+  if (open && !e.target.closest?.("#sidebar, .nav-backdrop")) return;
+  const started = drag.start({
+    x: e.touches[0].clientX,
+    y: e.touches[0].clientY,
+    at: e.timeStamp,
+    open,
+    drawer: document.getElementById("sidebar")?.offsetWidth ?? 0,
+    screen: window.innerWidth,
+  });
+  if (started && !open && scrollsSideways(e.target)) drag.cancel();
+}, { passive: true });
+// Non-passive: a drawer that follows the finger has to stop the page scrolling
+// under it, and preventDefault from a passive listener is ignored.
+document.addEventListener("touchmove", (e) => {
+  if (e.touches.length > 1) { drag.cancel(); dropDrag(); return; }
+  const at = drag.move({ x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp });
+  if (!at) return;
+  if (e.cancelable) e.preventDefault();
+  paintDrag(at.progress);
+}, { passive: false });
+document.addEventListener("touchend", () => {
+  const settled = drag.end();
+  // Drop the class first: that puts the transition back, so the position the
+  // finger left behind is what setNav's final state animates from.
+  dropDrag();
+  if (settled) setNav(settled.open);
+});
+document.addEventListener("touchcancel", () => { drag.cancel(); dropDrag(); });
 
 /* ---------- the phone's viewport ---------- */
 

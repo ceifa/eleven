@@ -18,6 +18,7 @@ import {
   commitClaudeSession,
   registerClaudeSession,
   runWithClaudeSession,
+  setClaudeProseListener,
   setClaudeTaskListener,
   setClaudeToolListener,
   setClaudeWorkspaceTools,
@@ -96,6 +97,10 @@ export interface TurnEvents {
   onDelta?: (delta: string) => void;
   /** A complete assistant message finished (text may be empty for tool-only messages). */
   onAssistantText?: (text: string) => void;
+  /** Prose the runtime settled mid-turn, while its own tool loop kept running —
+   * what the model said before going back to work, not the turn's answer. The
+   * channel ships it right away; the answer still arrives through `deliver`. */
+  onProse?: (text: string) => void;
   /** The attempt failed and is retrying on a fallback model — its prose is abandoned. */
   onFailover?: () => void;
   /** A retryable provider error (529, stream drop) and the runtime is running the
@@ -116,6 +121,50 @@ export interface RetryNotice {
   attempt: number;
   maxAttempts: number;
   errorMessage: string;
+}
+
+/**
+ * Folds one assistant message's stream into settled blocks of prose.
+ *
+ * A runtime that speaks more than once in a message — Claude Code, narrating
+ * between its own tool calls — settles a block per text_end, and each is a unit
+ * a channel can ship on its own instead of waiting for the turn to end. A
+ * provider that streams nothing and only reports the text on message_end is
+ * caught up by the tail below, measured against the whole message rather than
+ * its last open block.
+ */
+export function createProseBlocks(onDelta: (delta: string) => void, onBlock: (block: string) => void) {
+  let current = "";
+  let settled = 0;
+  const endBlock = () => {
+    const block = current;
+    current = "";
+    settled++;
+    onBlock(block);
+  };
+  return {
+    startMessage() {
+      current = "";
+      settled = 0;
+    },
+    delta(delta: string) {
+      current += delta;
+      onDelta(delta);
+    },
+    endBlock,
+    /** `full` is the message's whole text as the provider finally reported it. */
+    endMessage(full: string) {
+      // Once a block has settled, the message is already accounted for — and how
+      // `full` joined those blocks is the reader's business, not a tail to
+      // stream again. The catch-up is for a provider that streamed nothing.
+      if (!settled && full.length > current.length) {
+        const tail = full.slice(current.length);
+        current += tail;
+        onDelta(tail);
+      }
+      endBlock();
+    },
+  };
 }
 
 export interface TurnResult {
@@ -460,7 +509,13 @@ export class Runner {
     this.active.set(threadId, active);
 
     const collected: string[] = [];
-    let current = "";
+    const prose = createProseBlocks(
+      (delta) => events.onDelta?.(delta),
+      (block) => {
+        if (block.trim()) collected.push(block.trim());
+        events.onAssistantText?.(block);
+      },
+    );
     // pi does not reject prompt() on a provider failure or an abort — it settles
     // the run with an empty assistant message carrying stopReason "error"/"aborted".
     // Track the last one so the failover loop can tell those apart from a genuine
@@ -490,14 +545,15 @@ export class Runner {
       events.onToolCall?.(name, args, call.id);
     });
     setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
+    setClaudeProseListener(session.sessionId, (text) => events.onProse?.(text));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
       if (event.type === "message_start") {
-        current = "";
+        prose.startMessage();
       } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        const delta = event.assistantMessageEvent.delta;
-        current += delta;
-        events.onDelta?.(delta);
+        prose.delta(event.assistantMessageEvent.delta);
+      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
+        prose.endBlock();
       } else if (event.type === "auto_retry_start") {
         // Pi retries a retryable provider error under the failover loop, without
         // ever settling prompt() — so this is the only trace the turn stalled.
@@ -519,15 +575,7 @@ export class Runner {
         const message = event.message;
         lastStopReason = message.stopReason;
         lastErrorMessage = message.errorMessage;
-        // Some providers skip deltas and only deliver full text on message_end.
-        const full = contentText(message.content);
-        if (full.length > current.length) {
-          events.onDelta?.(full.slice(current.length));
-          current = full;
-        }
-        if (current.trim()) collected.push(current.trim());
-        events.onAssistantText?.(current);
-        current = "";
+        prose.endMessage(contentText(message.content));
       }
     });
 
@@ -631,6 +679,7 @@ export class Runner {
     } finally {
       setClaudeToolListener(session.sessionId, undefined);
       setClaudeTaskListener(session.sessionId, undefined);
+      setClaudeProseListener(session.sessionId, undefined);
       unsubscribe();
       // A message went into the runtime and the transcript but not into the
       // session's context snapshot — rebuild it so the next turn can see it.

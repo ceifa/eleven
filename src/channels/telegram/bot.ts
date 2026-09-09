@@ -118,6 +118,46 @@ export function createSeenMessages(now: () => number = Date.now) {
   };
 }
 
+/**
+ * How one turn's prose reaches the chat. Prose the runtime settles mid-loop goes
+ * out while it is still true — it says what the model is about to do, and Claude
+ * Code's loop can run for minutes before the turn ends. The answer goes out at
+ * the end, inside the turn's durable window, minus whatever already left.
+ *
+ * `sent` is the conversation's, shared with the telegram tool: whatever reached
+ * the chat by any route is not sent twice.
+ */
+export function createTurnDelivery(
+  send: (text: string) => Promise<unknown>,
+  sent: Set<string>,
+  onError: (error: unknown) => void,
+) {
+  // One chain, so a slow send can't let the next chunk — or the answer —
+  // overtake it. Sending prose early is worth nothing if the chat reorders it.
+  let chain: Promise<unknown> = Promise.resolve();
+  let flushed = false;
+  return {
+    /** Ship a block of prose now, unless the chat already has it. */
+    early(chunk: string): void {
+      const text = chunk.trim();
+      if (!text || sent.has(text)) return;
+      // Remembering it here is also what keeps the final send from repeating it:
+      // the turn's own text still carries this prose.
+      sent.add(text);
+      flushed = true;
+      chain = chain.then(() => send(text)).catch(onError);
+    },
+    /** What the chat is still owed once the early sends are out. */
+    remaining(blocks: string[], resultText: string): string {
+      return (flushed ? blocks.filter((block) => !sent.has(block)).join("\n\n") : resultText).trim();
+    },
+    /** Resolves when every early send has landed. */
+    settled(): Promise<unknown> {
+      return chain;
+    },
+  };
+}
+
 export function startTelegramBot(name: string, token: string, deps: BotDeps): BotHandle {
   const log = logger(`telegram/${name}`);
   const bot = new Bot(token);
@@ -399,7 +439,6 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
     const blocks: string[] = [];
     let current = "";
-    let flushedEarly = false;
 
     const { tool, sent } = toolFor(chatId, topic);
 
@@ -410,6 +449,12 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
           : undefined,
     };
+
+    const delivery = createTurnDelivery(
+      (text) => sendRich(bot.api, chatId, text, sendOptions),
+      sent,
+      (error) => log.warn(`mid-turn flush failed: ${error}`),
+    );
     const taskProgress = new TelegramTaskProgress(bot.api, chatId, {
       topic,
       replyParameters: sendOptions.replyParameters,
@@ -453,15 +498,16 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             if (current.trim()) blocks.push(current.trim());
             current = "";
           },
+          // What the model said before going back to work. It reads as an
+          // intention ("checking X now"), so it is worth nothing once the work
+          // it announces is already done — send it while it is still true.
+          onProse: (text) => delivery.early(text),
           // A steered message just entered the turn — deliver the prose that
           // preceded it now, so replies land in timeline order instead of a
           // stale answer arriving glued to the final one.
           onEvent: (event) => {
             if (event.type !== "message_end" || event.message.role !== "user") return;
-            const chunk = blocks.splice(0).join("\n\n").trim();
-            if (!chunk || sent.has(chunk)) return;
-            flushedEarly = true;
-            void sendRich(bot.api, chatId, chunk, sendOptions).catch((error) => log.warn(`mid-turn flush failed: ${error}`));
+            delivery.early(blocks.splice(0).join("\n\n"));
           },
           // Failover abandons the attempt's prose — drop our copy of it too.
           onFailover: () => {
@@ -479,12 +525,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         // owning turn's deliver ships the combined result (and clears `sent`).
         deliver: async (result) => {
           await taskProgress.finish(result.status === "stopped" ? "stopped" : "completed");
-          // After a mid-turn flush, result.text still contains the flushed
-          // prose — deliver only what accumulated since.
-          const final = (flushedEarly ? blocks.join("\n\n") : result.text).trim();
+          const final = delivery.remaining(blocks, result.text);
           const duplicate = !!final && sent.has(final);
           sent.clear(); // the turn is over — next one starts clean
           if (!final || duplicate) return;
+          await delivery.settled(); // the answer never lands above the prose that led to it
           await sendRich(bot.api, chatId, final, sendOptions);
         },
       });

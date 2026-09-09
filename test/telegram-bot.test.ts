@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { createSeenMessages, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
+import { createSeenMessages, createTurnDelivery, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
@@ -568,4 +568,57 @@ test("rich splitting closes and reopens a code fence that spans chunks", () => {
   assert.ok(chunks[1].startsWith("```ts\n"), "the block keeps its opening line");
   assert.ok(chunks[1].endsWith("\n```"), "a chunk ending inside the block closes it");
   assert.ok(chunks[2].startsWith("```ts\n"), "the next chunk reopens it with the same language hint");
+});
+
+test("a turn's prose reaches the chat as it happens, and the answer never repeats it", async () => {
+  // Regression: everything a turn produced was held for the final send, so
+  // Claude Code — which runs its whole tool loop inside one turn — narrated
+  // minutes of work in a single message after the work was over.
+  const posted: string[] = [];
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const sent = new Set<string>();
+  const delivery = createTurnDelivery(
+    async (text) => {
+      // The first send hangs: nothing after it may reach the chat first.
+      if (posted.length === 0) await held;
+      posted.push(text);
+    },
+    sent,
+    (error) => assert.fail(String(error)),
+  );
+
+  delivery.early("Reading the file now.");
+  delivery.early("Found it — checking the caller.");
+  // Same prose twice (a retry, or the model repeating itself) is one message.
+  delivery.early("Found it — checking the caller.");
+
+  const blocks = ["Reading the file now.", "Found it — checking the caller.", "The caller is in bot.ts."];
+  const answer = delivery.remaining(blocks, blocks.join("\n\n"));
+  assert.equal(answer, "The caller is in bot.ts.", "the answer is what the chat has not seen yet");
+
+  assert.deepEqual(posted, [], "the answer must not overtake prose still in flight");
+  release!();
+  await delivery.settled();
+  assert.deepEqual(posted, ["Reading the file now.", "Found it — checking the caller."]);
+});
+
+test("a turn that never spoke mid-loop still answers with the runtime's own text", () => {
+  const delivery = createTurnDelivery(async () => {}, new Set(), () => {});
+  // Nothing was flushed, so the result's text is the answer verbatim — blocks
+  // are only consulted once part of the turn is already in the chat.
+  assert.equal(delivery.remaining(["ignored"], "  the whole answer  "), "the whole answer");
+});
+
+test("prose the model sent itself is not flushed again by the turn", async () => {
+  // `sent` is shared with the telegram tool: a model that posted a message
+  // through the tool and then repeated it in its prose posts it once.
+  const posted: string[] = [];
+  const sent = new Set(["already in the chat"]);
+  const delivery = createTurnDelivery(async (text) => void posted.push(text), sent, () => {});
+  delivery.early("already in the chat");
+  await delivery.settled();
+  assert.deepEqual(posted, []);
+  // And nothing was flushed, so the final send still trusts the result text.
+  assert.equal(delivery.remaining([], "the answer"), "the answer");
 });

@@ -102,6 +102,7 @@ export interface ClaudeSessionRegistration {
 interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onTaskActivity?: (event: TaskActivityEvent) => void;
+  onProse?: (text: string) => void;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
 }
@@ -256,6 +257,22 @@ export function setClaudeTaskListener(
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onTaskActivity = listener;
+}
+
+/**
+ * Prose Claude produced mid-loop, the moment it produced it. Claude runs its
+ * whole tool loop inside one Pi turn, so its narration would otherwise reach the
+ * chat glued to the answer, minutes after it was written — and by then it reads
+ * as a summary of what happened instead of what is about to. Only interim prose
+ * comes through here: the turn's actual answer stays on the normal stream, where
+ * the channel delivers it inside the turn's durable window.
+ */
+export function setClaudeProseListener(
+  sessionId: string,
+  listener: ((text: string) => void) | undefined,
+): void {
+  const session = sessions.get(sessionId);
+  if (session) session.onProse = listener;
 }
 
 /**
@@ -535,6 +552,19 @@ async function consumeClaudeQuery(
     // a turn of its own); every answer they carry belongs to this Pi message.
     const answers: string[] = [];
     let steerSettled = false;
+    // Interim prose already on the stream, so the result can't answer with it a
+    // second time (Claude's last message may carry both prose and a tool call).
+    const flushed = new Set<string>();
+    /** Append one settled block of prose to this Pi message, as it happens. */
+    const emit = (text: string) => {
+      const content = text.trim();
+      const contentIndex = output.content.length;
+      output.content.push({ type: "text", text: content });
+      stream.push({ type: "text_start", contentIndex, partial: output });
+      stream.push({ type: "text_delta", contentIndex, delta: content, partial: output });
+      stream.push({ type: "text_end", contentIndex, content, partial: output });
+      return content;
+    };
 
     const logicalPayload = {
       runtime: "claude-code",
@@ -596,7 +626,20 @@ async function consumeClaudeQuery(
       // The child is alive and talking — a skipped result was indeed not the end.
       if (grace) { clearTimeout(grace); grace = undefined; }
       if (message.type === "assistant") {
-        if (message.parent_tool_use_id === null) lastTopLevelText = assistantText(message);
+        if (message.parent_tool_use_id === null) {
+          const text = assistantText(message);
+          // Prose that arrives with tool calls is Claude saying what it is about
+          // to do, never the turn's answer — ship it now instead of holding it
+          // until the loop ends, and leave nothing for the result to repeat.
+          const working = message.message.content.some((block) => block.type === "tool_use");
+          if (working && hasModelProse(text) && !isolated) {
+            flushed.add(emit(text));
+            registration.onProse?.(text.trim());
+            lastTopLevelText = "";
+          } else {
+            lastTopLevelText = text;
+          }
+        }
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
           markTool(block.name, asArgs(block.input), block.id);
@@ -622,7 +665,7 @@ async function consumeClaudeQuery(
         }
         applyUsage(output, message);
         const settled = message.subtype === "success" ? message.result || lastTopLevelText : lastTopLevelText;
-        if (hasModelProse(settled)) answers.push(settled.trim());
+        if (hasModelProse(settled) && !flushed.has(settled.trim())) answers.push(settled.trim());
         lastTopLevelText = "";
         // A steered message that arrived with no tool boundary left to inject it
         // at is queued behind the seed's own answer: Claude settles the seed
@@ -654,7 +697,7 @@ async function consumeClaudeQuery(
         // placeholder gets one more chance to pose as the answer here. Drop it:
         // an empty turn is what the runner knows how to fail over.
         const settled = result.subtype === "success" ? (result.result || lastTopLevelText) : lastTopLevelText;
-        if (hasModelProse(settled)) answers.push(settled.trim());
+        if (hasModelProse(settled) && !flushed.has(settled.trim())) answers.push(settled.trim());
       }
     }
 
@@ -662,12 +705,7 @@ async function consumeClaudeQuery(
     const error = sdkResultError(result);
     if (error) throw new Error(error);
     const text = answers.join("\n\n") || undefined;
-    if (text) {
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-    }
+    if (text) emit(text);
     // The owning Runner commits this active attempt only after Pi has accepted
     // the assistant message into its own transcript (see commitClaudeSession).
     output.stopReason = "stop";

@@ -100,14 +100,16 @@ export async function readFileSlice(file: string, offset: number, length: number
   }
 }
 
-/** Concatenated text blocks of a pi message content array. */
+/** The text blocks of a pi message content array, as one string. A message with
+ *  more than one — a runtime that spoke between its own tool calls — settled
+ *  them apart, so they are paragraphs and not one sentence cut in half. */
 export function contentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .filter((c): c is { type: "text"; text: string } => (c as { type?: string }).type === "text")
     .map((c) => c.text)
-    .join("");
+    .join("\n\n");
 }
 
 /** One-line preview of a tool call's args for live chips and transcript rows —

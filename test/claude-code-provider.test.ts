@@ -13,6 +13,7 @@ import {
   registerClaudeSession,
   RESUME_PROMPT,
   runWithClaudeSession,
+  setClaudeProseListener,
   setClaudeTaskListener,
   steerClaudeSession,
   unregisterClaudeSession,
@@ -713,6 +714,123 @@ test("stopping a turn interrupts the CLI instead of only killing its transport",
     );
   } finally {
     console.warn = realWarn;
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+/** A top-level assistant message: prose, tool calls, or both. */
+function assistantMessage(
+  content: unknown[],
+  uuid: string,
+  stopReason: string = "tool_use",
+): SDKMessage {
+  return {
+    type: "assistant",
+    parent_tool_use_id: null,
+    uuid,
+    session_id: "session",
+    message: {
+      id: `message-${uuid}`,
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-5",
+      stop_reason: stopReason,
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+      content,
+    },
+  } as unknown as SDKMessage;
+}
+
+test("prose Claude writes before going back to work leaves the turn while it is still true", async () => {
+  const piSessionId = "cccccccc-1111-4111-8111-111111111111";
+  // Regression: every word of a turn used to be held until the SDK settled its
+  // result and then pushed as one block. Claude Code runs its whole tool loop
+  // inside one Pi turn, so "let me check the logs" reached the chat minutes
+  // late, glued to the answer that made it pointless.
+  const messages = [
+    assistantMessage(
+      [
+        { type: "text", text: "Let me read the file first." },
+        { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "README.md" } },
+      ],
+      "assistant-1",
+    ),
+    assistantMessage([{ type: "text", text: "Now grepping for the caller." }], "assistant-2"),
+    assistantMessage(
+      [{ type: "tool_use", id: "tool-2", name: "Grep", input: { pattern: "x" } }],
+      "assistant-3",
+    ),
+    resultMessage("The caller is in bot.ts.", "result-1"),
+  ];
+  const prose: string[] = [];
+  // Where each block of prose stood in the stream when it was settled: prose
+  // that arrives after the last tool call is prose that arrived too late.
+  const order: string[] = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  try {
+    setClaudeProseListener(piSessionId, (text) => prose.push(text));
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(messages, () => {}),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("who calls this?")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      events.push(event);
+      if (event.type === "text_end") order.push(`text:${event.content}`);
+    }
+
+    // Only the narration that preceded work; the answer is not narration.
+    assert.deepEqual(prose, ["Let me read the file first."]);
+    // Prose that came with a tool call is its own block, settled before the
+    // answer's — not concatenated into one final wall of text.
+    assert.deepEqual(order, ["text:Let me read the file first.", "text:The caller is in bot.ts."]);
+    const done = events.find((event) => event.type === "done");
+    assert.deepEqual(
+      done?.message.content.map((block) => (block.type === "text" ? block.text : block.type)),
+      ["Let me read the file first.", "The caller is in bot.ts."],
+      "the transcript keeps both, in order",
+    );
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("prose already streamed is never answered a second time", async () => {
+  const piSessionId = "dddddddd-1111-4111-8111-111111111111";
+  // Claude's last message can carry prose and a tool call together, and then the
+  // CLI settles the result with that same prose. Emitting it early and answering
+  // with it would post it twice.
+  const messages = [
+    assistantMessage(
+      [
+        { type: "text", text: "Done — cleaning up." },
+        { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "a" } },
+      ],
+      "assistant-1",
+    ),
+    resultMessage("Done — cleaning up.", "result-1"),
+  ];
+  const prose: string[] = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  try {
+    setClaudeProseListener(piSessionId, (text) => prose.push(text));
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(messages, () => {}),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("clean up")], tools: [] };
+    const texts: string[] = [];
+    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+      if (event.type === "text_end") texts.push(event.content);
+    }
+
+    assert.deepEqual(prose, ["Done — cleaning up."]);
+    assert.deepEqual(texts, ["Done — cleaning up."]);
+  } finally {
     unregisterClaudeSession(piSessionId);
   }
 });

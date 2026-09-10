@@ -1438,12 +1438,32 @@ video.msg-media { max-width: 22rem; }
 .msg-body li::marker { color: color-mix(in oklab, currentColor 55%, transparent); }
 .msg-body li.task { list-style: none; margin-left: -1.1rem; display: flex; gap: 0.45rem; align-items: baseline; }
 .msg-body li.task input { accent-color: var(--color-primary); }
+/* A nested list is a continuation of its item, not a new block after it. */
+.msg-body li > ul, .msg-body li > ol { margin: 0.15rem 0; }
 .msg-body blockquote {
   margin: 0.5rem 0;
   padding-left: 0.75rem;
   border-left: 2px solid color-mix(in oklab, currentColor 30%, transparent);
   color: color-mix(in oklab, currentColor 80%, transparent);
 }
+/* The quote's own paragraphs supply the vertical space; a p margin on top of
+   the blockquote margin doubles it. */
+.msg-body blockquote > :first-child { margin-top: 0; }
+.msg-body blockquote > :last-child { margin-bottom: 0; }
+/* GFM tables. The wrapper scrolls so a wide one doesn't stretch the bubble —
+   the table itself sizes to its content rather than to 100% of a width it
+   would then overflow. */
+.msg-table { margin: 0.5rem 0; overflow-x: auto; max-width: 100%; }
+.msg-body table { border-collapse: collapse; font-size: 0.9em; }
+.msg-body th, .msg-body td {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+.msg-body th { font-weight: 700; background: oklch(0% 0 0 / 0.2); white-space: nowrap; }
+.msg-body td[align="right"], .msg-body th[align="right"] { text-align: right; }
+.msg-body td[align="center"], .msg-body th[align="center"] { text-align: center; }
 .msg-body hr { margin: 0.75rem 0; border: 0; border-top: 1px solid color-mix(in oklab, currentColor 20%, transparent); }
 .msg-body pre { background: oklch(0% 0 0 / 0.35); border-radius: 0.5rem; padding: 0.6rem 0.8rem;
   overflow-x: auto; white-space: pre; font-size: 0.8rem; margin: 0.5rem 0; line-height: 1.5; }

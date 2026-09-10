@@ -30,6 +30,7 @@ const SHELL_FILES = [
   "dom.js",
   "live-turn.js",
   "markdown.js",
+  "vendor/marked.esm.js",
   "message-display.js",
   "nav-drag.js",
   "waveform.js",

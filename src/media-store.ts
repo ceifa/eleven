@@ -110,13 +110,33 @@ export function sanitizeNoteValue(value: string): string {
   return value.replaceAll(/[\p{Cc}\]]+/gu, " ").replaceAll(/\s+/g, " ").trim();
 }
 
+/**
+ * Flatten a segmented transcript into one line.
+ *
+ * Speech-to-text backends emit one line per segment, and some of them (notably
+ * whisper.cpp's `whisper-server`, which wraps segments at 60 characters) cut a
+ * line in the middle of a word — joining those on the newline is what turns
+ * "adicionada" into "ad icionada" in the agent's prompt. Whisper's own spacing
+ * says where the words are: a segment that begins a new word starts with a
+ * space, one that continues the previous word does not. Join on that signal.
+ */
+export function flattenTranscript(text: string): string {
+  let out = "";
+  for (const segment of text.split("\n")) {
+    if (!segment.trim()) continue; // blank segments must not strand a separator
+    if (out && /^\s/.test(segment)) out += " ";
+    out += segment.trim().replaceAll(/\s+/g, " ");
+  }
+  return out;
+}
+
 /** Run the configured transcription command ({{file}} placeholder) on a stored audio file. */
 export async function transcribeMedia(path: string, command: string): Promise<string> {
   const rendered = command.replaceAll("{{file}}", path);
   return await new Promise<string>((resolve, reject) => {
     execFile("bash", ["-c", rendered], { timeout: 120_000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
       if (error) reject(error);
-      else resolve(stdout.trim() || "(empty transcript)");
+      else resolve(flattenTranscript(stdout) || "(empty transcript)");
     });
   });
 }

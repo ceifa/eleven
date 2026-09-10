@@ -28,7 +28,7 @@ function functionBody(source: string, signature: string) {
 
 test("the pane stops showing the last screen before the read, not after it", () => {
   const open = functionBody(app, "async function openThread(id)");
-  const painted = open.indexOf("paneLoading()");
+  const painted = open.indexOf("paneLoading(id)");
   const read = open.indexOf("await withLoading");
   assert.ok(painted >= 0, "openThread should hand the pane over to a placeholder");
   assert.ok(read >= 0, "openThread should still read the thread through withLoading");
@@ -37,7 +37,7 @@ test("the pane stops showing the last screen before the read, not after it", () 
   // Re-opening the thread already on screen is the common case — a turn ending,
   // the reconcile after a message — and blanking it there would flash the
   // transcript out from under whoever is reading it.
-  assert.match(open, /if \(renderedThreadId !== id\) paneLoading\(\);/);
+  assert.match(open, /if \(renderedThreadId !== id\) paneLoading\(id\);/);
 });
 
 test("a read that comes back empty puts the pane back", () => {
@@ -50,7 +50,7 @@ test("a read that comes back empty puts the pane back", () => {
 });
 
 test("the placeholder cannot be the launcher wearing a spinner", () => {
-  const loading = functionBody(app, "function paneLoading()");
+  const loading = functionBody(app, "function paneLoading(id)");
   // is-composing is what the launcher paints itself with; leaving it on would
   // keep its mobile padding and its "not a thread" state over the placeholder.
   assert.match(loading, /classList\.remove\("is-composing", "is-running"\)/);
@@ -61,6 +61,10 @@ test("the placeholder cannot be the launcher wearing a spinner", () => {
   // Next paint has to rebuild rather than patch: there is no transcript, no
   // head and no composer in there to patch.
   assert.match(loading, /renderedThreadId = undefined/);
+  // The clicked card already carries the name, so the head can say which thread
+  // is coming instead of making the wait anonymous.
+  assert.match(loading, /state\.threads\.find\(\(thread\) => thread\.id === id\)/);
+  assert.match(loading, /thread-head-title/);
 
   assert.match(readFileSync(join(PUBLIC_DIR, "style.css"), "utf8"), /\.pane-loading \{/);
 });

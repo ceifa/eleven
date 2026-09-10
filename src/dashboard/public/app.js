@@ -806,7 +806,7 @@ async function openThread(id) {
   // pane slides over the list on the tap: whatever it was holding rides in
   // with it for the length of the trip. Holding the launcher, that answers
   // "open this conversation" with a blank composer titled NEW THREAD.
-  if (renderedThreadId !== id) paneLoading();
+  if (renderedThreadId !== id) paneLoading(id);
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
   if (!data || seq !== openSeq) {
     // A read that came back empty would otherwise leave the placeholder up for
@@ -1737,23 +1737,37 @@ const headSignature = (thread) =>
 /**
  * The pane between a thread being asked for and its transcript arriving.
  *
- * Nothing here is about the thread — the list card knows its title, but the
- * head that would carry it also carries a menu that acts on a record we don't
- * have yet. What it is for is being *not the last screen*: the launcher, or the
- * conversation read before this one, either of which reads as the answer to the
- * tap rather than as the wait for one.
+ * Whatever it was holding — the launcher, the conversation read before this one
+ * — reads as the answer to the click rather than as the wait for one, and on a
+ * phone it arrives full-screen over the list at the moment of the tap. So the
+ * pane is handed over here, before the read rather than after it.
+ *
+ * The card that was clicked already knows what it is called, so the head says
+ * so immediately and only the transcript is waited for. It is a plain head, not
+ * `threadHeader`: the real one carries a menu that acts on a record this pane
+ * doesn't have yet.
  */
-function paneLoading() {
+function paneLoading(id) {
   const pane = document.getElementById("thread-pane");
   if (!pane) return;
   stopRecording(); // the pane this replaces may have had one running
   renderedThreadId = undefined;
   renderedHead = undefined;
   pane.classList.remove("is-composing", "is-running");
+  const card = state.threads.find((thread) => thread.id === id);
   pane.replaceChildren(
-    // Enough of a head to keep the way back: on a phone this is the whole
-    // screen, and a read that stalls with no ‹ on it is a dead end.
-    h("header", { class: "thread-head" }, backButton()),
+    // The head also keeps the way back: on a phone this is the whole screen,
+    // and a read that stalls with no ‹ on it is a dead end.
+    h("header", { class: "thread-head" },
+      backButton(),
+      h("div", { class: "thread-head-text min-w-0" },
+        h("div", { class: "thread-head-title truncate" }, card?.title ?? "(untitled)"),
+        h("div", { class: "thread-head-meta" },
+          card ? channelSource(card.sessionKey) : null,
+          h("span", { class: "truncate" }, card ? withoutChannelPrefix(card.conversationName ?? card.sessionKey, card.sessionKey) : ""),
+        ),
+      ),
+    ),
     h("div", { class: "pane-loading" }, h("i", { class: "spinner", "aria-hidden": "true" })),
   );
 }

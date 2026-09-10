@@ -24,6 +24,16 @@
        this the browser only discovers it after parsing the stylesheet, and the sign
        spends a round trip rendered in the fallback serif -->
   <link rel="preload" href="/fonts/grenze-800.woff2" as="font" type="font/woff2" crossorigin />
+  <!-- app.js imports these, and a browser cannot know that until it has parsed
+       app.js — a whole round trip spent discovering seven kilobytes. Named up
+       here they are asked for alongside app.js rather than after it. -->
+  <link rel="modulepreload" href="/app.js" />
+  <link rel="modulepreload" href="/dom.js" />
+  <link rel="modulepreload" href="/live-turn.js" />
+  <link rel="modulepreload" href="/markdown.js" />
+  <link rel="modulepreload" href="/message-display.js" />
+  <link rel="modulepreload" href="/nav-drag.js" />
+  <link rel="modulepreload" href="/waveform.js" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text x='8.2' y='13' font-size='14' font-family='Georgia,serif' font-weight='bold' fill='none' stroke='%23e7000b' stroke-width='0.9' text-anchor='middle'>E</text></svg>" />
 </head>
 <body class="h-screen flex bg-base-100 text-base-content">

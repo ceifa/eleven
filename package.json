@@ -7,7 +7,8 @@
     "test": "node --test test/*.test.ts",
     "start": "node src/cli.ts start",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/dashboard/public dist/dashboard/public && chmod +x dist/cli.js",
-    "prepublishOnly": "npm run check && npm test && npm run build"
+    "prepublishOnly": "npm run check && npm test && npm run build",
+    "vendor": "node scripts/vendor.mjs"
   },
   "keywords": [
     "ai",
@@ -49,6 +50,7 @@
     "@grammyjs/runner": "2.0.3",
     "@grammyjs/transformer-throttler": "1.2.1",
     "grammy": "1.46.0",
+    "marked": "18.0.5",
     "typebox": "^1.3.22",
     "ws": "^8.21.3",
     "zod": "4.5.4"

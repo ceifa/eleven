@@ -1202,6 +1202,16 @@ video.msg-media { max-width: 22rem; }
 }
 .pane-empty-line { max-width: 24rem; font-size: 0.9rem; color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
 
+/* Waiting for a transcript. Deliberately almost nothing in it: the read is
+   usually over in a blink, and anything with words would flash them. */
+.pane-loading { flex: 1; display: grid; place-items: center; }
+.pane-loading .spinner {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-width: 2px;
+  color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+}
+
 /* -- new thread -- */
 
 /* Starting a thread is writing the first message, so the message is the page.

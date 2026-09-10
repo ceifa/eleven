@@ -801,8 +801,20 @@ async function openThread(id) {
     state.tasks = { plan: [], agents: [], agentTotal: 0 };
     state.pending = [];
   }
+  // The pane stops showing what it was showing here, before the read — not
+  // after it. Opening a thread is a tap and a round trip, and on a phone the
+  // pane slides over the list on the tap: whatever it was holding rides in
+  // with it for the length of the trip. Holding the launcher, that answers
+  // "open this conversation" with a blank composer titled NEW THREAD.
+  if (renderedThreadId !== id) paneLoading();
   const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
-  if (!data || seq !== openSeq) return false;
+  if (!data || seq !== openSeq) {
+    // A read that came back empty would otherwise leave the placeholder up for
+    // good. Put back whatever the pane can still show — unless a newer open is
+    // already painting it, in which case this one owns nothing anymore.
+    if (!data && seq === openSeq) renderThreadPane();
+    return false;
+  }
   state.activeThread = data.thread;
   // Keep the address bar on the thread actually open, so it can be reloaded,
   // bookmarked or linked to from the Usage page. replaceState rather than
@@ -1721,6 +1733,30 @@ let renderedThreadId;
 let renderedHead;
 const headSignature = (thread) =>
   `${thread.title}|${thread.conversation}|${thread.workspace}|${thread.effectiveModel ?? thread.model}|${state.showRequests}`;
+
+/**
+ * The pane between a thread being asked for and its transcript arriving.
+ *
+ * Nothing here is about the thread — the list card knows its title, but the
+ * head that would carry it also carries a menu that acts on a record we don't
+ * have yet. What it is for is being *not the last screen*: the launcher, or the
+ * conversation read before this one, either of which reads as the answer to the
+ * tap rather than as the wait for one.
+ */
+function paneLoading() {
+  const pane = document.getElementById("thread-pane");
+  if (!pane) return;
+  stopRecording(); // the pane this replaces may have had one running
+  renderedThreadId = undefined;
+  renderedHead = undefined;
+  pane.classList.remove("is-composing", "is-running");
+  pane.replaceChildren(
+    // Enough of a head to keep the way back: on a phone this is the whole
+    // screen, and a read that stalls with no ‹ on it is a dead end.
+    h("header", { class: "thread-head" }, backButton()),
+    h("div", { class: "pane-loading" }, h("i", { class: "spinner", "aria-hidden": "true" })),
+  );
+}
 
 /**
  * The pane is re-rendered by a great many things — a turn ending, a message

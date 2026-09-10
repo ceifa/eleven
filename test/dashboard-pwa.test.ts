@@ -87,11 +87,85 @@ test("the worker leaves the daemon's live surfaces alone", () => {
   // /media holds private attachments. Both must reach the network or nothing.
   assert.match(worker, /pathname\.startsWith\("\/api\/"\)/);
   assert.match(worker, /request\.method !== "GET"/);
-  // Network-first, not cache-first: the daemon serves this app off the checkout
-  // and the page reloads itself when the shell version moves. A cache-first
-  // shell would answer that very reload with the bytes it is leaving behind.
   assert.match(worker, /async function networkFirst/);
-  assert.doesNotMatch(worker, /caches\.match\(request\)\s*\|\|\s*fetch/);
+});
+
+test("the shell is answered from the cache, and a stale one is corrected after", () => {
+  const worker = read("sw.js");
+
+  // The point of the worker on a phone: a navigation is painted from the cache
+  // instead of waiting out a tunnel. Going to the network first put the page,
+  // its stylesheet, its modules and the first API read in a single queue in
+  // front of the first pixel.
+  const navigate = worker.match(/request\.mode === "navigate"\)\s*\{([\s\S]*?)\n {2}\}/);
+  assert.ok(navigate, "the worker should still special-case navigations");
+  assert.match(navigate[1], /respondWith\(cacheFirst\(request, "\/index\.html"\)\)/);
+  assert.match(worker, /CACHED_PATHS\.has\(url\.pathname\)[\s\S]{0,80}cacheFirst\(request\)/);
+
+  // …which is only safe because the freshness that network-first bought is
+  // bought again right after: the daemon serves this app off a checkout, so a
+  // cached page can be older than the API it is about to call. Every shell
+  // entry is held against the daemon on open, and a page running bytes that
+  // have moved is told to reload into the new ones.
+  assert.match(navigate[1], /waitUntil\(revalidateShell\(\)\)/);
+  const revalidate = worker.match(/function revalidateShell\(\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(revalidate, "the worker should still revalidate the shell");
+  assert.match(revalidate[1], /SHELL\.map/); // all of it, not just the html
+  assert.match(revalidate[1], /store\(cache, path, response\)/);
+  assert.match(revalidate[1], /postMessage\(\{ type: "shell-updated" \}\)/);
+  // A file the worker never had is not a change — flagging it would reload the
+  // page once for every asset added to the list since it was installed.
+  assert.match(revalidate[1], /previous && version\(previous\) !== version\(response\)/);
+
+  // Everything that fills the cache goes through the one writer, which drops
+  // the headers describing a compression the stored body no longer has. The
+  // daemon serves brotli; a worker's fetch decodes it and leaves
+  // `content-encoding: br` and the compressed length behind in the headers.
+  // Chromium ignores them when it replays the entry, and a browser that didn't
+  // would fail to open the app from the cache at all.
+  assert.match(worker, /async function store\(cache, key, response\)/);
+  assert.match(worker, /headers\.delete\("content-encoding"\)/);
+  assert.match(worker, /headers\.delete\("content-length"\)/);
+  // …including the install, which used to hand the job to cache.add().
+  assert.doesNotMatch(worker, /caches?\.add\(/);
+  assert.match(worker, /store\(cache, path, response\)/);
+  // One writer, and it is store(): any other cache.put() is a path that skipped
+  // the headers being dropped.
+  assert.equal([...worker.matchAll(/\.put\(/g)].length, 1, "the cache should only ever be written through store()");
+
+  // And the page has to act on it, or the worker is talking to itself.
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const listener = app.match(/serviceWorker\.addEventListener\("message",([\s\S]*?)\n {2}\}\);/);
+  assert.ok(listener, "app.js should listen for the worker's messages");
+  assert.match(listener[1], /"shell-updated"/);
+  assert.match(listener[1], /location\.reload\(\)/);
+});
+
+test("the first screen's reads leave together", () => {
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+
+  // With the shell cached, what is left of a cold start is the API — and the
+  // router walks into those reads one at a time: /overview, then the list, then
+  // the conversation the hash names. Three round trips through a tunnel, none
+  // of which needs the one before it. The boot starts them all at once and
+  // api.get takes whatever is already in flight for the path it is asked for.
+  assert.match(app, /get: \(path\) => take\(path\) \?\? fetch\(`\/api\$\{path\}`\)/);
+  assert.match(app, /prefetch\("\/overview"\)/);
+  assert.match(app, /prefetch\(`\/threads\$\{threadsQuery\(\)\}`\)/);
+  assert.match(app, /prefetch\(`\/threads\/\$\{bootThread\}`\)/);
+
+  // A prefetch is only ever taken once, and only by the boot render — an answer
+  // nobody claimed is dropped rather than kept around to be served stale later.
+  const take = app.match(/function take\(path\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(take, "app.js should still have the take() that claims a prefetch");
+  assert.match(take[1], /started\.delete\(path\)/);
+  assert.match(app, /render\(\)\.finally\(\(\) => started\.clear\(\)\)/);
+
+  // Every prefetched path has to be spelled the way the code that consumes it
+  // spells it, or the read is done twice and the prefetch is pure cost.
+  assert.match(app, /cachedGet\("\/overview"\)/);
+  assert.match(app, /api\.get\(`\/threads\$\{threadsQuery\(\)\}`\)/);
+  assert.match(app, /api\.get\(`\/threads\/\$\{id\}`\)/);
 });
 
 test("the shell asks for the app frame a phone needs", () => {
@@ -103,6 +177,15 @@ test("the shell asks for the app frame a phone needs", () => {
   assert.match(shell, /name="viewport" content="[^"]*viewport-fit=cover/);
   assert.match(shell, /name="theme-color" content="#0e0707"/);
   assert.match(shell, /name="apple-mobile-web-app-capable" content="yes"/);
+
+  // Every module in the graph, named where the browser sees it before it has
+  // parsed app.js. Off the directory, not a list: forgetting one here is the
+  // failure — it costs a serial round trip on any start the cache doesn't
+  // answer, and a hand-written list would forget it the same way.
+  const preloaded = [...shell.matchAll(/rel="modulepreload" href="([^"]+)"/g)].map((match) => match[1]);
+  for (const name of readdirSync(PUBLIC_DIR).filter((file) => file.endsWith(".js") && file !== "sw.js")) {
+    assert.ok(preloaded.includes(`/${name}`), `/${name} is part of the module graph and index.html doesn't preload it`);
+  }
 });
 
 test("the phone layout subtracts the chrome it actually has", () => {

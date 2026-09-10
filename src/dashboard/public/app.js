@@ -74,7 +74,7 @@ const NEW_THREAD_DRAFT = "new"; // the launcher's box has no thread to key on ye
 /* ---------- helpers ---------- */
 
 const api = {
-  get: (path) => fetch(`/api${path}`).then(ok),
+  get: (path) => take(path) ?? fetch(`/api${path}`).then(ok),
   send: (method, path, body) =>
     fetch(`/api${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(ok),
 };
@@ -82,6 +82,25 @@ async function ok(response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error ?? response.statusText);
   return data;
+}
+
+/** Reads that were already in flight before anyone asked for them — see the
+ *  boot at the bottom of this file. Each is taken by the first `api.get` for
+ *  its path and gone after that, so nothing is ever answered from a promise old
+ *  enough to be stale. */
+const started = new Map();
+function take(path) {
+  const value = started.get(path);
+  if (value) started.delete(path);
+  return value;
+}
+function prefetch(path) {
+  const value = api.get(path);
+  // It is answered by whoever asks for the path. The empty catch only keeps a
+  // failure in the meantime from being reported as an unhandled rejection —
+  // the promise the caller gets still rejects, and is still handled there.
+  value.catch(() => {});
+  started.set(path, value);
 }
 
 // Reads that describe the daemon rather than the conversation — /overview and
@@ -3732,6 +3751,15 @@ if (viewport) {
 // works perfectly well without it.
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+  // The worker answers the shell from its cache, so this page can be running
+  // code the daemon has since replaced — it checks after every open and says so
+  // when the bytes have moved. The fix is the socket's fix: reload, now that the
+  // new bytes are the ones in the cache. Nothing is lost by it. Drafts are in
+  // localStorage on every keystroke and everything else on screen is the
+  // daemon's to send again.
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "shell-updated") location.reload();
+  });
 }
 
 // Chromium hands the install over exactly once, through this event, and only
@@ -3748,7 +3776,25 @@ window.addEventListener("beforeinstallprompt", (event) => {
 });
 window.addEventListener("appinstalled", () => { installPrompt = null; });
 
+/* ---------- boot ---------- */
+
+/* The router asks for the first screen's reads one after another — the
+   overview, then the thread list, then the conversation the address bar names —
+   and each of those is a round trip to a daemon that, from a phone, is on the
+   other side of a tunnel. None of them depends on the answer to another, and
+   the address bar already says which they are, so they leave together and are
+   waiting by the time the render walks into them. */
+prefetch("/overview");
+const [bootRoute, bootThread] = location.hash.replace(/^#\/?/, "").split("/");
+if (!bootRoute || bootRoute === "threads") {
+  prefetch(`/threads${threadsQuery()}`);
+  if (bootThread) prefetch(`/threads/${bootThread}`);
+}
+
 initStringLights();
 connectWs();
-render(); // fetches /overview once and paints the pairing badge from it
+// Paints the first screen from the reads above, pairing badge included. Then
+// whatever is left unclaimed is dropped: a prefetch nobody wanted is an answer
+// that only gets staler.
+render().finally(() => started.clear());
 

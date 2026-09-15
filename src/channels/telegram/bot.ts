@@ -128,7 +128,7 @@ export function createSeenMessages(now: () => number = Date.now) {
  * the chat by any route is not sent twice.
  */
 export function createTurnDelivery(
-  send: (text: string) => Promise<unknown>,
+  send: (text: string, silent: boolean) => Promise<unknown>,
   sent: Set<string>,
   onError: (error: unknown) => void,
 ) {
@@ -137,15 +137,17 @@ export function createTurnDelivery(
   let chain: Promise<unknown> = Promise.resolve();
   let flushed = false;
   return {
-    /** Ship a block of prose now, unless the chat already has it. */
-    early(chunk: string): void {
+    /** Ship a block of prose now, unless the chat already has it. `silent` is for
+     * prose that only says the turn is still working: it belongs in the chat, but
+     * buzzing a phone for "checking X now" is a notification nobody asked for. */
+    early(chunk: string, options: { silent?: boolean } = {}): void {
       const text = chunk.trim();
       if (!text || sent.has(text)) return;
       // Remembering it here is also what keeps the final send from repeating it:
       // the turn's own text still carries this prose.
       sent.add(text);
       flushed = true;
-      chain = chain.then(() => send(text)).catch(onError);
+      chain = chain.then(() => send(text, !!options.silent)).catch(onError);
     },
     /** What the chat is still owed once the early sends are out. */
     remaining(blocks: string[], resultText: string): string {
@@ -451,7 +453,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     };
 
     const delivery = createTurnDelivery(
-      (text) => sendRich(bot.api, chatId, text, sendOptions),
+      (text, silent) => sendRich(bot.api, chatId, text, { ...sendOptions, silent }),
       sent,
       (error) => log.warn(`mid-turn flush failed: ${error}`),
     );
@@ -500,11 +502,13 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           },
           // What the model said before going back to work. It reads as an
           // intention ("checking X now"), so it is worth nothing once the work
-          // it announces is already done — send it while it is still true.
-          onProse: (text) => delivery.early(text),
+          // it announces is already done — send it while it is still true, and
+          // without a notification: the answer it precedes is what deserves one.
+          onProse: (text) => delivery.early(text, { silent: true }),
           // A steered message just entered the turn — deliver the prose that
           // preceded it now, so replies land in timeline order instead of a
-          // stale answer arriving glued to the final one.
+          // stale answer arriving glued to the final one. This one is an answer,
+          // not narration, so it notifies like any other.
           onEvent: (event) => {
             if (event.type !== "message_end" || event.message.role !== "user") return;
             delivery.early(blocks.splice(0).join("\n\n"));

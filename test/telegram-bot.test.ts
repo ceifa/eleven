@@ -603,6 +603,26 @@ test("a turn's prose reaches the chat as it happens, and the answer never repeat
   assert.deepEqual(posted, ["Reading the file now.", "Found it — checking the caller."]);
 });
 
+test("working narration goes out silently, a steered flush still notifies", async () => {
+  // Regression: mid-loop prose ("checking X now") was sent like any other
+  // message and buzzed the phone for every step of a long turn.
+  const posted: Array<{ text: string; silent: boolean }> = [];
+  const delivery = createTurnDelivery(
+    async (text, silent) => void posted.push({ text, silent }),
+    new Set(),
+    (error) => assert.fail(String(error)),
+  );
+
+  delivery.early("Checking the caller now.", { silent: true });
+  delivery.early("The caller is in bot.ts.");
+  await delivery.settled();
+
+  assert.deepEqual(posted, [
+    { text: "Checking the caller now.", silent: true },
+    { text: "The caller is in bot.ts.", silent: false },
+  ]);
+});
+
 test("a turn that never spoke mid-loop still answers with the runtime's own text", () => {
   const delivery = createTurnDelivery(async () => {}, new Set(), () => {});
   // Nothing was flushed, so the result's text is the answer verbatim — blocks

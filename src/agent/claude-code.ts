@@ -949,6 +949,13 @@ function claudeChildEnv(): Record<string, string | undefined> {
     ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_AGENT_SDK_CLIENT_APP: "eleven",
+    // Pi's bash tool has no default timeout and caps at setTimeout's own ceiling;
+    // the Agent SDK caps a requested timeout at 10 minutes, so the same command
+    // that runs fine under every other model gets killed under Claude. Match pi's
+    // ceiling, for the same reason pi picked it: past 2^31-1 ms a Node timer
+    // overflows and fires immediately. This lifts the ceiling only — the default
+    // stays short, so a hung command still needs an explicit timeout to hang long.
+    BASH_MAX_TIMEOUT_MS: "2147483647",
     // Resuming a session whose turn never finished, Claude Code injects its own
     // "Continue from where you left off." — written for a terminal, where the
     // user is watching the work. Here the turn's output *is* a chat message, so

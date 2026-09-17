@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
 import type { Context, Model } from "@earendil-works/pi-ai";
-import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
   claudeAttemptId,
@@ -650,6 +650,29 @@ test("the child is told how a resumed turn reaches the user", async () => {
     // terminal-shaped "Continue from where you left off." — which says nothing
     // about the reply being a chat message nobody will see if the turn ends quiet.
     assert.equal(captured?.options.env?.CLAUDE_CODE_RESUME_PROMPT, RESUME_PROMPT);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("the child carries neither Claude's attribution nor its background tasks", async () => {
+  const piSessionId = "dddddddd-2222-4111-8111-111111111111";
+  let captured: { options: { env?: Record<string, string>; settings?: Settings } } | undefined;
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages, (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+
+    // What the CLI does when nothing says otherwise: a Co-Authored-By trailer on
+    // every commit, a "Generated with Claude Code" PR footer, and a Bash
+    // `run_in_background` parameter eleven rewrites away on every single call.
+    assert.deepEqual(captured?.options.settings, { attribution: { commit: "", pr: "" } });
+    assert.equal(captured?.options.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
   } finally {
     unregisterClaudeSession(piSessionId);
   }

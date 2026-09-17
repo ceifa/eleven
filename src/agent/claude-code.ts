@@ -8,6 +8,7 @@ import {
   type SDKControlGetUsageResponse,
   type SDKMessage,
   type SDKUserMessage,
+  type Settings,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   createAssistantMessageEventStream,
@@ -68,6 +69,17 @@ export const RESUME_PROMPT =
   + " so ending the turn silently reads to the user as being ignored: if you had already finished a reply that"
   + " never went out, send it again — otherwise carry on and answer. No need to mention the interruption unless"
   + " it changes your answer.]";
+
+/** The settings layer eleven supplies itself. `settingSources: []` keeps the
+ * machine's own settings files out of the child, so this is the only place a
+ * setting can come from — and the CLI still reads its defaults from here.
+ *
+ * Empty attribution drops the `Co-Authored-By: Claude` commit trailer and the
+ * "Generated with Claude Code" PR footer, both from the commit the agent writes
+ * and from the Bash tool description that instructs it. Work done through
+ * eleven is the user's, signed by the user's git identity; a co-author trailer
+ * on it is a claim nobody here makes. */
+const CLAUDE_SETTINGS: Settings = { attribution: { commit: "", pr: "" } };
 
 // How long a stop waits for the CLI to acknowledge the interrupt before the
 // transport is killed anyway. A stop must never hang on a child that stopped
@@ -591,6 +603,7 @@ async function consumeClaudeQuery(
       mcpServers: mcpServer ? { [MCP_SERVER]: mcpServer } : {},
       strictMcpConfig: true,
       settingSources: [],
+      settings: CLAUDE_SETTINGS,
       skills: [],
       plugins: [],
       persistSession: !isolated,
@@ -948,6 +961,15 @@ function claudeChildEnv(): Record<string, string | undefined> {
     ...Object.fromEntries(keys.map((key) => [key, process.env[key]])),
     ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    // eleven forces every Bash call into the foreground anyway (see
+    // foregroundToolInput): a detached job would be killed the moment Claude
+    // returns a result, and there is no next terminal prompt to report it at.
+    // Without this the CLI still advertises `run_in_background` — a parameter
+    // whose description promises the opposite of what eleven does with it. The
+    // flag removes both the parameter and its paragraph from the Bash tool, so
+    // the model is not told something untrue and the turn is that much cheaper.
+    // The hook stays as the backstop for a runtime that ignores the flag.
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
     CLAUDE_AGENT_SDK_CLIENT_APP: "eleven",
     // Pi's bash tool has no default timeout and caps at setTimeout's own ceiling;
     // the Agent SDK caps a requested timeout at 10 minutes, so the same command

@@ -78,8 +78,19 @@ export const RESUME_PROMPT =
  * "Generated with Claude Code" PR footer, both from the commit the agent writes
  * and from the Bash tool description that instructs it. Work done through
  * eleven is the user's, signed by the user's git identity; a co-author trailer
- * on it is a claim nobody here makes. */
-const CLAUDE_SETTINGS: Settings = { attribution: { commit: "", pr: "" } };
+ * on it is a claim nobody here makes.
+ *
+ * The git instructions are the CLI's own commit and PR workflow, written for a
+ * terminal session on a feature branch: commit only when asked, branch before
+ * touching the default one. A workspace here says how its own repo is worked —
+ * eleven's says to commit straight to main — so the built-in version is one
+ * more instruction to override, in the tool description and in the session's
+ * injected `git status` both. Withholding it leaves the workspace's word as
+ * the only one; the agent can still run git itself. */
+const CLAUDE_SETTINGS: Settings = {
+  attribution: { commit: "", pr: "" },
+  includeGitInstructions: false,
+};
 
 // How long a stop waits for the CLI to acknowledge the interrupt before the
 // transport is killed anyway. A stop must never hang on a child that stopped

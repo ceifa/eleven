@@ -8,6 +8,28 @@ export function serviceInstalled(): boolean {
   return existsSync(SERVICE_FILE);
 }
 
+/**
+ * `systemctl --user` reaches the session manager over the session bus, which it
+ * locates through XDG_RUNTIME_DIR (or DBUS_SESSION_BUS_ADDRESS). A process the
+ * daemon spawned may carry neither: eleven hands its agent runtimes a
+ * whitelisted environment, and an agent restarting eleven from inside its own
+ * turn is an ordinary thing to do here — it is how a code change to eleven
+ * takes effect. Without this, `eleven restart` there dies on "Failed to connect
+ * to user scope bus" instead of restarting anything.
+ *
+ * Only ever fills a gap, and only when the bus socket is actually there: an
+ * environment that already points somewhere is left alone, and a machine
+ * without the socket gets systemctl's own error rather than a fabricated path.
+ */
+export function supervisorEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  hasBus: (runtimeDir: string) => boolean = (dir) => existsSync(join(dir, "bus")),
+): NodeJS.ProcessEnv {
+  if (IS_MAC || env.XDG_RUNTIME_DIR || env.DBUS_SESSION_BUS_ADDRESS) return env;
+  const runtimeDir = `/run/user/${process.getuid!()}`;
+  return hasBus(runtimeDir) ? { ...env, XDG_RUNTIME_DIR: runtimeDir } : env;
+}
+
 /** Start or restart the installed service through its supervisor. */
 export function controlService(action: "start" | "restart") {
   if (IS_MAC) {
@@ -15,7 +37,7 @@ export function controlService(action: "start" | "restart") {
     const target = `${launchdDomain()}/${SERVICE_LABEL}`;
     execFileSync("launchctl", action === "restart" ? ["kickstart", "-k", target] : ["kickstart", target], { stdio: "inherit" });
   } else {
-    execFileSync("systemctl", ["--user", action, "eleven.service"], { stdio: "inherit" });
+    execFileSync("systemctl", ["--user", action, "eleven.service"], { stdio: "inherit", env: supervisorEnv() });
   }
 }
 
@@ -46,8 +68,9 @@ export function installService(): boolean {
     } catch {}
     execFileSync("launchctl", ["bootstrap", launchdDomain(), SERVICE_FILE], { stdio: "inherit" });
   } else {
-    execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
-    execFileSync("systemctl", ["--user", "enable", "--now", "eleven.service"], { stdio: "inherit" });
+    const env = supervisorEnv();
+    execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit", env });
+    execFileSync("systemctl", ["--user", "enable", "--now", "eleven.service"], { stdio: "inherit", env });
   }
   console.log("service enabled and started");
   return true;

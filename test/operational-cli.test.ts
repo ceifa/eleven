@@ -7,6 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { listWorkspaceSkills, Runner } from "../src/agent/runner.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
+import { supervisorEnv } from "../src/service.ts";
 import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE, TURN_ERROR_ENTRY_TYPE } from "../src/threads/reader.ts";
 import { ThreadStore } from "../src/threads/store.ts";
 import { readJsonFile } from "../src/util.ts";
@@ -434,4 +435,20 @@ test("a skill directory that cannot be enumerated is reported, not silently drop
     chmodSync(blocked, 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("restarting the service works from a process without a session-bus environment", () => {
+  // What the agent runtimes get: a whitelisted env with no XDG_RUNTIME_DIR and
+  // no DBUS_SESSION_BUS_ADDRESS. `systemctl --user` there cannot find the bus
+  // at all, so `eleven restart` from inside a turn restarted nothing.
+  const stripped = { PATH: "/usr/bin" };
+  assert.equal(supervisorEnv(stripped, () => true).XDG_RUNTIME_DIR, `/run/user/${process.getuid!()}`);
+
+  // A machine with no socket at that path gets systemctl's own diagnosis, not
+  // a path we made up; an env that already points somewhere is never rewritten.
+  assert.equal(supervisorEnv(stripped, () => false).XDG_RUNTIME_DIR, undefined);
+  const pointed = { XDG_RUNTIME_DIR: "/run/user/9000" };
+  assert.equal(supervisorEnv(pointed, () => true), pointed);
+  const dbusOnly = { DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus" };
+  assert.equal(supervisorEnv(dbusOnly, () => true), dbusOnly);
 });

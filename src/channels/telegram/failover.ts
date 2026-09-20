@@ -32,6 +32,16 @@ export interface FailoverOffer<T> {
   at: number;
 }
 
+/** What a failed turn does next: run the continue retry itself, or put the two
+ * ways out in the chat and let the person pick. */
+export interface FailureResolution {
+  /** Set when the failover runs unattended: the untried tail and the prompt
+   * that picks the dead turn up on it. */
+  retry?: { models: ModelEntry[]; text: string };
+  /** Set when the choice went to the chat — the buttons the failure carries. */
+  keyboard?: InlineKeyboardMarkup;
+}
+
 /** Calls past this are dropped from the prompt, oldest first — a long attempt
  * can run hundreds, and the recent ones are the ones still worth not redoing. */
 const MAX_LISTED_CALLS = 15;
@@ -81,6 +91,28 @@ export function modelName(ref: string): string {
  */
 export class FailoverOffers<T> {
   private offers = new Map<string, FailoverOffer<T>>();
+
+  /**
+   * Settle a failed turn: with `auto` on, the Continue button's own retry runs
+   * unattended — same untried tail, same prompt — and no offer is made at all,
+   * so there is no stale keyboard left for anyone to press. Off, or with the
+   * plan spent, this is just `offer`.
+   *
+   * A restart is never the automatic answer: the attempt being failed over
+   * already ran tools, so branching it away would hide side effects that
+   * happened instead of undoing them.
+   */
+  resolve(
+    sessionKey: string,
+    replay: T,
+    failure: Pick<TurnFailure, "remaining" | "rewind" | "hiddenToolCalls">,
+    auto: boolean,
+  ): FailureResolution {
+    if (auto && failure.remaining.length) {
+      return { retry: { models: failure.remaining, text: continuePrompt(failure.hiddenToolCalls) } };
+    }
+    return { keyboard: this.offer(sessionKey, replay, failure) };
+  }
 
   /** Attach an offer to a conversation's failure, returning its keyboard. */
   offer(

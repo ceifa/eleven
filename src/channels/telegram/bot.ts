@@ -13,7 +13,7 @@ import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
-import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "./failover.ts";
+import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, modelName } from "./failover.ts";
 import { logger } from "../../log.ts";
 
 const STALL_THRESHOLD_MS = 120_000;
@@ -84,6 +84,8 @@ export interface BotDeps {
   /** The workspace this channel routes to. */
   workspace: () => string | undefined;
   transcribeCommand: () => string | undefined;
+  /** Live view of the auto-failover setting (Models page) — read per failure. */
+  autoFailover: () => boolean;
   /** Mutate a registered group's config entry; return true to persist. */
   updateGroup: (chatId: string, mutate: (group: GroupConfig) => boolean) => void;
   /** Mutate an allowed user's config entry; return true to persist. */
@@ -473,6 +475,10 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const config = deps.botConfig();
     const owner = isPrivate ? config?.users?.[String(chatId)] : config?.groups?.[String(chatId)];
     const topicConfig = topic !== undefined ? owner?.topics?.[String(topic)] : undefined;
+    // An unattended failover, decided in the catch below and run once this
+    // turn's status message is closed out — a retry must not share the dead
+    // turn's progress message.
+    let autoRetry: { models: ModelEntry[]; text: string } | undefined;
     // Appends accumulate outermost→innermost: the owner's, then the topic's.
     const appends = [owner?.appendSystemPrompt, topicConfig?.appendSystemPrompt].filter((a): a is string => !!a);
     try {
@@ -543,16 +549,29 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       log.error(`turn failed: ${error}`);
       // The runner stops instead of failing over once an attempt ran tools (a
       // spent quota mid-turn is the common way there) — so when its plan still
-      // has models left, the failure carries the buttons that run the next one.
-      const keyboard = error instanceof TurnFailure
-        ? failovers.offer(sessionKey, { target, text, images }, error)
+      // has models left, the failure either carries the buttons that run the
+      // next one, or runs it on its own when auto-failover is on.
+      const next = error instanceof TurnFailure
+        ? failovers.resolve(sessionKey, { target, text, images }, error, deps.autoFailover())
         : undefined;
-      await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}`, {
+      autoRetry = next?.retry;
+      const continuing = autoRetry ? ` — continuing on ${modelName(autoRetry.models[0]!.model)}` : "";
+      // The failure is now a footnote to a turn that is still going: it still
+      // belongs in the chat, but it doesn't deserve a notification of its own.
+      await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}${continuing}`, {
         messageThreadId: topic,
-        replyMarkup: keyboard,
+        replyMarkup: next?.keyboard,
+        silent: !!autoRetry,
       }).catch(() => {});
     } finally {
       taskProgress.cancel();
+    }
+    // Outside the try: this is a turn of its own, with its own status message
+    // and its own failure handling (including, if it comes to it, the next
+    // failover — the plan it carries is strictly shorter, so the chain ends).
+    if (autoRetry) {
+      log.info(`auto failover in ${sessionKey}: continue on ${autoRetry.models[0]!.model}`);
+      await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
     }
   }
 

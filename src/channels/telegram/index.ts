@@ -71,6 +71,7 @@ export class TelegramChannel {
         botConfig: () => this.find(name)?.channel,
         workspace: () => this.find(name)?.workspace,
         transcribeCommand: () => this.config.resolved.transcription?.command,
+        autoFailover: () => this.config.resolved.autoFailover === true,
         updateGroup: (chatId, mutate) => this.updateEntry(name, (c) => c.groups?.[chatId], mutate),
         updateUser: (userId, mutate) => this.updateEntry(name, (c) => c.users?.[userId], mutate),
       });

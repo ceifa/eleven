@@ -45,6 +45,7 @@ Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for y
     { "model": "openai-codex/gpt-5.6-sol", "reasoning": "high" },
     { "model": "claude-code/opus", "reasoning": "high" }
   ],
+  "autoFailover": false,
   "transcription": { "command": "whisper --file {{file}}" },
   "session": { "idleDays": 7, "retentionDays": 30 },
   "workspaces": {
@@ -77,7 +78,8 @@ is never failed over automatically — a rewound transcript cannot undo a comman
 or a sent message — so the failure comes with two buttons instead: **Continue**
 picks the dead turn up where it stopped, **Restart** drops that attempt and runs
 the request again from nothing. Either way the rest of the sequence takes over.
-Any scope — workspace, group, topic —
+`autoFailover` (a toggle on the Models page) skips that question: the next model
+picks the turn up on its own, exactly as **Continue** would. Any scope — workspace, group, topic —
 may carry its own `models` sequence, and the most specific one replaces the
 inherited sequence outright. `tools` narrows capabilities (`read`, `bash`,
 `edit`, `write`, and `web`/`agent` on the Claude Code runtime); a workspace's

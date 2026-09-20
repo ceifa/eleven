@@ -136,6 +136,43 @@ test("a long attempt lists only its recent calls, and says how many it dropped",
   assert.match(prompt, /file-39\.ts/);
 });
 
+test("with auto-failover on, the failure runs the continue itself instead of asking", () => {
+  const offers = new FailoverOffers<string>();
+  const hiddenToolCalls = [{ id: "claude:0", name: "Bash", args: { command: "npm test" } }];
+
+  const resolution = offers.resolve("telegram:main:7", "replay", { remaining: TAIL, rewind: { from: "leaf-9", to: "leaf-4" }, hiddenToolCalls }, true);
+
+  // No buttons at all — the retry is already on its way.
+  assert.equal(resolution.keyboard, undefined);
+  assert.deepEqual(resolution.retry?.models, TAIL);
+  // A continue, never a restart: the rewind is left alone and the prompt is the
+  // one that tells the next model what already ran.
+  assert.equal(resolution.retry?.text, continuePrompt(hiddenToolCalls));
+  assert.match(resolution.retry.text, /- Bash npm test/);
+});
+
+test("auto-failover with the plan spent still just reports the failure", () => {
+  const offers = new FailoverOffers<string>();
+
+  const resolution = offers.resolve("telegram:main:7", "replay", { remaining: [], hiddenToolCalls: [] }, true);
+
+  assert.equal(resolution.retry, undefined);
+  assert.equal(resolution.keyboard, undefined);
+});
+
+test("with auto-failover off, the choice still goes to the chat", () => {
+  const offers = new FailoverOffers<string>();
+
+  const resolution = offers.resolve("telegram:main:7", "replay", { remaining: TAIL, hiddenToolCalls: [] }, false);
+
+  assert.equal(resolution.retry, undefined);
+  const buttons = resolution.keyboard?.inline_keyboard[0] ?? [];
+  assert.deepEqual(buttons.map((button) => ("text" in button ? button.text : "")), ["▶ Continue on gpt-5", "↻ Restart on gpt-5"]);
+  // The offer is live: the button it just handed out can be claimed.
+  const data = buttons.find((b) => "callback_data" in b && b.callback_data.endsWith(":continue"));
+  assert.ok(offers.take(data && "callback_data" in data ? data.callback_data : "", "telegram:main:7"));
+});
+
 test("callback data that is not a live offer is refused, not guessed at", () => {
   const offers = new FailoverOffers<string>();
   const { data } = offerFor(offers);

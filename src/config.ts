@@ -142,6 +142,13 @@ export interface ElevenConfig {
   /** Ordered model sequence: the first entry leads every turn, the rest are
    * fallbacks tried in order when it fails. */
   models: ModelEntry[];
+  /**
+   * Fail over without asking when the turn died with its tools already run —
+   * the one case the runner refuses to decide on its own, because a rewind
+   * cannot undo what those tools did. On, the next model picks the turn up
+   * where it stopped; off (the default), the chat gets the choice as buttons.
+   */
+  autoFailover?: boolean;
   workspaces: Record<string, WorkspaceConfig>;
   /** Shell command that prints a transcript for {{file}} (voice messages). */
   transcription?: { command: string };
@@ -312,6 +319,11 @@ function validateSequence(entries: ModelEntry[] | undefined, where: string) {
 
 export function validate(config: ElevenConfig) {
   validateSequence(config.models ?? [], "models");
+  // A hand-edited "yes" here would be truthy — and silently replay turns nobody
+  // agreed to replay.
+  if (config.autoFailover !== undefined && typeof config.autoFailover !== "boolean") {
+    throw new Error("autoFailover must be true or false");
+  }
   const seen = new Set<string>();
   for (const [workspace, w] of Object.entries(config.workspaces)) {
     validateSequence(w.models, `workspace "${workspace}" models`);

@@ -3149,6 +3149,22 @@ function sequenceEditor(models, ops, opts = {}) {
   );
 }
 
+/** An attempt that already ran tools is the one case the daemon won't fail over
+ * on its own: it asks instead. This is the switch that tells it not to. */
+function autoFailoverToggle(config) {
+  return h("div", { class: "flex items-center gap-2 text-sm", style: "padding-left: 2.4rem" },
+    h("label", { class: "label cursor-pointer gap-2 text-sm" },
+      h("input", { type: "checkbox", class: "toggle toggle-sm", checked: config.autoFailover === true,
+        onchange: (e) => queueSave((next) => {
+          next.autoFailover = e.target.checked ? true : undefined;
+          return next;
+        }) }),
+      "continue on the next model automatically",
+    ),
+    info("When a turn dies after its tools already ran, eleven normally asks before retrying — a rewound transcript can't undo what those tools did. With this on, the next model picks the turn up where it stopped, no buttons."),
+  );
+}
+
 async function viewModels() {
   // The catalog and auth statuses barely change — fetch them once per session,
   // not on every structural re-render.
@@ -3172,6 +3188,7 @@ async function viewModels() {
         "Every turn starts on the first model. When it fails, the turn retries down the wire — same conversation, next model. Workspaces, groups and topics can carry their own sequence instead of this one."),
       models.length === 0 ? h("div", { class: "alert" }, "No models yet — add one below to bring eleven to life.") : null,
       sequenceEditor(models, ops),
+      autoFailoverToggle(config),
       providersSection(),
     ),
   );

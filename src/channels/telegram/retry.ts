@@ -33,6 +33,10 @@ export function retryAfterMs(error: unknown, capMs = RETRY_AFTER_CAP_MS): number
 
 function transient(error: unknown): boolean {
   if (error instanceof GrammyError) return error.error_code === 429 || error.error_code >= 500;
+  // Errors carrying an HTTP status (the file CDN answers outside the Bot API):
+  // a 4xx is the request itself being wrong, and repeating it changes nothing.
+  const status = (error as { status?: unknown })?.status;
+  if (typeof status === "number") return status === 429 || status >= 500;
   return true; // network-level errors
 }
 

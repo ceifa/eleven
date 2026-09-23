@@ -126,6 +126,10 @@ interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onTaskActivity?: (event: TaskActivityEvent) => void;
   onProse?: (text: string) => void;
+  /** An answer settled while human input the child took mid-turn is still
+   * waiting for its own — it answers what was asked first, and holding it until
+   * the turn ends would deliver it under the reply to what came after. */
+  onEarlyAnswer?: (text: string) => void;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
   /** Human input this session's child already took off the wire
@@ -305,6 +309,22 @@ export function setClaudeProseListener(
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onProse = listener;
+}
+
+/**
+ * An answer the child settled for the prompt this turn started with, while the
+ * message that arrived meanwhile still has its own answer coming. Unlike prose,
+ * this is a reply someone is waiting on — it goes out as an answer, not as
+ * narration. Held to the end of the turn the two would reach the chat as one
+ * block, the reply to what was said first sitting under the reply to what was
+ * said next.
+ */
+export function setClaudeEarlyAnswerListener(
+  sessionId: string,
+  listener: ((text: string) => void) | undefined,
+): void {
+  const session = sessions.get(sessionId);
+  if (session) session.onEarlyAnswer = listener;
 }
 
 /**
@@ -712,6 +732,16 @@ async function consumeClaudeQuery(
         if (input.steered && !steerSettled) {
           steerSettled = true;
           log.info("a steered message is still queued — reading past the seed's result for its answer");
+          // What settled here answers the prompt this turn started with; the
+          // message that arrived meanwhile is about to get an answer of its own.
+          // Settle it as its own block now and offer it to the channel: joined
+          // at the end of the turn, the person reads the reply to what they said
+          // first below the reply to what they said next.
+          const pending = answers.splice(0).join("\n\n");
+          if (pending && !isolated) {
+            flushed.add(emit(pending));
+            registration.onEarlyAnswer?.(pending);
+          }
           continue;
         }
         // A result closes this query. With live steering, InputQueue already

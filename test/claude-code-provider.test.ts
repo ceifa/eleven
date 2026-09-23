@@ -13,6 +13,7 @@ import {
   registerClaudeSession,
   RESUME_PROMPT,
   runWithClaudeSession,
+  setClaudeEarlyAnswerListener,
   setClaudeProseListener,
   setClaudeTaskListener,
   steerClaudeSession,
@@ -640,7 +641,9 @@ test("input the child already took mid-turn is not handed to it again", { timeou
 test("a steered message queued behind the seed's own result is still answered", { timeout: 1_000 }, async () => {
   const piSessionId = "cccccccc-2222-4222-8222-222222222222";
   const seen: string[] = [];
+  const early: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  setClaudeEarlyAnswerListener(piSessionId, (text) => early.push(text));
   try {
     const provider = createClaudeCodeProvider({
       query: lateSteerQuery(() => {
@@ -657,9 +660,17 @@ test("a steered message queued behind the seed's own result is still answered", 
 
     assert.deepEqual(seen, ["open the PR", "use the writing-skills skill"]);
     const done = events.find((event) => event.type === "done");
-    const text = done?.message.content[0]?.type === "text" ? done.message.content[0].text : undefined;
-    // Both results belong to this Pi turn, so both answers reach the user.
-    assert.equal(text, "answer to the seed\n\nanswer to the steered message");
+    // Both results belong to this Pi turn, so both answers reach the user — but
+    // as two settled blocks, not one: the first answers the prompt the turn
+    // started with, and the person is owed it before the reply to what they
+    // said next.
+    assert.deepEqual(
+      done?.message.content.map((block) => (block.type === "text" ? block.text : block.type)),
+      ["answer to the seed", "answer to the steered message"],
+    );
+    // And the channel was offered the first one the moment it settled, so the
+    // chat is not made to wait for the second to read the first.
+    assert.deepEqual(early, ["answer to the seed"]);
     // The Pi message the results collapse into owns their summed usage.
     assert.equal(done?.message.usage.totalTokens, 12);
   } finally {

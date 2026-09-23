@@ -511,6 +511,11 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           // it announces is already done — send it while it is still true, and
           // without a notification: the answer it precedes is what deserves one.
           onProse: (text) => delivery.early(text, { silent: true }),
+          // The runtime answered what was asked first while what was asked
+          // during the turn is still being written. Ship it now: the chat then
+          // reads as the exchange it was, instead of both replies arriving
+          // together with the older one underneath.
+          onEarlyAnswer: (text) => delivery.early(text),
           // A steered message just entered the turn — deliver the prose that
           // preceded it now, so replies land in timeline order instead of a
           // stale answer arriving glued to the final one. This one is an answer,

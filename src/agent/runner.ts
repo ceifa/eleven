@@ -8,7 +8,8 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model, UserMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
@@ -235,9 +236,12 @@ interface ActiveTurn {
   done: Promise<void>;
   /** Set by interrupt() so the failover loop stops instead of retrying. */
   aborted: boolean;
-  /** A message was handed straight to the runtime, bypassing Pi's queue — the
-   * warm session's in-memory context has to be rebuilt after the turn. */
-  injected: boolean;
+  /** Messages handed straight to the runtime, bypassing Pi's queue. They are in
+   * the transcript and in the runtime's own history, but the live agent loop
+   * runs on a context snapshot that predates them — keep them here so the rest
+   * of the turn can be given them, and so the warm session's in-memory context
+   * gets rebuilt once the turn ends. */
+  injected: UserMessage[];
 }
 
 interface WarmSession {
@@ -369,19 +373,26 @@ export class Runner {
    * be minutes away — long enough for the sender to conclude they were ignored.
    *
    * Pi never sees this message as input, so we record it in the transcript
-   * ourselves, at the point in time it actually arrived, and mark the turn for a
-   * session rebuild (the live in-memory context cannot be appended to).
+   * ourselves, at the point in time it actually arrived, and hand it to the
+   * three places that would otherwise never learn of it: Pi's own message state,
+   * the live agent loop (through the turn's injected list — its context is a
+   * snapshot taken before the message existed), and the rebuild that follows the
+   * turn.
    */
   private steerIntoRuntime(threadId: string, running: ActiveTurn, request: TurnRequest): boolean {
     if (!steerClaudeSession(running.session.sessionId, request.text, request.images)) return false;
     log.info(`delivered into the live runtime turn of ${threadId}`);
-    running.injected = true;
+    const message: UserMessage = {
+      role: "user",
+      content: request.images?.length ? [{ type: "text", text: request.text }, ...request.images] : request.text,
+      timestamp: Date.now(),
+    };
+    running.injected.push(message);
     try {
-      running.sessionManager.appendMessage({
-        role: "user",
-        content: request.images?.length ? [{ type: "text", text: request.text }, ...request.images] : request.text,
-        timestamp: Date.now(),
-      });
+      running.sessionManager.appendMessage(message);
+      // Pi's state is what the next prompt() snapshots and what its stats read;
+      // the transcript alone would leave both a message short.
+      running.session.agent.state.messages.push(message);
     } catch (error) {
       // The runtime already has it; a transcript gap is better than a duplicate.
       log.warn(`failed to record the steered message of ${threadId}: ${error}`);
@@ -504,7 +515,7 @@ export class Runner {
       sessionManager,
       done: new Promise((resolve) => (settle = resolve)),
       aborted: false,
-      injected: false,
+      injected: [],
     };
     this.active.set(threadId, active);
 
@@ -590,7 +601,11 @@ export class Runner {
         hiddenToolCalls = [];
         if (index > 0) {
           log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
-          await rewindFailedAttempt(session, sessionManager, turnStart);
+          // A rewind drops the failed attempt's branch, and human input the
+          // runtime was handed mid-attempt lives on that branch and nowhere
+          // else. Re-prompting on top duplicates the request; rewinding would
+          // delete something the user actually said.
+          if (!active.injected.length) await rewindFailedAttempt(session, sessionManager, turnStart);
           // Prose from the abandoned attempt is off the surviving branch —
           // don't let it leak into this turn's result.
           collected.length = 0;
@@ -683,7 +698,7 @@ export class Runner {
       unsubscribe();
       // A message went into the runtime and the transcript but not into the
       // session's context snapshot — rebuild it so the next turn can see it.
-      if (active.injected) this.dropSession(threadId);
+      if (active.injected.length) this.dropSession(threadId);
       this.active.delete(threadId);
       settle();
     }
@@ -801,6 +816,7 @@ export class Runner {
       excludeNativeTools: request.excludeNativeTools,
       customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
     });
+    keepRuntimeInputsInContext(session, () => this.active.get(threadId)?.injected ?? []);
 
     // What pi activated on its own (its coding default: read/bash/edit/write),
     // before any policy narrows it.
@@ -852,6 +868,59 @@ export class Runner {
       return;
     }
   }
+}
+
+/**
+ * Keep input the runtime was handed directly visible to the rest of its own turn.
+ *
+ * Claude Code runs a whole tool loop inside a single Pi turn, and Pi's loop runs
+ * on a context snapshot taken when that turn started. A message pushed straight
+ * into the child (steerIntoRuntime) reaches the child and the transcript, but
+ * never that snapshot — so the next request of the same turn (a second message
+ * that missed the child's input window and went through Pi's queue opens one)
+ * would be built from a context with a human message missing from it, and
+ * anything reading that request — the payload log, a transcript replay, another
+ * provider — would never learn the message existed.
+ *
+ * pi refreshes the loop's context between turns through this hook and installs
+ * its own handler (compaction, model, tools), so wrap it instead of replacing it.
+ */
+export function keepRuntimeInputsInContext(session: AgentSession, injected: () => UserMessage[]): void {
+  const { agent } = session;
+  const previous = agent.prepareNextTurnWithContext;
+  agent.prepareNextTurnWithContext = async (turn, signal) => {
+    const snapshot = await previous?.(turn, signal);
+    const context = snapshot?.context ?? turn.context;
+    const messages = withRuntimeInputs(context.messages, injected());
+    return messages === context.messages ? snapshot : { ...snapshot, context: { ...context, messages } };
+  };
+}
+
+/**
+ * A live turn's context with the input its runtime was handed directly put back
+ * where it happened: before the answer that was being written when it arrived,
+ * which is where the durable transcript records it too. Messages already in the
+ * context are left alone — the loop carries the array forward from one turn to
+ * the next, so this runs again on its own output, and a compaction mid-turn
+ * hands back the same message reloaded from the transcript as a new object.
+ * Returns the original array when there is nothing to add, so pi's snapshot is
+ * passed through untouched.
+ */
+export function withRuntimeInputs(messages: AgentMessage[], injected: UserMessage[]): AgentMessage[] {
+  const present = new Set(messages.map(runtimeInputKey));
+  const missing = injected.filter((message) => !present.has(runtimeInputKey(message)));
+  if (!missing.length) return messages;
+  // Never between an assistant's tool calls and their results: when the turn
+  // used tools, those results are the tail and the input goes after them.
+  const cut = messages.length - (messages.at(-1)?.role === "assistant" ? 1 : 0);
+  return [...messages.slice(0, cut), ...missing, ...messages.slice(cut)];
+}
+
+/** Identifies one message across a transcript round-trip: the arrival instant
+ * plus what was said. Two messages of the same turn never share both. */
+function runtimeInputKey(message: AgentMessage): string {
+  const timestamp = (message as { timestamp?: number }).timestamp ?? 0;
+  return `${message.role}\0${timestamp}\0${contentText((message as { content?: unknown }).content)}`;
 }
 
 /**

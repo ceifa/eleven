@@ -134,6 +134,41 @@ function lateSteerQuery(steer: () => void, seen: string[]) {
   }) as never;
 }
 
+/** Reads the turn's prompt off the input stream and settles it, nothing else. */
+function seedReadingQuery(seen: string[], answer: string, uuid: string) {
+  return ((input: { prompt: AsyncIterable<SDKUserMessage> }) => {
+    const stream = input.prompt[Symbol.asyncIterator]();
+    const iterator = (async function* () {
+      const seed = await stream.next();
+      seen.push(promptText(seed.value));
+      yield resultMessage(answer, uuid);
+    })();
+    return Object.assign(iterator, {
+      close() {},
+      interrupt: async () => {},
+      initializationResult: async () => ({ account: {} }),
+    }) as unknown as Query;
+  }) as never;
+}
+
+/** The real store's behaviour, in memory: one live attempt per Pi session. */
+function trackingState() {
+  let active: { id: string; inputHash: string; inputCount: number; toolActivity: boolean } | undefined;
+  return {
+    get: () => (active ? { cwd: "/tmp", sessions: [active.id], active } : undefined),
+    begin: (_sessionId: string, _cwd: string, attempt: { id: string; inputHash: string; inputCount: number }) => {
+      active = { ...attempt, toolActivity: false };
+    },
+    markTool: () => { if (active) active.toolActivity = true; },
+    commit: () => { active = undefined; return []; },
+    fail: (_sessionId: string, attemptId: string) => {
+      active = undefined;
+      return { toolActivity: false, removable: [attemptId] };
+    },
+    ackDeleted: () => {},
+  } as never;
+}
+
 function promptText(message: SDKUserMessage | undefined): string {
   const content = message?.message.content;
   if (!Array.isArray(content)) return "";
@@ -553,6 +588,50 @@ test("a message steered into a live turn is answered inside that same turn", { t
     assert.equal(done?.message.usage.totalTokens, 6);
     // The turn is over: a late steer must find no live stream and fall back to Pi.
     assert.equal(steerClaudeSession(piSessionId, "too late"), false);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("input the child already took mid-turn is not handed to it again", { timeout: 1_000 }, async () => {
+  // A second message arriving in the same turn misses the child's one-shot
+  // input window and goes through Pi's queue, which opens another request of
+  // the same turn. That request's context now carries the message the child
+  // took directly (it is in the transcript, and the loop is given it back) —
+  // sending it again would ask the child to answer it twice.
+  const piSessionId = "cccccccc-3333-4333-8333-333333333333";
+  const first: string[] = [];
+  const second: string[] = [];
+  const state = trackingState();
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  try {
+    const seed = user("ainda tá pouco humano");
+    const steered = user("e a mensagem ta muito grande");
+    const opening = createClaudeCodeProvider({
+      query: steerableQuery(() => {
+        assert.equal(steerClaudeSession(piSessionId, "e a mensagem ta muito grande"), true);
+      }, first),
+      deleteSession: (async () => {}) as never,
+      state,
+    });
+    const openingContext: Context = { systemPrompt: "eleven prompt", messages: [seed], tools: [] };
+    for await (const _event of opening.streamSimple(model, openingContext, { sessionId: piSessionId })) { /* drain */ }
+    assert.deepEqual(first, ["ainda tá pouco humano", "e a mensagem ta muito grande"]);
+
+    const next = createClaudeCodeProvider({
+      query: seedReadingQuery(second, "answer to the queued message", "result-2"),
+      deleteSession: (async () => {}) as never,
+      state,
+    });
+    const nextContext: Context = {
+      systemPrompt: "eleven prompt",
+      messages: [seed, assistant("answer to both messages"), steered, user("tb*")],
+      tools: [],
+    };
+    for await (const _event of next.streamSimple(model, nextContext, { sessionId: piSessionId })) { /* drain */ }
+
+    // Only the message the child has never seen.
+    assert.deepEqual(second, ["tb*"]);
   } finally {
     unregisterClaudeSession(piSessionId);
   }

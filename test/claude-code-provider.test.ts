@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
-import type { Context, Model } from "@earendil-works/pi-ai";
+import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
 import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
@@ -252,7 +252,7 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
     // agent turns carry their active tools, so include Read here.
     context.tools = [{ name: "read", description: "read", parameters: Type.Object({}) }];
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId, reasoning: "high" })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId, reasoning: "high" })) {
       events.push(event);
     }
 
@@ -324,7 +324,7 @@ test("nothing in the runtime's own task stream reaches the turn's activity", asy
       state: fakeState(),
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     // Not a plan row, not an agent row. The only producers left are the
     // workspace's own tools, over the host handshake.
@@ -366,7 +366,7 @@ test("a resume that reports jobs orphaned by an earlier process still answers th
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       events.push(event);
     }
 
@@ -397,11 +397,50 @@ test("Claude turns fork deterministically from the last committed transcript pre
       messages: nextInput,
       tools: [{ name: "read", description: "read", parameters: Type.Object({}) }],
     };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     assert.equal(captured?.options.resume, claudeAttemptId(piSessionId, "default", firstInput));
     assert.equal(captured?.options.sessionId, claudeAttemptId(piSessionId, "default", nextInput));
     assert.equal(captured?.options.forkSession, true);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("a prompt or tool change mid-conversation reaches the child without breaking its lineage", async () => {
+  const piSessionId = "22222222-3333-4333-8333-333333333333";
+  const fakeTool = {
+    name: "telegram",
+    label: "Telegram",
+    description: "send to Telegram",
+    parameters: Type.Object({ text: Type.String() }),
+    execute: async () => ({ content: [{ type: "text", text: "sent" }], details: undefined }),
+  } as never;
+  const firstInput = [user("one")];
+  let captured: { options: Record<string, unknown> } | undefined;
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [fakeTool] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages, (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const opening = normalizeContext({ systemPrompt: "eleven prompt", messages: [], tools: [] });
+    const update = {
+      role: "system" as const,
+      content: "",
+      sections: { skills: "<skills>new</skills>" },
+      toolsAdded: [{ name: "telegram", description: "send", parameters: Type.Object({ text: Type.String() }) }],
+      timestamp: 2,
+    };
+    const context = { ...opening, messages: [...opening.messages, ...firstInput, assistant("answer one"), update, user("two")] };
+    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+
+    assert.equal(captured?.options.resume, claudeAttemptId(piSessionId, "default", firstInput));
+    assert.ok((captured?.options.allowedTools as string[]).includes("mcp__eleven__telegram"));
+    const append = (captured?.options.systemPrompt as { append?: string }).append ?? "";
+    assert.ok(append.startsWith("eleven prompt"));
+    assert.ok(append.includes("<skills>new</skills>"));
   } finally {
     unregisterClaudeSession(piSessionId);
   }
@@ -434,7 +473,7 @@ test("an interrupted attempt resumes without replaying its original user input",
       state,
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [original, wake], tools: [] };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     assert.equal(captured?.options.resume, activeId);
     assert.equal(captured?.options.forkSession, true);
@@ -461,7 +500,7 @@ test("standalone Pi compaction stays inside the owner context but receives no to
     });
     const context: Context = { systemPrompt: "summarize", messages: [user("summarize this")], tools: [] };
     await runWithClaudeSession(ownerId, async () => {
-      for await (const _event of provider.streamSimple(model, context, { sessionId: summaryId })) { /* drain */ }
+      for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: summaryId })) { /* drain */ }
     });
     assert.deepEqual(captured?.options.tools, []);
     assert.equal(captured?.options.persistSession, false);
@@ -491,7 +530,7 @@ test("workflow subagents inherit only native read tools from the owner runtime",
       ],
     };
     await runWithClaudeSession(ownerId, async () => {
-      for await (const _event of provider.streamSimple(model, context, { sessionId: subagentId })) { /* drain */ }
+      for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: subagentId })) { /* drain */ }
     });
     assert.deepEqual(captured?.options.tools, ["Read", "Glob", "Grep"]);
     assert.deepEqual(captured?.options.allowedTools, ["Read", "Glob", "Grep"]);
@@ -523,7 +562,7 @@ test("invalid MCP tool setup terminates the provider stream with an error", asyn
       tools: [{ name: "bad tool", description: "bad", parameters: Type.Object({}) }],
     };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) events.push(event);
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) events.push(event);
     assert.equal(events.at(-1)?.type, "error");
     if (events.at(-1)?.type === "error") assert.match(events.at(-1)!.error.errorMessage ?? "", /invalid MCP tool name/);
   } finally {
@@ -553,11 +592,14 @@ test("only active Eleven custom tools are exposed through the Eleven MCP namespa
       messages: [user("send it")],
       tools: [{ name: "telegram", description: "send", parameters: Type.Object({ text: Type.String() }) }],
     };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     assert.deepEqual(captured?.options.tools, []);
     assert.deepEqual(captured?.options.allowedTools, ["mcp__eleven__telegram"]);
     assert.ok((captured?.options.mcpServers as Record<string, unknown>).eleven);
+    // Pi hands the prompt over inside the transcript. Recording it would pin a
+    // resumed session to whatever prompt its first request carried.
+    assert.deepEqual(captured?.options.systemPrompt, { type: "preset", preset: "claude_code", append: "eleven prompt", snapshot: false });
   } finally {
     unregisterClaudeSession(piSessionId);
   }
@@ -577,7 +619,7 @@ test("a message steered into a live turn is answered inside that same turn", { t
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("investigate the zip")], tools: [] };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       events.push(event);
     }
 
@@ -616,7 +658,7 @@ test("input the child already took mid-turn is not handed to it again", { timeou
       state,
     });
     const openingContext: Context = { systemPrompt: "eleven prompt", messages: [seed], tools: [] };
-    for await (const _event of opening.streamSimple(model, openingContext, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of opening.streamSimple(model, normalizeContext(openingContext), { sessionId: piSessionId })) { /* drain */ }
     assert.deepEqual(first, ["ainda tá pouco humano", "e a mensagem ta muito grande"]);
 
     const next = createClaudeCodeProvider({
@@ -629,7 +671,7 @@ test("input the child already took mid-turn is not handed to it again", { timeou
       messages: [seed, assistant("answer to both messages"), steered, user("tb*")],
       tools: [],
     };
-    for await (const _event of next.streamSimple(model, nextContext, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of next.streamSimple(model, normalizeContext(nextContext), { sessionId: piSessionId })) { /* drain */ }
 
     // Only the message the child has never seen.
     assert.deepEqual(second, ["tb*"]);
@@ -654,7 +696,7 @@ test("a steered message queued behind the seed's own result is still answered", 
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("open the PR")], tools: [] };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       events.push(event);
     }
 
@@ -706,7 +748,7 @@ test("a zero-turn result carrying Claude's synthetic placeholder is not taken as
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       events.push(event);
     }
 
@@ -734,7 +776,7 @@ test("the child is told how a resumed turn reaches the user", async () => {
       state: fakeState(),
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     // Left unset, Claude Code resumes an interrupted turn with its own
     // terminal-shaped "Continue from where you left off." — which says nothing
@@ -756,7 +798,7 @@ test("the child carries none of the CLI's own git, attribution or background def
       state: fakeState(),
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
-    for await (const _event of provider.streamSimple(model, context, { sessionId: piSessionId })) { /* drain */ }
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
     // What the CLI does when nothing says otherwise: a Co-Authored-By trailer on
     // every commit, a "Generated with Claude Code" PR footer, a branch-first
@@ -809,7 +851,7 @@ test("stopping a turn interrupts the CLI instead of only killing its transport",
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     const events: { type: string }[] = [];
     const drained = (async () => {
-      for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId, signal: controller.signal })) {
+      for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId, signal: controller.signal })) {
         events.push(event);
       }
     })();
@@ -894,7 +936,7 @@ test("prose Claude writes before going back to work leaves the turn while it is 
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("who calls this?")], tools: [] };
     const events = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       events.push(event);
       if (event.type === "text_end") order.push(`text:${event.content}`);
     }
@@ -941,7 +983,7 @@ test("prose already streamed is never answered a second time", async () => {
     });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("clean up")], tools: [] };
     const texts: string[] = [];
-    for await (const event of provider.streamSimple(model, context, { sessionId: piSessionId })) {
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
       if (event.type === "text_end") texts.push(event.content);
     }
 

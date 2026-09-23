@@ -12,6 +12,8 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
@@ -21,6 +23,7 @@ import {
   type Provider,
   type SimpleStreamOptions,
   type TextContent,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -442,7 +445,7 @@ type ClaudeCodeStreamOptions = Omit<SimpleStreamOptions, "toolChoice">;
 function streamClaudeCode(
   deps: ClaudeProviderDeps,
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: ClaudeCodeStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
@@ -453,12 +456,20 @@ function streamClaudeCode(
 async function consumeClaudeQuery(
   deps: ClaudeProviderDeps,
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options: ClaudeCodeStreamOptions | undefined,
   stream: AssistantMessageEventStream,
 ): Promise<void> {
   const output = emptyAssistant(model);
   stream.push({ type: "start", partial: output });
+
+  // Pi carries the prompt and the tool declarations in the transcript's system
+  // messages. Everything else here — resume ids, input hashes, the bootstrap
+  // transcript — keys on the conversation alone, as it did before those
+  // messages joined it, so lineages recorded then still resume.
+  const systemPrompt = getCurrentSystemPrompt(context.messages) || undefined;
+  const toolNames = getCurrentTools(context.messages).map((tool) => tool.name);
+  const messages = context.messages.filter((message) => message.role !== "system");
 
   const requestSessionId = options?.sessionId;
   const ownerSessionId = activeOwner.getStore() ?? requestSessionId;
@@ -513,8 +524,8 @@ async function consumeClaudeQuery(
   let stateBegan = false;
 
   try {
-    let currentStart = trailingUserStart(context.messages);
-    if (currentStart === context.messages.length) throw new Error("Claude Code provider received no user message");
+    let currentStart = trailingUserStart(messages);
+    if (currentStart === messages.length) throw new Error("Claude Code provider received no user message");
 
     const persisted = isolated ? undefined : deps.state.get(ownerSessionId);
     const active = persisted?.active;
@@ -523,7 +534,7 @@ async function consumeClaudeQuery(
     let recovering = false;
 
     if (active) {
-      const prefix = context.messages.slice(0, active.inputCount);
+      const prefix = messages.slice(0, active.inputCount);
       const prefixMatches = prefix.length === active.inputCount && claudeInputHash(prefix) === active.inputHash;
       // A prior subprocess died after accepting this input. Its hidden Claude
       // transcript is the side-effect authority even if Pi lost its deferred
@@ -531,13 +542,13 @@ async function consumeClaudeQuery(
       // and send only input that arrived after the crash; never replay the old
       // user request from a reconstructed Pi transcript.
       baseId = active.id;
-      currentStart = prefixMatches ? active.inputCount : trailingUserStart(context.messages);
+      currentStart = prefixMatches ? active.inputCount : trailingUserStart(messages);
       bootstrap = false;
       recovering = true;
     }
 
     if (!baseId && !isolated) {
-      const history = context.messages.slice(0, currentStart);
+      const history = messages.slice(0, currentStart);
       const previous = history.at(-1);
       const canResume = previous?.role === "assistant"
         && previous.provider === CLAUDE_CODE_PROVIDER
@@ -548,7 +559,7 @@ async function consumeClaudeQuery(
       }
     }
 
-    attemptId = claudeAttemptId(isolated ? requestSessionId : ownerSessionId, model.id, context.messages);
+    attemptId = claudeAttemptId(isolated ? requestSessionId : ownerSessionId, model.id, messages);
     if (attemptId === baseId) attemptId = randomUUID();
     if (!recovering) {
       try {
@@ -571,13 +582,13 @@ async function consumeClaudeQuery(
       registration.onToolCall?.(cleanName, args);
     };
 
-    const activeCustomNames = new Set(context.tools?.map((tool) => tool.name) ?? []);
+    const activeCustomNames = new Set(toolNames);
     const customTools = isolated ? [] : registration.customTools.filter((tool) => activeCustomNames.has(tool.name));
     // Standalone calls are either Pi compaction (no tools) or workflow
     // subagents (read-only Pi tools). They share the owner's cwd through
     // AsyncLocalStorage but never its side-effectful MCP tools or session state.
     const nativeTools = isolated
-      ? nativeToolsForNestedContext(context.tools?.map((tool) => tool.name) ?? [])
+      ? nativeToolsForNestedContext(toolNames)
       : nativeToolsForPolicy(registration.workspaceTools, registration.excludeNativeTools);
     const mcpServer = buildMcpServer(customTools, ownerSessionId, markTool);
     const qualifiedTools = customTools.map((tool) => `${MCP_PREFIX}${tool.name}`);
@@ -585,8 +596,8 @@ async function consumeClaudeQuery(
     if (!isolated) {
       deps.state.begin(ownerSessionId, registration.cwd, {
         id: attemptId,
-        inputHash: claudeInputHash(context.messages),
-        inputCount: context.messages.length,
+        inputHash: claudeInputHash(messages),
+        inputCount: messages.length,
       });
       stateBegan = true;
     }
@@ -597,7 +608,7 @@ async function consumeClaudeQuery(
     // different child on the owner's transcript — neither may consume the
     // owner's deliveries.
     const delivered = bootstrap || isolated ? [] : registration.runtimeDelivered;
-    input.seed(humanMessage(promptBlocks(context, currentStart, bootstrap, delivered)));
+    input.seed(humanMessage(promptBlocks(messages, currentStart, bootstrap, delivered)));
     inputDone = () => input.close();
     // Steering targets the owning session, never a compaction/subagent call.
     if (!isolated) registration.live = input;
@@ -630,8 +641,8 @@ async function consumeClaudeQuery(
       sessionId: attemptId,
       tools: nativeTools,
       mcpTools: qualifiedTools,
-      systemPrompt: context.systemPrompt,
-      messages: context.messages,
+      systemPrompt,
+      messages,
     };
     // Eleven's hook records this logical invocation. The Agent SDK deliberately
     // does not expose its private wire request for mutation.
@@ -640,7 +651,7 @@ async function consumeClaudeQuery(
     const sdkOptions: Options = {
       cwd: registration.cwd,
       model: model.id,
-      systemPrompt: { type: "preset", preset: "claude_code", append: context.systemPrompt },
+      systemPrompt: { type: "preset", preset: "claude_code", append: systemPrompt, snapshot: false },
       tools: nativeTools,
       allowedTools: [...nativeTools, ...qualifiedTools],
       permissionMode: "dontAsk",
@@ -872,7 +883,7 @@ function buildMcpServer(
  * context afterwards looking exactly like new input. A bootstrapping child took
  * nothing, so it is only ever consulted for a resume. */
 function promptBlocks(
-  context: Context,
+  messages: Context["messages"],
   currentStart: number,
   bootstrap: boolean,
   delivered: string[] = [],
@@ -881,10 +892,10 @@ function promptBlocks(
   if (bootstrap && currentStart > 0) {
     blocks.push({
       type: "text",
-      text: `The conversation before this turn happened in another runtime. Continue it faithfully from this transcript:\n\n${formatTranscript(context.messages.slice(0, currentStart))}`,
+      text: `The conversation before this turn happened in another runtime. Continue it faithfully from this transcript:\n\n${formatTranscript(messages.slice(0, currentStart))}`,
     });
   }
-  for (const message of context.messages.slice(currentStart)) {
+  for (const message of messages.slice(currentStart)) {
     if (message.role !== "user") continue; // failed-attempt assistant envelopes are not new human input
     const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
     // One entry answers for one message: the same text typed twice is two

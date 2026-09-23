@@ -396,9 +396,9 @@ export class Runner {
     running.injected.push(message);
     try {
       running.sessionManager.appendMessage(message);
-      // Pi's state is what the next prompt() snapshots and what its stats read;
-      // the transcript alone would leave both a message short.
-      running.session.agent.state.messages.push(message);
+      // Pi's state is what its stats read, and pi rebuilds it from the
+      // transcript only when asked — a push into it would be overwritten.
+      running.session.refreshContext();
     } catch (error) {
       // The runtime already has it; a transcript gap is better than a duplicate.
       log.warn(`failed to record the steered message of ${threadId}: ${error}`);

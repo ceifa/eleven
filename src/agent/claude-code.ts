@@ -128,6 +128,12 @@ interface RegisteredSession extends ClaudeSessionRegistration {
   onProse?: (text: string) => void;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
+  /** Human input this session's child already took off the wire
+   * (steerClaudeSession). It belongs in the context of every later request —
+   * the conversation happened — but sending it again would ask the child to
+   * answer a message it has already answered. Entries are consumed on the first
+   * request that carries them. */
+  runtimeDelivered: string[];
 }
 
 /**
@@ -201,7 +207,7 @@ const sessions = new Map<string, RegisteredSession>();
 const activeOwner = new AsyncLocalStorage<string>();
 
 export function registerClaudeSession(sessionId: string, registration: ClaudeSessionRegistration): void {
-  sessions.set(sessionId, { ...registration });
+  sessions.set(sessionId, { ...registration, runtimeDelivered: [] });
 }
 
 export function unregisterClaudeSession(sessionId: string): void {
@@ -266,12 +272,15 @@ export function setClaudeToolListener(
  *
  * The message enters Claude's hidden transcript but never Pi's: the caller owns
  * recording it (and rebuilding the Pi session afterwards, so the next turn's
- * context has it).
+ * context has it). Until then it is remembered here, so a later request of the
+ * same turn can carry it in its context without handing it to the child twice.
  */
 export function steerClaudeSession(sessionId: string, text: string, images?: ImageContent[]): boolean {
-  const live = sessions.get(sessionId)?.live;
-  if (!live) return false;
-  return live.push(humanMessage(userBlocks(text, images)));
+  const session = sessions.get(sessionId);
+  if (!session?.live) return false;
+  if (!session.live.push(humanMessage(userBlocks(text, images)))) return false;
+  session.runtimeDelivered.push(text);
+  return true;
 }
 
 export function setClaudeTaskListener(
@@ -564,7 +573,11 @@ async function consumeClaudeQuery(
 
     const input = new InputQueue();
     live = input;
-    input.seed(humanMessage(promptBlocks(context, currentStart, bootstrap)));
+    // A bootstrapping child has taken nothing yet, and an isolated call is a
+    // different child on the owner's transcript — neither may consume the
+    // owner's deliveries.
+    const delivered = bootstrap || isolated ? [] : registration.runtimeDelivered;
+    input.seed(humanMessage(promptBlocks(context, currentStart, bootstrap, delivered)));
     inputDone = () => input.close();
     // Steering targets the owning session, never a compaction/subagent call.
     if (!isolated) registration.live = input;
@@ -823,8 +836,17 @@ function buildMcpServer(
 }
 
 /** The content blocks of the turn's own prompt: the pending user input, plus a
- * transcript of everything that happened in another runtime before it. */
-function promptBlocks(context: Context, currentStart: number, bootstrap: boolean): Array<Record<string, unknown>> {
+ * transcript of everything that happened in another runtime before it.
+ *
+ * `delivered` is input this child already took mid-turn, which reaches the
+ * context afterwards looking exactly like new input. A bootstrapping child took
+ * nothing, so it is only ever consulted for a resume. */
+function promptBlocks(
+  context: Context,
+  currentStart: number,
+  bootstrap: boolean,
+  delivered: string[] = [],
+): Array<Record<string, unknown>> {
   const blocks: Array<Record<string, unknown>> = [];
   if (bootstrap && currentStart > 0) {
     blocks.push({
@@ -835,6 +857,13 @@ function promptBlocks(context: Context, currentStart: number, bootstrap: boolean
   for (const message of context.messages.slice(currentStart)) {
     if (message.role !== "user") continue; // failed-attempt assistant envelopes are not new human input
     const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+    // One entry answers for one message: the same text typed twice is two
+    // messages, and the second one is still waiting for an answer.
+    const alreadyDelivered = delivered.indexOf(contentText(content));
+    if (alreadyDelivered !== -1) {
+      delivered.splice(alreadyDelivered, 1);
+      continue;
+    }
     blocks.push(...userBlocks(content));
   }
   return blocks;

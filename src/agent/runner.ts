@@ -19,6 +19,7 @@ import {
   commitClaudeSession,
   registerClaudeSession,
   runWithClaudeSession,
+  setClaudeEarlyAnswerListener,
   setClaudeProseListener,
   setClaudeTaskListener,
   setClaudeToolListener,
@@ -102,6 +103,11 @@ export interface TurnEvents {
    * what the model said before going back to work, not the turn's answer. The
    * channel ships it right away; the answer still arrives through `deliver`. */
   onProse?: (text: string) => void;
+  /** An answer to the message the turn started with, settled while a message
+   * that arrived mid-turn is still waiting for its own. A channel that ships it
+   * now keeps the two replies in the order they were asked for; one that
+   * ignores this still receives both through `deliver`. */
+  onEarlyAnswer?: (text: string) => void;
   /** The attempt failed and is retrying on a fallback model — its prose is abandoned. */
   onFailover?: () => void;
   /** A retryable provider error (529, stream drop) and the runtime is running the
@@ -557,6 +563,7 @@ export class Runner {
     });
     setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
     setClaudeProseListener(session.sessionId, (text) => events.onProse?.(text));
+    setClaudeEarlyAnswerListener(session.sessionId, (text) => events.onEarlyAnswer?.(text));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
       if (event.type === "message_start") {
@@ -695,6 +702,7 @@ export class Runner {
       setClaudeToolListener(session.sessionId, undefined);
       setClaudeTaskListener(session.sessionId, undefined);
       setClaudeProseListener(session.sessionId, undefined);
+      setClaudeEarlyAnswerListener(session.sessionId, undefined);
       unsubscribe();
       // A message went into the runtime and the transcript but not into the
       // session's context snapshot — rebuild it so the next turn can see it.

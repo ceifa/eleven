@@ -2422,7 +2422,50 @@ video.msg-media { max-width: 22rem; }
   .composer .composer-text { order: -1; flex: 1 0 100%; padding: 0.35rem 0.6rem 0.25rem; }
   .composer .composer-icon { width: 2.5rem; height: 2.5rem; background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
   .composer .composer-icon.is-primary { background: var(--color-primary); }
-  .composer .composer-send, .composer .composer-stop { width: 2.5rem; height: 2.5rem; margin-left: auto; }
+  .composer .composer-send, .composer .composer-stop { width: 2.5rem; height: 2.5rem; }
+  /* The attach button on the left, everything else pushed to the right. */
+  .composer .composer-attach { margin-right: auto; }
+  /* Nothing typed, the mic is what you press; something typed, send is. One
+     round button on the right, as a messenger has it. A file in the tray is
+     something to send even with nothing typed, so it brings send back. */
+  .composer .composer-box:has(.composer-text:placeholder-shown) .composer-send { display: none; }
+  .composer:has(.attach-chip) .composer-box .composer-send { display: inline-flex; }
+  .composer .composer-box:not(:has(.composer-text:placeholder-shown)) .composer-mic { display: none; }
+  .composer .composer-send { background: var(--color-primary); color: var(--color-primary-content); }
+  /* A press you can feel: round buttons give under the thumb. */
+  .composer-icon:active, .composer-send:active, .composer-stop:active,
+  .thread-head > .mobile-only:active, .thread-head .thread-menu > summary:active,
+  .threads-toolbar .toolbar-icon:active, .jump-bottom:active {
+    transform: scale(0.92);
+    transition: transform 0.08s;
+  }
+
+  /* The launcher speaks the conversation's language: the same round ‹, the
+     same card of a box, and its two buttons as pills at the thumb's side. */
+  .new-thread-head > .mobile-only {
+    width: 2.6rem;
+    height: 2.6rem;
+    min-height: 0;
+    padding: 0;
+    justify-content: center;
+    border-radius: 50%;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    background: var(--color-base-200);
+  }
+  .new-thread-card .composer-box.is-tall { border-radius: 1.4rem; }
+  .new-thread-actions { justify-content: flex-end; }
+  .new-thread-actions .btn { border-radius: 999px; padding-inline: 1.3rem; }
+
+  /* The socket is down: the conversation's head says so where its meta was. */
+  body.ws-down .thread-head-meta > * { display: none; }
+  body.ws-down .thread-head-meta::before {
+    content: "connecting…";
+    color: var(--color-warning);
+  }
+
+  /* 380 rows are 380 rows to lay out on every repaint; the ones off screen are
+     skipped until they scroll near. */
+  #thread-list > .card { content-visibility: auto; contain-intrinsic-size: auto 5.6rem; }
   /* Read-only: the sentence on top, its button and the stop underneath. */
   .composer-readonly .composer-box { padding: 0.6rem 0.5rem 0.5rem; }
   .composer-readonly-text { flex: 1 0 100%; padding: 0 0.5rem; }
@@ -2491,3 +2534,31 @@ video.msg-media { max-width: 22rem; }
 .overflow-y-auto { overflow-y: auto; }
 .cursor-pointer { cursor: pointer; }
 .z-50 { z-index: 50; }
+
+/* ---------- touch screens: no hover left behind ---------- */
+
+/* A tap on a touch screen leaves the element hovered until the next tap lands
+   somewhere else — so a button pressed once stays lit as if it were still
+   under a pointer that does not exist. Where there is no hover, the hover
+   styles that change a resting look are put back to the look. */
+@media (hover: none) {
+  .composer-icon:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
+  .composer-icon.is-primary:hover { background: var(--color-primary); color: var(--color-primary-content); }
+  .composer-send:hover { background: var(--color-primary); }
+  .composer-stop:hover { background: var(--color-warning); }
+  .toolbar-icon:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
+  .tool-call.is-clickable:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 52%, transparent); }
+  .tool-calls-summary:hover { color: color-mix(in oklab, var(--color-base-content) 42%, transparent); }
+  .task-row.is-clickable:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 72%, transparent); }
+  .menu-item:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 85%, transparent); }
+  .menu-item.is-danger:hover { background: none; color: var(--color-error); }
+  .older-toggle:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 52%, transparent); }
+  .jump-bottom:not(.has-new):hover { color: color-mix(in oklab, var(--color-base-content) 75%, transparent); border-color: var(--color-base-300); }
+  /* …and on a phone, where some of those rest on a filled circle. */
+  @media (max-width: 768px) {
+    .composer .composer-icon:hover { background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
+    .threads-toolbar .toolbar-icon:hover { background: var(--color-base-200); color: color-mix(in oklab, var(--color-base-content) 70%, transparent); }
+    .threads-toolbar .toolbar-icon.is-active:hover { color: var(--color-primary); }
+    .thread-head .thread-menu > summary:hover { background: color-mix(in oklab, var(--color-base-200) 90%, transparent); color: var(--color-base-content); }
+  }
+}

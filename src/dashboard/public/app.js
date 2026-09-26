@@ -247,12 +247,19 @@ function connectWs() {
   // The phone has no sidebar to put the dot in, so the top bar says it — and
   // only while it is true, the way a messenger says "connecting" under its name.
   const phoneStatus = document.getElementById("topbar-status");
-  ws.onopen = () => ((dot.className = "status status-success"), (label.textContent = "live"), (phoneStatus.hidden = true), alive());
+  ws.onopen = () => {
+    dot.className = "status status-success";
+    label.textContent = "live";
+    phoneStatus.hidden = true;
+    document.body.classList.remove("ws-down");
+    alive();
+  };
   ws.onclose = () => {
     clearTimeout(silence);
     dot.className = "status status-error";
     label.textContent = "reconnecting";
     phoneStatus.hidden = false;
+    document.body.classList.add("ws-down"); // an open conversation says it in its own head
     setTimeout(connectWs, 2000);
   };
   ws.onmessage = (event) => {
@@ -1718,7 +1725,7 @@ function voiceRecorder(form, onTake) {
   let keep = true;
 
   const button = h("button", {
-    class: "composer-icon",
+    class: "composer-icon composer-mic",
     type: "button",
     title: "Record a voice message",
     "aria-label": "Record a voice message",

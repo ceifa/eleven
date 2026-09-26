@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { presentMessage, sameMessage } from "../src/dashboard/public/message-display.js";
+import { presentMessage, sameMessage, splitEnvelope } from "../src/dashboard/public/message-display.js";
 import { waveformLevels } from "../src/dashboard/public/waveform.js";
 
 test("an upload receipt and the daemon's enriched attachment body are the same pending message", () => {
@@ -39,4 +39,15 @@ test("microphone levels are mirrored, bounded, and visibly react above silence",
   assert.equal(speaking[3], 1, "the centre should carry the strongest speech bin");
   assert.ok(speaking[2] > speaking[1]);
   assert.ok(speaking.every((level) => level >= 0.08 && level <= 1));
+});
+
+test("a group message's attribution becomes a caption, and only whole lines at a paragraph's head count", () => {
+  const batch = "[Ana @ana]\n[Replying to you]\nfirst thought\n\n[Ana @ana]\n[Replying to you]\nsecond thought";
+  assert.deepEqual(splitEnvelope(batch), {
+    envelope: ["Ana @ana", "Replying to you"],
+    text: "first thought\n\nsecond thought",
+  });
+  // Brackets somebody wrote are prose: mid-line, or a line inside a paragraph.
+  assert.deepEqual(splitEnvelope("[WIP] fix the build\n[x] done"), { envelope: [], text: "[WIP] fix the build\n[x] done" });
+  assert.deepEqual(splitEnvelope("[link](https://example.com)"), { envelope: [], text: "[link](https://example.com)" });
 });

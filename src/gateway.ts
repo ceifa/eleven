@@ -10,6 +10,7 @@ import { ThreadStore, type ThreadEntry } from "./threads/store.ts";
 import { RequestLog } from "./threads/request-log.ts";
 import { PendingTurns } from "./threads/pending.ts";
 import { collectGarbage } from "./threads/gc.ts";
+import { retitle } from "./threads/title.ts";
 import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
@@ -166,7 +167,7 @@ export class Gateway extends EventEmitter {
     // must already sort above idle ones. One update → one persist.
     this.threads.update(thread.id, {
       lastActivityAt: Date.now(),
-      ...(thread.title ? undefined : { title: incoming.text.slice(0, 80) }),
+      ...(retitle(thread.title, incoming.text) ?? {}),
     });
     // A turn is already running: this message is about to be steered into it, so
     // it belongs in that turn's live record, at the point it arrived. Without it

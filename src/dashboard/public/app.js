@@ -4,7 +4,7 @@ import { syncChildren } from "./dom.js";
 import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { navDrag } from "./nav-drag.js";
-import { presentMessage, sameMessage } from "./message-display.js";
+import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
 
 const view = document.getElementById("view");
@@ -613,9 +613,10 @@ function buildThreadCard(thread, older) {
       onclick: () => { openThread(thread.id); openPaneMobile(thread.id); },
     },
     h("div", { class: "card-body py-3 px-4" },
+      threadAvatar(thread),
       // What you recognize a thread by: the forum topic, the group, or the
       // person in the DM — not the first 80 characters they happened to type.
-      h("div", { class: "flex items-center gap-2 text-sm" },
+      h("div", { class: "thread-card-head flex items-center gap-2 text-sm" },
         channelSource(thread.sessionKey),
         h("span", { class: "truncate min-w-0" }, thread.conversationName ?? thread.sessionKey),
         // Always in the markup, shown by CSS only on a live card: the halo says
@@ -624,9 +625,9 @@ function buildThreadCard(thread, older) {
         h("i", { class: "spinner card-spinner", "aria-hidden": "true" }),
         h("span", { class: "ml-auto shrink-0 text-xs thread-meta font-mono", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
       ),
-      h("div", { class: "flex items-center gap-2 text-xs thread-meta font-mono" },
-        h("span", { class: "text-warning shrink-0" }, thread.workspace),
-        h("span", { class: "truncate min-w-0" }, thread.title ?? "(untitled)"),
+      h("div", { class: "thread-card-line flex items-center gap-2 text-xs thread-meta font-mono" },
+        h("span", { class: "thread-card-workspace text-warning shrink-0" }, thread.workspace),
+        h("span", { class: "thread-card-title truncate min-w-0" }, thread.title ?? "(untitled)"),
       ),
       // Why this thread is in the results: what was said, where it was said.
       ...(thread.matches ?? []).map((match) =>
@@ -636,6 +637,25 @@ function buildThreadCard(thread, older) {
         ),
       ),
     ),
+  );
+}
+
+/**
+ * A face for a conversation on a phone, where the list is rows rather than
+ * cards and a column of names needs something to land the eye on. The initial
+ * is the conversation's own; the hue is fixed by its session key, so a group
+ * keeps its colour across every generation of its threads. The channel rides
+ * along as a badge in the corner. Hidden on a desktop, whose cards already
+ * carry the glyph at the head of the name.
+ */
+function threadAvatar(thread) {
+  const name = thread.conversationName ?? thread.sessionKey;
+  const initial = name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "·";
+  let hash = 0;
+  for (const char of thread.sessionKey) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return h("span", { class: "thread-avatar", style: `--hue:${hash % 360}`, "aria-hidden": "true" },
+    initial,
+    channelSource(thread.sessionKey),
   );
 }
 
@@ -956,8 +976,40 @@ function toolCallRow({ name, summary, args, id }) {
   );
 }
 
-/** A run of consecutive tool calls, as its own transcript row. */
-const toolCallsBlock = (calls) => h("div", { class: "tool-calls" }, calls.map(toolCallRow));
+/**
+ * A run of consecutive tool calls, as its own transcript row — folded behind
+ * one line on a phone, where twenty rows of monospace are a screen and a half
+ * between a question and its answer. Open on a desktop, which has the room.
+ *
+ * The transcript is rebuilt on every reconcile, so a block the reader opened
+ * or closed would snap back with each one. Their choice is kept by the block's
+ * first call, which is also the key the live block and its durable copy share.
+ */
+const toolBlockChoice = new Map(); // first call id → open
+function toolCallsBlock(calls) {
+  const key = calls[0]?.id;
+  const block = h("details", {
+    class: "tool-calls",
+    open: toolBlockChoice.get(key) ?? !isPhone(),
+    ontoggle: () => { if (key) toolBlockChoice.set(key, block.open); },
+  },
+    h("summary", { class: "tool-calls-summary" }),
+    h("div", { class: "tool-calls-list" }, calls.map(toolCallRow)),
+  );
+  summarizeToolCalls(block);
+  return block;
+}
+
+/** "3 tool calls · Bash, Read" — the count and what kind of work it was. */
+function summarizeToolCalls(block) {
+  const names = [...block.querySelectorAll(".tool-call-name")].map((node) => node.textContent);
+  const kinds = [...new Set(names)];
+  const shown = kinds.slice(0, 3).join(", ") + (kinds.length > 3 ? ", …" : "");
+  block.querySelector(".tool-calls-summary").replaceChildren(
+    h("span", { class: "tool-calls-count" }, `${names.length} tool call${names.length === 1 ? "" : "s"}`),
+    h("span", { class: "tool-calls-kinds" }, shown),
+  );
+}
 
 /** A turn that gave up, in the place it gave up. The toast that fires at the
  *  same moment is the notification; this is the record — it is still here
@@ -1003,8 +1055,12 @@ function messageBubble(message, { streaming = false, grouped = false, at } = {})
   const isUser = message.role === "user";
   // ⚡ is deliberately literal: it exposes the prompt instead of replacing its
   // media-note lines with the friendly attachment preview.
-  const { text, media } = presentMessage(message.text, state.showRequests);
+  const presented = presentMessage(message.text, state.showRequests);
+  // ...and for the same reason it keeps the attribution lines where they were.
+  const { envelope, text } = isUser && !state.showRequests ? splitEnvelope(presented.text) : { envelope: [], text: presented.text };
+  const { media } = presented;
   return h("div", { class: `chat ${isUser ? "chat-end" : "chat-start"}${grouped ? " is-grouped" : ""}` },
+    envelope.length ? h("div", { class: "msg-envelope" }, envelope.join(" · ")) : null,
     h("div", { class: `chat-bubble${streaming ? " msg-streaming" : ""}` },
       media.length ? h("div", { class: "msg-attachments" }, media.map(mediaAttachment)) : null,
       text ? h("div", { class: "msg-body", html: md(text) }) : null,
@@ -1078,8 +1134,10 @@ function renderLive(rebuild = false) {
       const previous = region.lastElementChild;
       // Consecutive calls join one block — the same merged shape the transcript
       // renders after a reload.
-      if (item.kind === "tool" && previous?.classList.contains("tool-calls")) previous.append(toolCallRow(item));
-      else region.append(liveNode(item));
+      if (item.kind === "tool" && previous?.classList.contains("tool-calls")) {
+        previous.querySelector(".tool-calls-list").append(toolCallRow(item));
+        summarizeToolCalls(previous);
+      } else region.append(liveNode(item));
     }
     liveRendered = state.live.length;
     // The trailing prose bubble grows delta by delta — patch it in place.
@@ -1223,8 +1281,11 @@ function threadHeader(thread) {
         h("span", { class: "truncate", title: thread.sessionKey }, withoutChannelPrefix(thread.conversation, thread.sessionKey)),
         h("span", { class: "meta-sep" }, "·"),
         h("span", { class: "text-warning shrink-0" }, thread.workspace),
-        model ? h("span", { class: "meta-sep" }, "·") : null,
-        model ? h("span", { class: "font-mono truncate", title: "model leading this thread" }, model) : null,
+        // A phone's head has room for where the thread lives and whether it is
+        // working, and nothing else: the model and the meter go to the desktop.
+        h("span", { class: "head-working" }, "working"),
+        model ? h("span", { class: "meta-sep hide-mobile" }, "·") : null,
+        model ? h("span", { class: "font-mono truncate hide-mobile", title: "model leading this thread" }, model) : null,
         ...threadUsageMeta(thread.usage),
       ),
     ),
@@ -1233,7 +1294,7 @@ function threadHeader(thread) {
       // reader of this thread is already looking.
       h("span", { class: "running-pill" }, h("i", { class: "spinner" }), "running"),
       h("button", {
-        class: `toolbar-icon${state.showRequests ? " is-active" : ""}`,
+        class: `toolbar-icon hide-mobile${state.showRequests ? " is-active" : ""}`,
         title: state.showRequests ? "hide diagnostics" : "show provider requests and exact agent messages",
         "aria-label": "Diagnostics",
         "aria-pressed": String(state.showRequests),
@@ -1259,16 +1320,16 @@ function threadUsageMeta(usage) {
   if (prompt) parts.push(`${fmtPercent(usage.cacheRead / prompt)} cached`);
   const fill = usage.contextWindow ? usage.lastPromptTokens / usage.contextWindow : undefined;
   const nodes = [
-    h("span", { class: "meta-sep" }, "·"),
+    h("span", { class: "meta-sep hide-mobile" }, "·"),
     h("span", {
-      class: "shrink-0",
+      class: "shrink-0 hide-mobile",
       title: `${prompt.toLocaleString()} prompt + ${usage.output.toLocaleString()} output tokens · list price ${fmtMoney(usage.cost)}`,
     }, parts.join(" · ")),
   ];
   if (fill !== undefined) {
-    nodes.push(h("span", { class: "meta-sep" }, "·"));
+    nodes.push(h("span", { class: "meta-sep hide-mobile" }, "·"));
     nodes.push(h("span", {
-      class: `shrink-0${fill >= 0.85 ? " text-error" : fill >= 0.6 ? " text-warning" : ""}`,
+      class: `shrink-0 hide-mobile${fill >= 0.85 ? " text-error" : fill >= 0.6 ? " text-warning" : ""}`,
       title: `last response carried ${usage.lastPromptTokens.toLocaleString()} of ${usage.contextWindow.toLocaleString()} context tokens`,
     }, `${fmtPercent(fill)} window`));
   }
@@ -1298,6 +1359,11 @@ function threadMenu(thread) {
         title: "the skills a turn in this thread can load — the /skills command",
         onclick: () => { menu.open = false; openSkillsModal(thread); },
       }, "Skills"),
+      // The ⚡ in the head, on a phone whose head has no room for it.
+      h("button", {
+        class: "menu-item mobile-only",
+        onclick: () => { menu.open = false; toggleRequests(); },
+      }, state.showRequests ? "Hide diagnostics" : "Show diagnostics"),
       h("button", { class: "menu-item", onclick: () => { menu.open = false; copyText(id, "Thread id copied."); } }, "Copy thread id"),
       deleteThreadButton(id),
     ),

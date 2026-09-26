@@ -18,6 +18,7 @@ import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMed
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
 import { addSample, buildUsageReport, cacheWasteOf, emptyBucket, promptTokens, readSessionUsage, startOfLocalDay } from "../threads/usage.ts";
 import { conversationIdentity } from "../threads/conversation.ts";
+import { displayTitle } from "../threads/title.ts";
 import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
 import { logger } from "../log.ts";
@@ -267,6 +268,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
     const source = thread.sessionKey.split(":", 1)[0];
     return {
       ...thread,
+      title: displayTitle(thread.title),
       sessionFile: detail ? thread.sessionFile : undefined,
       current,
       running,
@@ -700,7 +702,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           gateway.threads.list().map((thread) => ({
             id: thread.id,
             sessionFile: thread.sessionFile,
-            title: thread.title,
+            title: displayTitle(thread.title),
             workspace: thread.workspace,
             conversation: identityOf(thread.sessionKey).name,
           })),

@@ -823,6 +823,15 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   color: color-mix(in oklab, var(--color-base-content) 34%, transparent);
 }
 .chat:has(+ .chat.is-grouped) .msg-time { display: none; }
+/* Who said it and what it answers, when a shared conversation says so — above
+   the bubble as a caption, not inside it as its first two lines. */
+.msg-envelope {
+  max-width: 82%;
+  margin: 0 0.4rem 0.2rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.68rem;
+  color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
+}
 
 /* The turn's plan and its subagents. A board, not a chat row: it is scanned,
    so status is encoded in the icon's shape and color before anyone reads a
@@ -1506,6 +1515,29 @@ video.msg-media { max-width: 22rem; }
    pointer, so a block of calls stays a quiet list until you go looking. */
 .tool-call-open { flex: 0 0 auto; opacity: 0; transition: opacity 0.15s; }
 .tool-call.is-clickable:hover .tool-call-open { opacity: 0.7; }
+/* The line a block folds behind: how many calls, and of what. Quieter than the
+   rows it stands for, and a chevron that turns to say which way it went. */
+.tool-calls-summary {
+  display: flex; gap: 0.45rem; align-items: baseline;
+  padding: 0.12rem 0.35rem 0.12rem 0;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.75rem; line-height: 1.55;
+  color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
+  transition: color 0.15s;
+}
+.tool-calls-summary::-webkit-details-marker { display: none; }
+.tool-calls-summary:hover { color: var(--color-base-content); }
+.tool-calls-count { flex: 0 0 auto; }
+.tool-calls-kinds {
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 0.7rem;
+  color: color-mix(in oklab, var(--color-warning) 55%, transparent);
+}
+.tool-calls-summary::after { content: "›"; flex: 0 0 auto; transition: transform 0.15s; }
+.tool-calls[open] > .tool-calls-summary::after { transform: rotate(90deg); }
 /* Tool result body in the modal: raw text (newlines preserved), scrollable so a
    big output doesn't push the args off-screen; a red tint when the call errored. */
 .toolcall-result {
@@ -1703,6 +1735,8 @@ video.msg-media { max-width: 22rem; }
 .topbar { display: none; }
 .nav-backdrop { display: none; }
 .mobile-only { display: none; }
+/* Phone furniture: the list's faces and the head's "working". */
+.thread-avatar, .head-working { display: none; }
 /* .hide-mobile is the other half of .mobile-only — detail that earns its place
    on a desktop row and loses the argument at 390px. It has no desktop rule on
    purpose: whatever display the element already had is the right one. */
@@ -1970,6 +2004,266 @@ video.msg-media { max-width: 22rem; }
 
   /* Toasts span the width so they read comfortably (.toast-end already sets right:0). */
   .toast { left: 0; padding: 0.75rem calc(0.75rem + var(--safe-r)) calc(0.75rem + var(--safe-b)) calc(0.75rem + var(--safe-l)); }
+
+  /* ---- threads, as a phone app ---- */
+
+  /* The rules above fit the desktop's layout into a phone. These stop trying:
+     a list of rows with faces instead of a column of cards, a conversation
+     that owns the whole screen with its chrome floating over it, and the
+     agent's side read as a page rather than as a stack of boxes. Everything
+     here comes after what it overrides, so source order settles it. */
+
+  /* -- the list's head: a filled search pill, and round buttons beside it -- */
+  .topbar { border-bottom: 0; background: color-mix(in oklab, var(--color-base-100) 80%, transparent); }
+  .threads-toolbar { border-bottom: 0; gap: 0.5rem; padding: 0.15rem 0.75rem 0.55rem; }
+  .search-field {
+    min-height: 2.6rem;
+    padding: 0 0.95rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    background: var(--color-base-200);
+  }
+  .search-field:focus-within { border-color: color-mix(in oklab, var(--color-primary) 55%, transparent); }
+  .threads-toolbar .toolbar-icon {
+    width: 2.6rem;
+    height: 2.6rem;
+    border-radius: 50%;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    background: var(--color-base-200);
+    color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+  }
+  .threads-toolbar .toolbar-icon.is-active { color: var(--color-primary); }
+  /* New thread is the one thing this screen is for besides reading. */
+  .threads-toolbar .toolbar-icon:last-child,
+  .threads-toolbar .toolbar-icon:last-child:hover {
+    border-color: transparent;
+    background: var(--color-primary);
+    color: var(--color-primary-content);
+    box-shadow: 0 0 18px -6px var(--color-primary);
+  }
+
+  /* -- rows: a face, the name and when, what it is about, where it lives -- */
+  .thread-scroll { padding: 0 0 calc(0.5rem + var(--safe-b)); }
+  #thread-list { gap: 0; }
+  #thread-list > .card,
+  #thread-list > button.card:hover { border-radius: 0; background: none; }
+  #thread-list > button.card:active { background: var(--color-base-200); }
+  #thread-list > .card.is-active { background: color-mix(in oklab, var(--color-primary) 8%, transparent); }
+  .thread-scroll .card-body {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 0.8rem;
+    row-gap: 0.1rem;
+    padding: 0.7rem calc(0.9rem + var(--safe-r)) 0 calc(0.9rem + var(--safe-l));
+  }
+  .thread-scroll .card-body > :not(.thread-avatar) { grid-column: 2; }
+  /* The hairline between rows starts where the text does, as it does in every
+     list a phone ships with — the faces are the rhythm, the line only divides. */
+  .thread-scroll .card-body::after {
+    content: "";
+    grid-column: 2;
+    height: 1px;
+    margin-top: 0.6rem;
+    background: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+  }
+  .thread-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    grid-row: span 2;
+    align-self: start;
+    width: 2.9rem;
+    height: 2.9rem;
+    margin-top: 0.1rem;
+    border-radius: 50%;
+    background: oklch(29% 0.06 var(--hue));
+    color: oklch(86% 0.08 var(--hue));
+    font-family: "Grenze", serif;
+    font-weight: 700;
+    font-size: 1.35rem;
+    line-height: 1;
+  }
+  .thread-avatar .channel-glyph {
+    position: absolute;
+    right: -0.2rem;
+    bottom: -0.2rem;
+    padding: 0.12rem;
+    border-radius: 50%;
+    background: var(--color-base-100);
+    color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+    opacity: 1;
+  }
+  .thread-avatar .channel-glyph svg { width: 0.9rem; height: 0.9rem; }
+  /* The badge on the face says it now; at the head of the name it would stutter. */
+  .thread-card-head > .channel-glyph { display: none; }
+  .thread-card-head { font-size: 1rem; font-weight: 600; }
+  .thread-card-head [data-since] { font-weight: 400; }
+  .thread-scroll .thread-card-line {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.15rem;
+    font-family: var(--font-sans);
+  }
+  /* What the thread is about reads first and gets two lines; the workspace is
+     the footnote under it. */
+  .thread-scroll .thread-card-title {
+    order: -1;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    font-size: 0.88rem;
+    line-height: 1.35;
+    color: color-mix(in oklab, var(--color-base-content) 62%, transparent);
+  }
+  .thread-card-workspace { font-size: 0.7rem; opacity: 0.85; }
+  /* Running: the halo moves from the card, which has no edges here, to the face. */
+  #thread-list > button.card.is-live { animation: none; box-shadow: none; }
+  .card.is-live .thread-avatar { animation: e11-live 2.4s ease-in-out infinite; }
+  /* An older generation: a smaller face in the same column, so every row's text
+     still starts at one x. */
+  #thread-list > .card.is-older { margin-left: 0; }
+  .card.is-older .thread-avatar { width: 2.2rem; height: 2.2rem; margin: 0.3rem 0.35rem 0; font-size: 1rem; }
+  .card.is-older .thread-card-head { font-size: 0.9rem; }
+  .older-toggle {
+    margin: 0.1rem 0 0.1rem calc(4.6rem + var(--safe-l));
+    padding: 0.35rem 0.5rem;
+    font-family: var(--font-sans);
+    font-size: 0.78rem;
+  }
+
+  /* -- the conversation's head: floating, over the transcript -- */
+  /* Three round pieces over a fade: the way back, what this is, and the menu.
+     The transcript runs up under them instead of stopping at a ruled line. */
+  #thread-pane .thread-head {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 6;
+    gap: 0.5rem;
+    padding: 0.5rem calc(0.7rem + var(--safe-r)) 1.5rem calc(0.7rem + var(--safe-l));
+    border: 0;
+    background: linear-gradient(var(--color-base-100) 50%, transparent);
+    pointer-events: none;
+  }
+  #thread-pane .thread-head > * { pointer-events: auto; }
+  .thread-head > .mobile-only,
+  .thread-head .thread-menu > summary {
+    width: 2.6rem;
+    height: 2.6rem;
+    min-height: 0;
+    padding: 0;
+    justify-content: center;
+    border-radius: 50%;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    background: color-mix(in oklab, var(--color-base-200) 90%, transparent);
+    backdrop-filter: blur(10px);
+    color: var(--color-base-content);
+  }
+  .thread-head .thread-head-text {
+    flex: 0 1 auto;
+    align-items: center;
+    max-width: calc(100% - 6.6rem);
+    margin-inline: auto;
+    padding: 0.3rem 1.1rem 0.35rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    background: color-mix(in oklab, var(--color-base-200) 90%, transparent);
+    backdrop-filter: blur(10px);
+  }
+  .thread-head .thread-head-title { max-width: 100%; font-size: 1rem; line-height: 1.25; }
+  .thread-head-meta { max-width: 100%; font-size: 0.68rem; line-height: 1.3; }
+  .thread-head-actions { margin-left: 0; }
+  /* The head's "working" replaces the pill: a dot that breathes, one word. */
+  .running-pill { display: none; }
+  #thread-pane.is-running .running-pill { display: none; }
+  #thread-pane.is-running .head-working {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    color: var(--color-warning);
+  }
+  .head-working::before {
+    content: "";
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: currentColor;
+    animation: e11-breathe 1.6s ease-in-out infinite;
+  }
+  @keyframes e11-breathe { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .head-working::before { animation: none; } }
+  .menu-item.mobile-only { display: block; text-align: left; }
+
+  /* -- the transcript -- */
+  /* Room at the top for the floating head to sit over, at rest. */
+  .messages { padding: 4.9rem calc(1rem + var(--safe-r)) 0.5rem calc(1rem + var(--safe-l)); }
+  .pane-loading { padding-top: 4rem; }
+  /* The agent writes on the page, not in a box: a full-width column of prose
+     reads like an answer, and a bubble per paragraph read like a chat log. */
+  .chat-start .chat-bubble {
+    max-width: 100%;
+    padding: 0.1rem 0;
+    border: 0;
+    background: none;
+  }
+  .chat-bubble::after { display: none; }
+  .chat-start .msg-time { margin-left: 0; }
+  /* What you said stays a bubble — the one thing on the screen that is yours —
+     but a deep red lit at the edge rather than a slab of it: at full strength a
+     long message was a red wall. */
+  .chat-end .chat-bubble {
+    max-width: 85%;
+    padding: 0.6rem 1rem;
+    border-radius: 1.3rem;
+    border-end-end-radius: 0.45rem;
+    border-color: color-mix(in oklab, var(--color-primary) 50%, transparent);
+    background: color-mix(in oklab, var(--color-primary) 26%, var(--color-base-200));
+    color: var(--color-base-content);
+  }
+  /* Tool calls: a line to open, and the rail only under what it opened. */
+  .tool-calls { max-width: 100%; margin: 0 0 0.8rem; padding: 0; border-left: 0; }
+  .tool-calls-summary { padding: 0.35rem 0; font-size: 0.85rem; }
+  .tool-calls-kinds { font-size: 0.75rem; }
+  .tool-calls-list {
+    margin: 0.1rem 0 0.2rem 0.25rem;
+    padding-left: 0.75rem;
+    border-left: 2px solid color-mix(in oklab, var(--color-warning) 35%, transparent);
+  }
+  .tool-call { padding-block: 0.3rem; }
+  .task-board:not(:empty) { max-width: 100%; }
+  .live-status { padding: 0.5rem 0; font-size: 0.85rem; }
+
+  /* -- the composer: a floating card, the text on top and the buttons under it -- */
+  .jump-bottom {
+    bottom: 8rem;
+    width: 2.6rem;
+    height: 2.6rem;
+    padding: 0;
+    justify-content: center;
+    border-radius: 50%;
+    font-size: 0; /* the arrow says it; the word was a second pill's worth */
+  }
+  .composer { padding: 0.25rem calc(0.6rem + var(--safe-r)) 0.6rem calc(0.6rem + var(--safe-l)); }
+  .composer .composer-box {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    border-radius: 1.6rem;
+    border-color: color-mix(in oklab, var(--color-base-content) 9%, transparent);
+    background: var(--color-base-200);
+    box-shadow: 0 12px 32px -14px oklch(0% 0 0 / 0.9);
+  }
+  .composer .composer-text { order: -1; flex: 1 0 100%; padding: 0.35rem 0.6rem 0.25rem; }
+  .composer .composer-icon { width: 2.5rem; height: 2.5rem; background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
+  .composer .composer-icon.is-primary { background: var(--color-primary); }
+  .composer .composer-send, .composer .composer-stop { width: 2.5rem; height: 2.5rem; margin-left: auto; }
+  /* Read-only: the sentence on top, its button and the stop underneath. */
+  .composer-readonly .composer-box { padding: 0.6rem 0.5rem 0.5rem; }
+  .composer-readonly-text { flex: 1 0 100%; padding: 0 0.5rem; }
+  .composer-readonly .btn { border-radius: 999px; }
 }
 
 .border { border: 1px solid var(--color-base-300); }

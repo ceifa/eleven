@@ -16,6 +16,25 @@ export function splitMedia(text) {
  *  job is to show the literal text the agent received. */
 export const presentMessage = (text, exact = false) => exact ? { text, media: [] } : splitMedia(text);
 
+/**
+ * The attribution a shared conversation wraps a message in — `[Ana @ana]`,
+ * `[Replying to …]`, `[Transcript]` — pulled out of the prose so it can be
+ * drawn as a caption instead of as the first two lines of every bubble. Only
+ * whole bracketed lines at the head of a paragraph count: a batch of messages
+ * delivered as one carries an envelope per message, and a bracket inside a
+ * sentence is somebody's writing.
+ */
+const ENVELOPE_RUN = /(^|\n\n)((?:\[[^\n]*\](?:\n|$))+)/g;
+
+export function splitEnvelope(text) {
+  const envelope = [];
+  const body = text.replace(ENVELOPE_RUN, (_, lead, run) => {
+    for (const line of run.split("\n")) if (line) envelope.push(line.slice(1, -1));
+    return lead;
+  }).replace(/\n{3,}/g, "\n\n").trim();
+  return envelope.length ? { envelope: [...new Set(envelope)], text: body } : { envelope, text };
+}
+
 const mediaIds = (text) => splitMedia(text).media.map(({ id }) => id).sort();
 
 /** A local attachment first appears with its upload receipt, then comes back

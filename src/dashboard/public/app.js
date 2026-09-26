@@ -243,11 +243,15 @@ function connectWs() {
     clearTimeout(silence);
     silence = setTimeout(() => ws.close(), 50_000);
   };
-  ws.onopen = () => ((dot.className = "status status-success"), (label.textContent = "live"), alive());
+  // The phone has no sidebar to put the dot in, so the top bar says it — and
+  // only while it is true, the way a messenger says "connecting" under its name.
+  const phoneStatus = document.getElementById("topbar-status");
+  ws.onopen = () => ((dot.className = "status status-success"), (label.textContent = "live"), (phoneStatus.hidden = true), alive());
   ws.onclose = () => {
     clearTimeout(silence);
     dot.className = "status status-error";
     label.textContent = "reconnecting";
+    phoneStatus.hidden = false;
     setTimeout(connectWs, 2000);
   };
   ws.onmessage = (event) => {
@@ -492,6 +496,9 @@ function applyPairingBadge() {
   const count = state.overview?.pairing?.length ?? 0;
   badge.hidden = count === 0;
   badge.textContent = count;
+  const tab = document.getElementById("tab-pairing-badge");
+  tab.hidden = count === 0;
+  tab.textContent = count;
 }
 // Fetch a fresh overview, then repaint the badge (used when only the badge,
 // not the whole view, needs to react — e.g. an incoming pairing request).
@@ -943,7 +950,7 @@ function openPaneMobile(threadId) {
   if (isPhone() && !layout.classList.contains("pane-open")) {
     history.pushState({ pane: true }, "", threadId ? `#/threads/${threadId}` : "#/threads");
   }
-  layout.classList.add("pane-open");
+  setPane(true);
 }
 
 /** Back to the list. Through history when the pane got there through history,
@@ -952,7 +959,7 @@ function closePaneMobile() {
   const layout = threadsLayout();
   if (!layout?.classList.contains("pane-open")) return;
   if (history.state?.pane) return history.back(); // popstate below drops the class
-  layout.classList.remove("pane-open");
+  setPane(false);
 }
 // Mobile-only ‹ that returns from the conversation/compose pane to the list.
 const backButton = () =>
@@ -3696,12 +3703,9 @@ async function withLoading(work, { swap = false } = {}) {
 const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, usage: viewUsage, settings: viewSettings, channels: viewWorkspaces };
 
 async function render() {
-  // Whatever moved the address bar — a link in the drawer, the back gesture, a
-  // toast — the drawer has said its piece and the page underneath it changed.
-  setNav(false);
   const name = (location.hash.replace("#/", "") || "threads").split("/")[0];
   const route = routes[name] ?? viewThreads;
-  for (const link of document.querySelectorAll("aside .menu a")) {
+  for (const link of document.querySelectorAll("aside .menu a, .tabbar a")) {
     link.classList.toggle("menu-active",
       (link.dataset.view === name)
       || (name === "channels" && link.dataset.view === "workspaces")
@@ -3761,8 +3765,7 @@ window.addEventListener("hashchange", () => {
   const layout = threadsLayout();
   const [route, id] = location.hash.replace(/^#\/?/, "").split("/");
   if (!layout || (route || "threads") !== "threads") return render();
-  setNav(false);
-  layout.classList.toggle("pane-open", Boolean(id));
+  setPane(Boolean(id));
   if (id && id !== state.activeThread?.id) openThread(id);
 });
 
@@ -3771,80 +3774,122 @@ window.addEventListener("hashchange", () => {
 // popstate alone. `pane` marks the entries this page pushed for that — landing
 // on anything else means the pane is not what the reader is on anymore.
 window.addEventListener("popstate", () => {
-  if (!history.state?.pane) threadsLayout()?.classList.remove("pane-open");
+  if (!history.state?.pane) setPane(false);
 });
 
-/* ---------- mobile nav drawer ---------- */
+/* ---------- the phone: sliding between screens, and the way back ---------- */
 
-const setNav = (open) => {
-  document.body.classList.toggle("nav-open", open);
-  document.getElementById("nav-toggle")?.setAttribute("aria-expanded", String(open));
-};
-document.getElementById("nav-toggle")?.addEventListener("click", () => setNav(!document.body.classList.contains("nav-open")));
-document.getElementById("nav-backdrop")?.addEventListener("click", () => setNav(false));
-// Any navigation from inside the drawer (nav links or the wordmark) closes it.
-document.getElementById("sidebar")?.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
-// Escape closes the drawer; growing past the mobile breakpoint clears any open
-// state.
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNav(false); });
-phoneQuery.addEventListener("change", (e) => { if (!e.matches) setNav(false); });
+/**
+ * On a phone the list and a conversation are two screens, and moving between
+ * them slides: the conversation comes in from the right over the list and goes
+ * back out the way it came. A cut between two screens that look alike reads as
+ * the page flickering, not as going somewhere.
+ *
+ * A view transition rather than two panes kept side by side and translated:
+ * the two screens are not the same shape — the list has the top bar and the tab
+ * bar, the conversation has neither — and a snapshot slides whatever shape it
+ * is. A browser without view transitions gets the cut it always had.
+ */
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+function slide(direction, mutate) {
+  if (!isPhone() || reducedMotion.matches || !document.startViewTransition) return mutate();
+  const root = document.documentElement;
+  root.dataset.slide = direction;
+  document.startViewTransition(mutate).finished.finally(() => {
+    if (root.dataset.slide === direction) delete root.dataset.slide;
+  });
+}
 
-/* And the drawer follows the finger: out from the left edge, back from anywhere
-   on it. The hamburger sits in the top-left corner, which is the one spot a
-   thumb on a phone can't reach without regripping — and the drawer is the whole
-   navigation, so that's a stretch several times a session. */
-const drag = navDrag();
+/** Where the pane is headed while a slide is carrying it there. Going back
+ *  through history fires popstate and then hashchange, and both of them say
+ *  "close": the second must not start a slide of its own. */
+let paneHeading;
+function setPane(open, { animate = true } = {}) {
+  const layout = threadsLayout();
+  if (!layout) return;
+  if ((paneHeading ?? layout.classList.contains("pane-open")) === open) return;
+  paneHeading = open;
+  const apply = () => {
+    paneHeading = undefined;
+    layout.classList.toggle("pane-open", open);
+  };
+  if (animate) slide(open ? "forward" : "back", apply);
+  else apply();
+}
+
+/* And the conversation follows the finger back to the list: a drag from the
+   left edge pulls it off to the right with the list sliding in under it, the
+   way a phone's own back gesture does. An installed app has no browser gesture
+   to lean on, and the ‹ sits in the corner a thumb reaches last. The gesture is
+   the same state machine the drawer used to run on; here "open" is the list. */
+const swipe = navDrag();
 /** Something the finger could be scrolling sideways instead — a code block, a
- *  wide table. It was there first; the drawer doesn't get to take the gesture. */
+ *  wide table. It was there first; the gesture doesn't get to take it. */
 function scrollsSideways(node) {
   for (let el = node; el && el !== document.body; el = el.parentElement) {
     if (el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== "visible") return true;
   }
   return false;
 }
-/** Hand the position to CSS. While this class is on, the drawer sits wherever
- *  the finger left it and nothing animates — the transition is for taps. */
-const paintDrag = (progress) => {
-  document.body.classList.add("nav-dragging");
-  document.body.style.setProperty("--nav-progress", String(progress));
+/** Hand the position to CSS. While this class is on, the pane sits wherever the
+ *  finger left it and nothing animates. */
+const paintSwipe = (progress) => {
+  document.body.classList.add("swiping-back");
+  document.body.style.setProperty("--back", String(progress));
 };
-const dropDrag = () => {
-  document.body.classList.remove("nav-dragging");
-  document.body.style.removeProperty("--nav-progress");
+const dropSwipe = () => {
+  document.body.classList.remove("swiping-back", "swipe-settling");
+  document.body.style.removeProperty("--back");
 };
+/** Let go: the pane glides the rest of the way — off, or back into place — and
+ *  only once it is there does the list become the screen for real. */
+function settleSwipe(back) {
+  const body = document.body;
+  body.classList.add("swipe-settling");
+  body.style.setProperty("--back", back ? "1" : "0");
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    if (back) {
+      // Closed here, directly, rather than through setPane: the finger already
+      // did the sliding. popstate and hashchange then find nothing left to do.
+      threadsLayout()?.classList.remove("pane-open");
+      if (history.state?.pane) history.back();
+    }
+    dropSwipe();
+  };
+  document.getElementById("thread-pane")?.addEventListener("transitionend", finish, { once: true });
+  setTimeout(finish, 400); // a transition that never ran never ends
+}
 document.addEventListener("touchstart", (e) => {
-  if (!isPhone() || e.touches.length > 1) { drag.cancel(); dropDrag(); return; }
-  const open = document.body.classList.contains("nav-open");
-  // While it's open, only the drawer and its backdrop can be swiped away: the
-  // page is behind both of them, not under the finger.
-  if (open && !e.target.closest?.("#sidebar, .nav-backdrop")) return;
-  const started = drag.start({
-    x: e.touches[0].clientX,
-    y: e.touches[0].clientY,
-    at: e.timeStamp,
-    open,
-    drawer: document.getElementById("sidebar")?.offsetWidth ?? 0,
-    screen: window.innerWidth,
-  });
-  if (started && !open && scrollsSideways(e.target)) drag.cancel();
+  const open = threadsLayout()?.classList.contains("pane-open");
+  if (!isPhone() || !open || e.touches.length > 1 || document.body.classList.contains("swipe-settling")) {
+    swipe.cancel();
+    return;
+  }
+  const width = window.innerWidth;
+  const started = swipe.start({ x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp, open: false, drawer: width, screen: width });
+  if (started && scrollsSideways(e.target)) swipe.cancel();
 }, { passive: true });
-// Non-passive: a drawer that follows the finger has to stop the page scrolling
-// under it, and preventDefault from a passive listener is ignored.
+// Non-passive: a pane that follows the finger has to stop the transcript
+// scrolling under it, and preventDefault from a passive listener is ignored.
 document.addEventListener("touchmove", (e) => {
-  if (e.touches.length > 1) { drag.cancel(); dropDrag(); return; }
-  const at = drag.move({ x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp });
+  if (e.touches.length > 1) { swipe.cancel(); dropSwipe(); return; }
+  const at = swipe.move({ x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp });
   if (!at) return;
   if (e.cancelable) e.preventDefault();
-  paintDrag(at.progress);
+  paintSwipe(at.progress);
 }, { passive: false });
 document.addEventListener("touchend", () => {
-  const settled = drag.end();
-  // Drop the class first: that puts the transition back, so the position the
-  // finger left behind is what setNav's final state animates from.
-  dropDrag();
-  if (settled) setNav(settled.open);
+  const settled = swipe.end();
+  if (settled) settleSwipe(settled.open);
 });
-document.addEventListener("touchcancel", () => { drag.cancel(); dropDrag(); });
+document.addEventListener("touchcancel", () => {
+  if (!swipe.dragging) return;
+  swipe.cancel();
+  settleSwipe(false);
+});
 
 /* ---------- the phone's viewport ---------- */
 

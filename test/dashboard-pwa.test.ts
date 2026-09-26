@@ -200,11 +200,14 @@ test("the phone layout subtracts the chrome it actually has", () => {
     assert.ok(layout[1].includes(term), `.threads-layout must account for ${term}`);
   }
 
-  // Not the home indicator, though: the screen runs to the bottom edge now, so
-  // the strip it needs is left by whatever ends up sitting against that edge —
-  // the last card of the list, and the composer of an open conversation.
+  // Not the home indicator, though: the strip it needs is left by whatever ends
+  // up sitting against the bottom edge — the tab bar under the list, and the
+  // composer of an open conversation, where the tab bar is not.
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
-  assert.match(mobile, /\.thread-scroll \{ padding: [^;]*var\(--safe-b\)\); \}/);
+  assert.match(mobile, /--tabbar: calc\([^;]*var\(--safe-b\)\);/);
+  assert.match(mobile, /\.tabbar \{[^}]*height: var\(--tabbar\);[^}]*padding: [^;]*var\(--safe-b\)/);
+  assert.ok(layout[1].includes("var(--tabbar)"), ".threads-layout must stop at the tab bar");
+  assert.match(mobile, /:root:has\(\.threads-layout\.pane-open\) \{[^}]*--tabbar: 0px;/);
   assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 
   // …and --keyboard only ever holds a number if app.js measures it. iOS slides
@@ -241,7 +244,7 @@ test("an open conversation stops paying for the bar it no longer shows", () => {
   assert.ok(base >= 0 && base < mobile.indexOf(override[0]), "the override must come after the :root default");
 
   // What makes the bar expendable is that the pane has another way back to the
-  // list — the menu lives there, and the hamburger is now the only other door.
+  // list — the sections live there, in the tab bar that goes away with the bar.
   assert.match(app, /"aria-label": "Back to threads"/);
   assert.match(app, /class: "thread-head"[\s\S]{0,80}backButton\(\)/);
 });

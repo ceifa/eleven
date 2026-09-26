@@ -40,13 +40,19 @@
 <body class="h-screen flex bg-base-100 text-base-content">
   <!-- the route loading bar: dark until app.js decides a load is slow enough to be worth saying out loud -->
   <div class="route-progress" aria-hidden="true"></div>
+  <!-- the phone's chrome: the sign on top, the sections at the bottom where a
+       thumb already is. Neither shows on a desktop, which has the sidebar. -->
   <header class="topbar">
-    <button id="nav-toggle" class="nav-toggle btn btn-ghost" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
-    </button>
     <a class="wordmark topbar-wordmark" href="#/threads" title="eleven">eleven</a>
+    <span class="topbar-status" id="topbar-status" hidden><i class="spinner" aria-hidden="true"></i>connecting</span>
   </header>
-  <div id="nav-backdrop" class="nav-backdrop" aria-hidden="true"></div>
+  <nav class="tabbar" id="tabbar" aria-label="Sections">
+    <a href="#/threads" data-view="threads"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-11 6.6L4.5 19.5l1.4-4.1A7.5 7.5 0 1 1 20 11.5z"/></svg>Threads</a>
+    <a href="#/workspaces" data-view="workspaces"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/></svg>Workspaces<span class="tab-badge" id="tab-pairing-badge" hidden></span></a>
+    <a href="#/models" data-view="models"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.9 5 5.1 1.9-5.1 1.9-1.9 5-1.9-5-5.1-1.9 5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>Models</a>
+    <a href="#/usage" data-view="usage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 20V13M9.5 20V8M14.5 20v-5M19.5 20V4.5"/></svg>Usage</a>
+    <a href="#/settings" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"/></svg>Settings</a>
+  </nav>
   <aside id="sidebar" class="w-52 shrink-0 flex flex-col gap-6 p-4 border-r border-base-300">
     <div class="flex flex-col gap-2">
       <a class="wordmark" href="#/threads" title="eleven — the sign glows while a turn is running">eleven</a>

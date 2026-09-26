@@ -818,6 +818,36 @@ let openSeq = 0;
 // or failed over), so an in-flight fetch can tell its snapshot is already old.
 let liveEpoch = 0;
 
+/**
+ * The last read of the conversations opened lately (and of the few at the top
+ * of the list, read ahead while the page is idle) — what paneLoading paints
+ * while the real read is on its way. Capped: a transcript can be large, and
+ * this is a head start, not a copy of the daemon.
+ */
+const seenThreads = new Map(); // thread id → the /threads/:id answer
+const SEEN_THREADS = 12;
+function rememberThread(data) {
+  seenThreads.delete(data.thread.id); // re-inserted as the newest
+  seenThreads.set(data.thread.id, data);
+  while (seenThreads.size > SEEN_THREADS) seenThreads.delete(seenThreads.keys().next().value);
+}
+
+/** Read ahead the conversations at the top of the list — the ones a tap is
+ *  most likely to open — once, when nothing else is waiting on the network. */
+let readAhead = false;
+function readAheadThreads() {
+  if (readAhead || !isPhone()) return;
+  readAhead = true;
+  const idle = window.requestIdleCallback ?? ((run) => setTimeout(run, 1500));
+  idle(async () => {
+    for (const thread of state.threads.slice(0, 4)) {
+      if (seenThreads.has(thread.id)) continue;
+      const data = await fetch(`/api/threads/${thread.id}`).then(ok).catch(() => null);
+      if (data && !seenThreads.has(thread.id)) rememberThread(data);
+    }
+  });
+}
+
 async function openThread(id) {
   const seq = ++openSeq;
   const epoch = liveEpoch;
@@ -842,6 +872,7 @@ async function openThread(id) {
     if (!data && seq === openSeq) renderThreadPane();
     return false;
   }
+  rememberThread(data);
   state.activeThread = data.thread;
   // Keep the address bar on the thread actually open, so it can be reloaded,
   // bookmarked or linked to from the Usage page. replaceState rather than
@@ -1824,6 +1855,18 @@ function paneLoading(id) {
   const pane = document.getElementById("thread-pane");
   if (!pane) return;
   stopRecording(); // the pane this replaces may have had one running
+  // A conversation read before is painted as it was then, whole, and the read
+  // in flight corrects it in place: a messenger opens a chat on the tap, not a
+  // round trip later. Only the durable part — what the turn was doing then is
+  // the one thing sure to be wrong now.
+  const seen = seenThreads.get(id);
+  if (seen) {
+    state.activeThread = seen.thread;
+    state.timeline = seen.timeline ?? [];
+    state.requests = seen.requests ?? [];
+    renderThreadPane();
+    return;
+  }
   renderedThreadId = undefined;
   renderedHead = undefined;
   pane.classList.remove("is-composing", "is-running");
@@ -2397,6 +2440,7 @@ async function viewThreads() {
     ),
   );
   renderThreadList();
+  readAheadThreads();
   // #/threads/<id> names a thread directly — a reload, a bookmark, a link from
   // the Usage page. It wins over whatever was last open here.
   const requested = location.hash.replace("#/", "").split("/")[1];

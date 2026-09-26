@@ -951,6 +951,65 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 .jump-bottom svg { display: block; }
 /* something arrived while the reader was up in the history */
 .jump-bottom.has-new { border-color: var(--color-warning); color: var(--color-warning); }
+/* …and how much: the messages that arrived since the reader left the bottom. */
+.jump-count {
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: var(--color-warning);
+  color: var(--color-warning-content);
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1.1rem;
+  text-align: center;
+}
+.jump-count[hidden] { display: none; }
+
+/* -- a picture, opened (lightbox.js) -- */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: oklch(0% 0 0 / calc(0.94 * var(--fade, 1)));
+  touch-action: none;
+  animation: e11-fade-in 0.18s ease-out;
+}
+.lightbox.is-leaving { opacity: 0; transition: opacity 0.18s; }
+.lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.lightbox-img.is-held { transition: none; }
+.lightbox-bar {
+  position: absolute;
+  top: calc(0.6rem + env(safe-area-inset-top, 0px));
+  right: calc(0.6rem + env(safe-area-inset-right, 0px));
+  display: flex;
+  gap: 0.5rem;
+  opacity: var(--fade, 1);
+}
+.lightbox-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  background: oklch(100% 0 0 / 0.12);
+  color: white;
+  backdrop-filter: blur(8px);
+}
+@keyframes e11-fade-in { from { opacity: 0; } }
 
 /* -- composer -- */
 
@@ -2248,6 +2307,34 @@ video.msg-media { max-width: 22rem; }
   .tool-call { padding-block: 0.3rem; }
   .task-board:not(:empty) { max-width: 100%; }
   .live-status { padding: 0.5rem 0; font-size: 0.85rem; }
+  /* The day a scrolled-back reader is in stays pinned under the head, as a
+     pill — the way a messenger answers "when was this?" without a scroll back
+     to the separator. Each day's pill takes over from the last as it arrives. */
+  .day-sep {
+    position: sticky;
+    top: 4.35rem;
+    z-index: 4;
+    justify-content: center;
+    margin: 0.9rem 0 0.8rem;
+    pointer-events: none;
+  }
+  .day-sep::before, .day-sep::after { display: none; }
+  .day-sep span {
+    min-width: 5.5rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    background: color-mix(in oklab, var(--color-base-200) 92%, transparent);
+    backdrop-filter: blur(8px);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    text-align: center;
+    text-transform: none;
+    color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+  }
+  /* A time is a caption; monospace made it the loudest thing under a bubble. */
+  .msg-time { font-family: var(--font-sans); font-size: 0.66rem; }
 
   /* -- the composer: a floating card, the text on top and the buttons under it -- */
   .jump-bottom {
@@ -2259,6 +2346,7 @@ video.msg-media { max-width: 22rem; }
     border-radius: 50%;
     font-size: 0; /* the arrow says it; the word was a second pill's worth */
   }
+  .jump-bottom .jump-count { position: absolute; top: -0.45rem; right: -0.3rem; }
   .composer { padding: 0.25rem calc(0.6rem + var(--safe-r)) 0.6rem calc(0.6rem + var(--safe-l)); }
   .composer .composer-box {
     flex-wrap: wrap;

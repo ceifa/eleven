@@ -4,6 +4,7 @@ import { syncChildren } from "./dom.js";
 import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { navDrag } from "./nav-drag.js";
+import { openLightbox } from "./lightbox.js";
 import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
 
@@ -1066,7 +1067,10 @@ const withMediaNotes = (text, attachments) =>
 function mediaAttachment({ id, mime }) {
   const url = mediaUrl(id, mime);
   if (/^image\/(png|jpeg|gif|webp|avif)$/.test(mime)) {
-    return h("a", { class: "msg-media-frame", href: url, target: "_blank", rel: "noopener" },
+    // On a phone a new tab is a different app (an installed eleven hands it to
+    // the browser), so the picture opens over the thread instead.
+    const open = (event) => { if (!isPhone()) return; event.preventDefault(); openLightbox(url, mediaName(id)); };
+    return h("a", { class: "msg-media-frame", href: url, target: "_blank", rel: "noopener", onclick: open },
       h("img", { class: "msg-media", src: url, alt: mediaName(id), loading: "lazy" }));
   }
   if (mime.startsWith("audio/")) return h("audio", { class: "msg-audio", src: url, controls: true, preload: "metadata" });
@@ -1943,7 +1947,7 @@ function renderThreadPane() {
         ),
       ),
       h("button", { class: "jump-bottom", id: "jump-bottom", hidden: true, title: "Jump to the newest message", onclick: () => scrollToBottom(true) },
-        h("span", { html: ARROW_DOWN_ICON }), "Latest"),
+        h("span", { html: ARROW_DOWN_ICON }), "Latest", h("span", { class: "jump-count", hidden: true })),
       threadComposer(thread),
     );
     renderedHead = headSignature(thread);
@@ -1995,13 +1999,28 @@ const sendsOnEnter = (event) => event.key === "Enter" && !event.shiftKey && !eve
    only while the reader is at the bottom — scroll up to read something and the
    page correctly stops moving, but then nothing on screen says the conversation
    went on without you. */
+/** How many messages were on screen when the reader left the bottom — what the
+ *  pill counts the new ones against, the way a messenger's ↓ says "3". */
+let messagesWhenAway;
+const messageCount = () => document.querySelectorAll("#messages .chat").length;
 function updateJumpButton() {
   const button = document.getElementById("jump-bottom");
   const el = scroller();
   if (!button || !el) return;
   const away = !atBottom(el);
   button.hidden = !away;
-  if (!away) button.classList.remove("has-new");
+  if (away) messagesWhenAway ??= messageCount();
+  else {
+    messagesWhenAway = undefined;
+    button.classList.remove("has-new");
+  }
+  paintUnreadCount(button);
+}
+function paintUnreadCount(button) {
+  const badge = button.querySelector(".jump-count");
+  const unread = messagesWhenAway === undefined ? 0 : Math.max(0, messageCount() - messagesWhenAway);
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 99 ? "99+" : String(unread);
 }
 const onTranscriptScroll = () => updateJumpButton();
 function scrollToBottom(smooth = false) {
@@ -2014,7 +2033,9 @@ function scrollToBottom(smooth = false) {
 function markUnreadBelow() {
   const button = document.getElementById("jump-bottom");
   const el = scroller();
-  if (button && el && !atBottom(el)) button.classList.add("has-new");
+  if (!button || !el || atBottom(el)) return;
+  button.classList.add("has-new");
+  paintUnreadCount(button);
 }
 
 const fmtBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
@@ -3908,7 +3929,8 @@ function settleSwipe(back) {
 }
 document.addEventListener("touchstart", (e) => {
   const open = threadsLayout()?.classList.contains("pane-open");
-  if (!isPhone() || !open || e.touches.length > 1 || document.body.classList.contains("swipe-settling")) {
+  const busy = document.body.classList.contains("swipe-settling") || document.querySelector(".lightbox");
+  if (!isPhone() || !open || e.touches.length > 1 || busy) {
     swipe.cancel();
     return;
   }

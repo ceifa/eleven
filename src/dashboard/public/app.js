@@ -1315,7 +1315,19 @@ function threadHeader(thread) {
   const model = thread.effectiveModel ?? thread.model;
   return h("header", { class: "thread-head" },
     backButton(),
-    h("div", { class: "thread-head-text min-w-0" },
+    h("div", {
+      class: "thread-head-text min-w-0",
+      // On a phone the pill is the way into the thread's details, as a
+      // messenger's name at the top of a chat is. Stopped here, or the
+      // document's own listener takes the click for one outside the menu and
+      // shuts it again on the same tick.
+      onclick: (event) => {
+        if (!isPhone()) return;
+        event.stopPropagation();
+        const menu = event.currentTarget.closest(".thread-head")?.querySelector(".thread-menu");
+        if (menu) menu.open = true;
+      },
+    },
       h("div", { class: "thread-head-title truncate" }, thread.title ?? "(untitled)"),
       h("div", { class: "thread-head-meta" },
         channelSource(thread.sessionKey),
@@ -1388,9 +1400,16 @@ function toggleRequests() {
  *  things left to wire up, and so it needs no focus bookkeeping of its own. */
 function threadMenu(thread) {
   const id = thread.id;
-  const menu = h("details", { class: "thread-menu" },
+  const info = h("div", { class: "sheet-info mobile-only" });
+  const menu = h("details", {
+    class: "thread-menu",
+    // Read on the way open, not when the head was built: the head is kept
+    // across turns, and what a thread has burned moves with every one of them.
+    ontoggle: () => { if (menu.open && isPhone()) info.replaceChildren(...sheetInfo(state.activeThread ?? thread)); },
+  },
     h("summary", { class: "toolbar-icon", title: "more", "aria-label": "More actions" }, "⋯"),
     h("div", { class: "thread-menu-body" },
+      info,
       h("button", {
         class: "menu-item",
         title: "start a fresh thread in this same conversation — the /new command",
@@ -1411,6 +1430,35 @@ function threadMenu(thread) {
     ),
   );
   return menu;
+}
+
+/**
+ * The head of the ⋯ sheet on a phone: what the desktop's head line says and a
+ * phone's head has no room for — where the thread lives, the model leading it,
+ * and what it has burned. The "contact info" of a messenger, for a thread.
+ */
+function sheetInfo(thread) {
+  const row = (label, value, tone = "") =>
+    h("div", { class: "sheet-info-row" },
+      h("span", { class: "sheet-info-label" }, label),
+      h("span", { class: `sheet-info-value${tone}` }, value));
+  const rows = [
+    h("div", { class: "sheet-info-title" }, thread.title ?? "(untitled)"),
+    row("Lives in", thread.conversation),
+    row("Workspace", thread.workspace, " text-warning"),
+  ];
+  const model = thread.effectiveModel ?? thread.model;
+  if (model) rows.push(row("Model", model, " font-mono"));
+  const usage = thread.usage;
+  if (usage) {
+    const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+    rows.push(row("Tokens", `${fmtTokens(prompt + usage.output)}${prompt ? ` · ${fmtPercent(usage.cacheRead / prompt)} cached` : ""} · ${fmtMoney(usage.cost)}`));
+    if (usage.contextWindow) {
+      const fill = usage.lastPromptTokens / usage.contextWindow;
+      rows.push(row("Context", `${fmtPercent(fill)} of ${fmtTokens(usage.contextWindow)}`, fill >= 0.85 ? " text-error" : fill >= 0.6 ? " text-warning" : ""));
+    }
+  }
+  return rows;
 }
 
 /**
@@ -1435,7 +1483,9 @@ async function startFreshThread(thread) {
 // <details> closes it, and so does Escape.
 document.addEventListener("click", (event) => {
   for (const open of document.querySelectorAll("details.thread-menu[open]")) {
-    if (!open.contains(event.target)) open.open = false;
+    // The details itself is the target only through its backdrop — the dark
+    // behind a phone's sheet, which is a click on nothing.
+    if (!open.contains(event.target) || event.target === open) open.open = false;
   }
 });
 document.addEventListener("keydown", (event) => {

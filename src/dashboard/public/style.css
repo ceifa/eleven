@@ -2269,6 +2269,67 @@ video.msg-media { max-width: 22rem; }
   @media (prefers-reduced-motion: reduce) { .head-working::before { animation: none; } }
   .menu-item.mobile-only { display: block; text-align: left; }
 
+  /* -- the ⋯ menu, as a sheet from the bottom -- */
+  /* A popover pinned under a 2.6rem button is a desktop's menu; a thumb wants
+     the actions at the bottom of the screen, big, over a dimmed thread. The
+     backdrop is the details' own ::before, so a tap on it lands on the details
+     — which app.js reads as a tap on nothing. */
+  .thread-menu[open]::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: oklch(0% 0 0 / 0.55);
+    animation: e11-fade-in 0.2s ease-out;
+  }
+  .thread-menu-body {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: 71;
+    min-width: 0;
+    gap: 0.1rem;
+    padding: 0.5rem calc(0.6rem + var(--safe-r)) calc(0.8rem + var(--safe-b)) calc(0.6rem + var(--safe-l));
+    border: 0;
+    border-top: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    border-radius: 1.25rem 1.25rem 0 0;
+    background: var(--color-base-200);
+    box-shadow: 0 -12px 40px oklch(0% 0 0 / 0.5);
+    animation: e11-sheet-up 0.26s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  /* the grab handle a sheet has, even one that is only tapped away */
+  .thread-menu-body::before {
+    content: "";
+    align-self: center;
+    width: 2.4rem;
+    height: 0.3rem;
+    margin: 0 0 0.5rem;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--color-base-content) 20%, transparent);
+  }
+  @keyframes e11-sheet-up { from { transform: translateY(100%); } }
+  @media (prefers-reduced-motion: reduce) { .thread-menu-body, .thread-menu[open]::before { animation: none; } }
+  .thread-menu-body .menu-item { padding: 0.85rem 0.9rem; border-radius: 0.8rem; font-size: 1rem; }
+  .thread-menu-body .menu-item:active { background: color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+  .sheet-info.mobile-only {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin: 0 0 0.4rem;
+    padding: 0.2rem 0.9rem 0.8rem;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+  }
+  .sheet-info-title {
+    margin-bottom: 0.2rem;
+    font-family: "Grenze", serif;
+    font-weight: 700;
+    font-size: 1.15rem;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+  .sheet-info-row { display: flex; gap: 0.75rem; align-items: baseline; font-size: 0.82rem; }
+  .sheet-info-label { flex: 0 0 5.5rem; color: color-mix(in oklab, var(--color-base-content) 48%, transparent); }
+  .sheet-info-value { min-width: 0; overflow-wrap: anywhere; }
+
   /* -- the transcript -- */
   /* Room at the top for the floating head to sit over, at rest. */
   .messages { padding: 4.9rem calc(1rem + var(--safe-r)) 0.5rem calc(1rem + var(--safe-l)); }

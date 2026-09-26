@@ -68,3 +68,21 @@ test("the placeholder cannot be the launcher wearing a spinner", () => {
 
   assert.match(readFileSync(join(PUBLIC_DIR, "style.css"), "utf8"), /\.pane-loading \{/);
 });
+
+test("a conversation read before opens as it was, not as a spinner", () => {
+  const loading = functionBody(app, "function paneLoading(id)");
+  // The last read is painted first, and whole — the placeholder is only for a
+  // thread this page has never read.
+  const seen = loading.indexOf("seenThreads.get(id)");
+  assert.ok(seen >= 0, "paneLoading should look for the last read of this thread");
+  assert.ok(seen < loading.indexOf("pane-loading"), "the last read has to win over the spinner");
+  assert.match(loading, /renderThreadPane\(\);\s*return;/);
+  // ...but not what the turn was doing then: that is the part sure to be stale.
+  assert.doesNotMatch(loading.slice(seen, loading.indexOf("pane-loading")), /state\.live\b/);
+
+  // What is remembered is a read that is still current: taken after the check
+  // that throws away an answer a newer open has overtaken.
+  const open = functionBody(app, "async function openThread(id)");
+  const stale = open.indexOf("if (!data || seq !== openSeq)");
+  assert.ok(stale >= 0 && stale < open.indexOf("rememberThread(data)"));
+});

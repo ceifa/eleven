@@ -1730,10 +1730,9 @@ video.msg-media { max-width: 22rem; }
    element) lets that override win by source order without !important. */
 .threads-layout { height: calc(100vh - 3rem); }
 
-/* ---------- mobile top bar + nav drawer (hidden on desktop) ---------- */
+/* ---------- the phone's chrome: top bar and tab bar (hidden on desktop) ---------- */
 
-.topbar { display: none; }
-.nav-backdrop { display: none; }
+.topbar, .tabbar { display: none; }
 .mobile-only { display: none; }
 /* Phone furniture: the list's faces and the head's "working". */
 .thread-avatar, .head-working { display: none; }
@@ -1759,10 +1758,12 @@ video.msg-media { max-width: 22rem; }
     --safe-b: env(safe-area-inset-bottom, 0px);
     --safe-l: env(safe-area-inset-left, 0px);
     --safe-r: env(safe-area-inset-right, 0px);
+    /* the tab bar, home indicator included — 0 wherever the bar is not shown */
+    --tabbar: calc(3.3rem + var(--safe-b));
   }
 
-  /* A slim fixed top bar carries the hamburger and the wordmark; the sidebar
-     slides in over the content as a drawer instead of eating half the width. */
+  /* A slim fixed top bar carries the sign — and, while the socket is down, says
+     so under it. The sections are the tab bar's, at the bottom. */
   .topbar {
     display: flex;
     align-items: center;
@@ -1770,76 +1771,82 @@ video.msg-media { max-width: 22rem; }
     position: fixed;
     inset: 0 0 auto 0;
     height: var(--topbar);
-    padding: env(safe-area-inset-top, 0px) calc(0.5rem + var(--safe-r)) 0 calc(0.5rem + var(--safe-l));
+    padding: env(safe-area-inset-top, 0px) calc(1rem + var(--safe-r)) 0 calc(1rem + var(--safe-l));
     z-index: 55;
-    background: color-mix(in oklab, var(--color-base-100) 90%, transparent);
+    background: color-mix(in oklab, var(--color-base-100) 80%, transparent);
     backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--color-base-300);
   }
-  /* square icon-button; the rest (flex centering, radius, ghost hover) rides on
-     the shared .btn .btn-ghost classes in the markup */
-  .nav-toggle { width: 2.5rem; height: 2.5rem; padding: 0; }
   .topbar-wordmark { font-size: 1.45rem; }
+  .topbar-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--color-warning);
+    font-size: 0.75rem;
+  }
+  .topbar-status[hidden] { display: none; }
 
-  /* the sidebar becomes an off-canvas drawer. Scoped to #sidebar so the width
-     beats the .w-52 utility on the same element (a bare `aside` rule would lose
-     to the class and silently keep 13rem). */
-  #sidebar {
+  /* The sections, where a thumb already is. The drawer they used to live in
+     opened from the corner a thumb reaches last. */
+  .tabbar {
+    display: flex;
     position: fixed;
-    inset: 0 auto 0 0;
-    width: 15rem;
-    max-width: 82vw;
-    z-index: 60;
-    background: var(--color-base-100);
-    transform: translateX(-100%);
-    transition: transform 0.24s ease;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: calc(1rem + env(safe-area-inset-top, 0px)) 1rem calc(1rem + var(--safe-b)) calc(1rem + var(--safe-l));
+    inset: auto 0 0 0;
+    z-index: 55;
+    height: var(--tabbar);
+    padding: 0.35rem calc(0.25rem + var(--safe-r)) var(--safe-b) calc(0.25rem + var(--safe-l));
+    border-top: 1px solid color-mix(in oklab, var(--color-base-content) 8%, transparent);
+    background: color-mix(in oklab, var(--color-base-100) 84%, transparent);
+    backdrop-filter: blur(14px) saturate(1.3);
   }
-  body.nav-open #sidebar {
-    transform: none;
-    box-shadow: 0 0 40px oklch(0% 0 0 / 0.6);
+  .tabbar a {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    font-size: 0.64rem;
+    text-decoration: none;
+    color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
+    -webkit-touch-callout: none;
   }
-  .nav-backdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 58;
-    background: oklch(0% 0 0 / 0.55);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.24s ease;
+  .tabbar svg {
+    width: 1.5rem;
+    height: 1.5rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
-  body.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
-  /* Mid-swipe the drawer is wherever the finger put it and nothing animates:
-     the transition is there to cover a tap, and here the position *is* the
-     gesture. --nav-progress runs 0 (shut) to 1 (all the way out). These carry
-     the same specificity as the .nav-open pair above, so they only win by
-     sitting below them. */
-  body.nav-dragging #sidebar {
-    transform: translateX(calc(-100% + var(--nav-progress, 0) * 100%));
-    transition: none;
-    box-shadow: 0 0 40px oklch(0% 0 0 / 0.6);
+  .tabbar a.menu-active { color: var(--color-primary); }
+  .tabbar a.menu-active svg { fill: color-mix(in oklab, var(--color-primary) 22%, transparent); }
+  .tab-badge {
+    position: absolute;
+    top: -0.1rem;
+    left: calc(50% + 0.45rem);
+    min-width: 1.05rem;
+    height: 1.05rem;
+    padding: 0 0.3rem;
+    border-radius: 999px;
+    background: var(--color-warning);
+    color: var(--color-warning-content);
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.05rem;
+    text-align: center;
   }
-  body.nav-dragging .nav-backdrop { opacity: var(--nav-progress, 0); transition: none; }
-  @media (prefers-reduced-motion: reduce) {
-    #sidebar, .nav-backdrop { transition: none; }
-  }
-  /* Don't animate what nobody sees: the closed drawer's lights and sign idle
-     until it slides open (the top-bar wordmark keeps carrying the live glow) —
-     though a drawer halfway out on a fingertip is very much seen. */
-  body:not(.nav-open):not(.nav-dragging) #sidebar .bulb,
-  body:not(.nav-open):not(.nav-dragging) #sidebar .wordmark { animation-play-state: paused; }
-  /* A drawer wide enough for a thumb also wants rows a thumb can hit. */
-  #sidebar .menu li a { padding: 0.6rem 0.7rem; }
+  .tab-badge[hidden] { display: none; }
+  /* The desktop's navigation, with nowhere to go on a phone. */
+  #sidebar { display: none; }
 
   /* main content clears the fixed top bar and gets phone-sized padding
      (#view's id already outranks the .p-6 utility — no !important needed) */
   /* A narrower gutter than the desktop's 1.5rem: at 390px every card inside
      this pays for it twice over, once here and again in its own padding. */
   #view {
-    padding: calc(var(--topbar) + 0.75rem) calc(0.6rem + var(--safe-r)) calc(1.25rem + var(--safe-b)) calc(0.6rem + var(--safe-l));
+    padding: calc(var(--topbar) + 0.75rem) calc(0.6rem + var(--safe-r)) calc(1.25rem + var(--tabbar)) calc(0.6rem + var(--safe-l));
     overscroll-behavior: contain;
   }
   .page-title { font-size: 1.4rem; }
@@ -1862,9 +1869,12 @@ video.msg-media { max-width: 22rem; }
      margins cancel #view's padding exactly, so this can only ever be as wide as
      the view was (test: "cancels the view's padding exactly"). */
   .threads-layout {
-    margin: -0.75rem calc(-0.6rem - var(--safe-r)) calc(-1.25rem - var(--safe-b)) calc(-0.6rem - var(--safe-l));
-    height: calc(100dvh - var(--topbar) - var(--keyboard, 0px));
+    margin: -0.75rem calc(-0.6rem - var(--safe-r)) calc(-1.25rem - var(--tabbar)) calc(-0.6rem - var(--safe-l));
+    /* The keyboard comes up over the tab bar, so only the taller of the two is
+       taken off the bottom. */
+    height: calc(100dvh - var(--topbar) - max(var(--tabbar), var(--keyboard, 0px)));
     gap: 0;
+    position: relative; /* the list is laid under the pane here during a swipe back */
   }
   .threads-layout.pane-open #thread-pane { border: 0; border-radius: 0; }
 
@@ -1874,21 +1884,23 @@ video.msg-media { max-width: 22rem; }
      time — so it goes, and --topbar drops to what is honestly above the pane:
      the notch. Everything sized by subtraction (this layout's height, #view's
      padding, a modal's cap) reads that one variable and follows.
-     The menu is not lost with the hamburger: the drawer still comes out on a
-     swipe from the left edge, here as everywhere. And these two must stay one
+     The tab bar goes with it, for the same reason — the ‹ and the swipe back
+     both land on the list, where the sections are. And these must stay one
      condition — a bar hidden while the layout still subtracts its height leaves
      a dead 3.25rem band at the top of the conversation.
      :root:has() is how a variable at the top reacts to a class four levels
      under it; a browser without :has() drops both rules and keeps the bar. */
-  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); }
+  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); --tabbar: 0px; }
   body:has(.threads-layout.pane-open) .topbar { display: none; }
+  body:has(.threads-layout.pane-open) .tabbar { display: none; }
   /* The toolbar was riding on the view's gutter, which the list no longer has. */
   .threads-toolbar, .threads-filters { padding-inline: 0.75rem; }
   /* The pane now reaches the bottom of the screen, so the room the home
      indicator needs stops being the view's to leave and becomes the composer's. */
   .threads-layout.pane-open .composer { padding-bottom: calc(0.7rem + var(--safe-b)); }
   .threads-layout.pane-open .new-thread { padding-bottom: calc(0.75rem + var(--safe-b)); }
-  .thread-scroll { padding: 0.4rem 0.5rem calc(0.4rem + var(--safe-b)); }
+  /* The list stops at the tab bar, and the tab bar keeps the home indicator's strip. */
+  .thread-scroll { padding: 0 0 0.5rem; }
   /* Denser rows: at this width the card's own 1rem gutter is a fifth of the
      line the title has to fit in, and the title is the whole point of the row. */
   .thread-scroll .card-body { padding: 0.5rem 0.7rem; }
@@ -2003,7 +2015,8 @@ video.msg-media { max-width: 22rem; }
   .usage-tile-value { font-size: 1.25rem; }
 
   /* Toasts span the width so they read comfortably (.toast-end already sets right:0). */
-  .toast { left: 0; padding: 0.75rem calc(0.75rem + var(--safe-r)) calc(0.75rem + var(--safe-b)) calc(0.75rem + var(--safe-l)); }
+  /* Above the tab bar when there is one; over the home indicator's strip when not. */
+  .toast { left: 0; bottom: var(--tabbar); padding: 0.75rem calc(0.75rem + var(--safe-r)) calc(0.75rem + max(0px, var(--safe-b) - var(--tabbar))) calc(0.75rem + var(--safe-l)); }
 
   /* ---- threads, as a phone app ---- */
 
@@ -2014,7 +2027,6 @@ video.msg-media { max-width: 22rem; }
      here comes after what it overrides, so source order settles it. */
 
   /* -- the list's head: a filled search pill, and round buttons beside it -- */
-  .topbar { border-bottom: 0; background: color-mix(in oklab, var(--color-base-100) 80%, transparent); }
   .threads-toolbar { border-bottom: 0; gap: 0.5rem; padding: 0.15rem 0.75rem 0.55rem; }
   .search-field {
     min-height: 2.6rem;
@@ -2043,12 +2055,14 @@ video.msg-media { max-width: 22rem; }
   }
 
   /* -- rows: a face, the name and when, what it is about, where it lives -- */
-  .thread-scroll { padding: 0 0 calc(0.5rem + var(--safe-b)); }
   #thread-list { gap: 0; }
   #thread-list > .card,
   #thread-list > button.card:hover { border-radius: 0; background: none; }
   #thread-list > button.card:active { background: var(--color-base-200); }
+  /* The row you came back from: a wash, not the desktop's bar — on a phone the
+     list is not beside the conversation, so it has nothing to point at. */
   #thread-list > .card.is-active { background: color-mix(in oklab, var(--color-primary) 8%, transparent); }
+  #thread-list > .card.is-active::before { display: none; }
   .thread-scroll .card-body {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -2264,6 +2278,57 @@ video.msg-media { max-width: 22rem; }
   .composer-readonly .composer-box { padding: 0.6rem 0.5rem 0.5rem; }
   .composer-readonly-text { flex: 1 0 100%; padding: 0 0.5rem; }
   .composer-readonly .btn { border-radius: 999px; }
+
+  /* -- moving between the two screens -- */
+  /* A tap slides by view transition (app.js, slide()): the conversation comes
+     in over the list, which drifts left and dims under it; going back is the
+     same film run backwards, the leaving screen on top. */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 0.32s;
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+    mix-blend-mode: normal;
+  }
+  html[data-slide="forward"]::view-transition-old(root) { animation-name: e11-under-out; }
+  html[data-slide="forward"]::view-transition-new(root) { animation-name: e11-over-in; }
+  html[data-slide="back"]::view-transition-old(root) { animation-name: e11-over-out; z-index: 1; }
+  html[data-slide="back"]::view-transition-new(root) { animation-name: e11-under-in; }
+  @keyframes e11-over-in { from { transform: translateX(100%); } }
+  @keyframes e11-over-out { to { transform: translateX(100%); } }
+  @keyframes e11-under-out { to { transform: translateX(-28%); filter: brightness(0.55); } }
+  @keyframes e11-under-in { from { transform: translateX(-28%); filter: brightness(0.55); } }
+
+  /* The swipe back paints the same picture by hand, with --back running 0 (the
+     conversation in place) to 1 (gone off the right edge). The list is brought
+     back under the pane for the length of the drag, in the place it will be
+     once it is the screen again: below the top bar, above the tab bar — so the
+     moment the pane is let go of there is nothing left to move. */
+  body.swiping-back .threads-layout.pane-open .threads-list-col {
+    display: flex;
+    position: absolute;
+    inset: 0;
+    padding: 3.25rem 0 calc(3.3rem + var(--safe-b));
+    transform: translateX(calc((var(--back) - 1) * 28%));
+    filter: brightness(calc(0.55 + var(--back) * 0.45));
+  }
+  body.swiping-back:has(.threads-layout.pane-open) .topbar,
+  body.swiping-back:has(.threads-layout.pane-open) .tabbar {
+    display: flex;
+    height: calc(3.3rem + var(--safe-b)); /* --tabbar reads 0 while the pane is open */
+    transform: translateX(calc((var(--back) - 1) * 28%));
+    filter: brightness(calc(0.55 + var(--back) * 0.45));
+  }
+  body.swiping-back #thread-pane {
+    z-index: 57;
+    transform: translateX(calc(var(--back) * 100%));
+    box-shadow: -10px 0 30px oklch(0% 0 0 / 0.5);
+  }
+  body.swipe-settling #thread-pane,
+  body.swipe-settling .threads-list-col,
+  body.swipe-settling .topbar,
+  body.swipe-settling .tabbar {
+    transition: transform 0.26s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.26s;
+  }
 }
 
 .border { border: 1px solid var(--color-base-300); }

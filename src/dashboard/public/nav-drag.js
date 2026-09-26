@@ -1,7 +1,13 @@
-/* The mobile drawer's swipe, kept apart from app.js because it is a state
-   machine over a stream of touches and the only way to be sure it still tells a
-   scroll from a drag is to run it outside a browser. It decides nothing about
-   the DOM: it is handed geometry and gives back where the drawer should be. */
+/* An edge swipe, kept apart from app.js because it is a state machine over a
+   stream of touches and the only way to be sure it still tells a scroll from a
+   drag is to run it outside a browser. It decides nothing about the DOM: it is
+   handed geometry and gives back where the panel should be.
+
+   It was written for the navigation drawer, and it speaks the drawer's words.
+   The drawer is gone — a phone has the tab bar now — and this drives the swipe
+   back out of a conversation instead: the "drawer" is the thread list, pulled
+   in from the left edge as the conversation is pushed off to the right, and
+   "open" is back. */
 
 /**
  * How far in from the left edge a touch can start and still mean "pull the

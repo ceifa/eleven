@@ -4,10 +4,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { AXIS_SLOP, edgeZone, navDrag } from "../src/dashboard/public/nav-drag.js";
 
-/* The drawer used to open one way: the hamburger, in the top-left corner. The
-   swipe that replaced the stretch shares the screen with everything else a
-   finger does there — scrolling the thread list, panning a code block, tapping
-   a row — so most of what follows is about the gestures it must NOT take. */
+/* The edge swipe was written for the navigation drawer and now drives the
+   swipe back out of a conversation (the module still speaks the drawer's
+   words: the list is what comes out from the left, and "open" is back). It
+   shares the screen with everything else a finger does there — scrolling the
+   transcript, panning a code block, tapping a link — so most of what follows
+   is about the gestures it must NOT take. */
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "dashboard", "public");
 const DRAWER = 240;
@@ -113,25 +115,23 @@ test("a drawer with no width can't be dragged", () => {
   assert.equal(drag.move({ x: 200, y: 400, at: 16 }), null);
 });
 
-test("the page and the drawer agree on how a drag is painted", () => {
+test("the page and the gesture agree on how a swipe back is painted", () => {
   const css = readFileSync(join(PUBLIC_DIR, "style.css"), "utf8");
   const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
 
   // The gesture only moves anything through this variable, and only while the
-  // class that kills the transition is on — otherwise the drawer chases the
-  // finger a quarter-second behind it.
-  assert.match(mobile, /body\.nav-dragging #sidebar \{[^}]*transform: translateX\(calc\(-100% \+ var\(--nav-progress, 0\) \* 100%\)\);[^}]*transition: none;/);
-  assert.match(mobile, /body\.nav-dragging \.nav-backdrop \{ opacity: var\(--nav-progress, 0\);/);
-  assert.match(app, /setProperty\("--nav-progress"/);
-  assert.match(app, /classList\.add\("nav-dragging"\)/);
+  // class that holds it is on — the pane off to the right by exactly the share
+  // of the screen the finger has travelled, the list coming in under it.
+  assert.match(mobile, /body\.swiping-back #thread-pane \{[^}]*transform: translateX\(calc\(var\(--back\) \* 100%\)\);/);
+  assert.match(mobile, /body\.swiping-back \.threads-layout\.pane-open \.threads-list-col \{[^}]*display: flex;/);
+  assert.match(app, /setProperty\("--back"/);
+  assert.match(app, /classList\.add\("swiping-back"\)/);
+  // Only a conversation can be swiped out of: on the list there is nowhere back
+  // to go, and the gesture must leave the page's own touches alone.
+  assert.match(app, /if \(!isPhone\(\) \|\| !open \|\|/);
 
-  // Same specificity as the .nav-open rules, so the drag ones only win by
-  // sitting after them.
-  assert.ok(mobile.indexOf("body.nav-dragging #sidebar") > mobile.indexOf("body.nav-open #sidebar"));
-  assert.ok(mobile.indexOf("body.nav-dragging .nav-backdrop") > mobile.indexOf("body.nav-open .nav-backdrop"));
-
-  // preventDefault is ignored on a passive listener, and without it the page
-  // scrolls under a drawer that is supposed to be following the finger.
+  // preventDefault is ignored on a passive listener, and without it the
+  // transcript scrolls under a pane that is supposed to be following the finger.
   assert.match(app, /"touchmove",[\s\S]*?\{ passive: false \}\)/);
 });

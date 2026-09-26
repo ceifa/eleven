@@ -35,6 +35,7 @@ const SHELL_FILES = [
   "message-display.js",
   "nav-drag.js",
   "waveform.js",
+  "lightbox.js",
   "style.css",
   // The PWA half of the shell. sw.js is in here so that editing the worker
   // reloads the open pages too — otherwise the new one installs but the page

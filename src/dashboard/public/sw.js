@@ -36,6 +36,7 @@ const SHELL = [
   "/message-display.js",
   "/nav-drag.js",
   "/waveform.js",
+  "/lightbox.js",
   "/style.css",
   "/manifest.webmanifest",
   "/icons/icon-192.png",

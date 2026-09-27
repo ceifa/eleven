@@ -507,6 +507,55 @@ test("media replies identify the bot as you without copying ids", () => {
   );
 });
 
+test("a plain message in a forum topic is not a reply to the topic's creator", () => {
+  // Telegram points reply_to_message of every topic message at the service
+  // message that created the topic, even when nobody replied to anything.
+  const ctx = {
+    chat: { type: "supergroup", is_forum: true },
+    me: { id: 999 },
+    message: {
+      message_id: 120,
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42, first_name: "Gabriel", username: "c3if4" },
+      reply_to_message: {
+        message_id: 7,
+        message_thread_id: 7,
+        is_topic_message: true,
+        from: { id: 43, first_name: "Samara", last_name: "Lana" },
+        forum_topic_created: { name: "Moda", icon_color: 0 },
+      },
+    },
+  };
+
+  assert.equal(formatTelegramInboundPrompt(ctx as never, "What should I buy?"), "[Gabriel @c3if4]\nWhat should I buy?");
+});
+
+test("a real reply inside a forum topic keeps its context", () => {
+  const ctx = {
+    chat: { type: "supergroup", is_forum: true },
+    me: { id: 999 },
+    message: {
+      message_id: 121,
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42, first_name: "Gabriel" },
+      reply_to_message: {
+        message_id: 118,
+        message_thread_id: 7,
+        is_topic_message: true,
+        from: { id: 43, first_name: "Samara" },
+        text: "Try the blue one",
+      },
+    },
+  };
+
+  assert.equal(
+    formatTelegramInboundPrompt(ctx as never, "Agreed."),
+    '[Gabriel]\n[Replying to Samara: "Try the blue one"]\nAgreed.',
+  );
+});
+
 // --- rich message splitting: a chunk boundary must not corrupt what it cuts ---
 
 /** True when a UTF-16 surrogate has lost its other half — the Bot API rejects

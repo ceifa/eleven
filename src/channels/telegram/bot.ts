@@ -918,7 +918,7 @@ export function formatTelegramInboundPrompt(ctx: Context, body: string): string 
   const message = ctx.message;
   const lines = [`[${senderLabel(message?.from)}]`];
   const replied = message?.reply_to_message;
-  if (replied) {
+  if (replied && !isTopicRoot(replied)) {
     const toSelf = replied.from?.id === ctx.me?.id;
     const repliedSender = toSelf ? "you" : senderLabel(replied.from);
     const quoted = message.quote?.text ?? replied.text ?? replied.caption;
@@ -934,6 +934,14 @@ export function formatTelegramInboundPrompt(ctx: Context, body: string): string 
     }
   }
   return `${lines.join("\n")}\n${body}`;
+}
+
+/** Telegram points reply_to_message of every message in a forum topic at the
+ * service message that created the topic, whether or not anyone replied. That
+ * is structure, not conversation: attributing it would make the topic's creator
+ * look like the person being answered. */
+function isTopicRoot(replied: { forum_topic_created?: unknown }): boolean {
+  return replied.forum_topic_created !== undefined;
 }
 
 function senderLabel(user?: { id?: number; first_name?: string; last_name?: string; username?: string }): string {

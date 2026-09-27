@@ -37,6 +37,7 @@ const SHELL = [
   "/nav-drag.js",
   "/waveform.js",
   "/lightbox.js",
+  "/snapshot.js",
   "/style.css",
   "/manifest.webmanifest",
   "/icons/icon-192.png",

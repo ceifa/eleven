@@ -159,7 +159,12 @@ test("the first screen's reads leave together", () => {
   const take = app.match(/function take\(path\)\s*\{([\s\S]*?)\n\}/);
   assert.ok(take, "app.js should still have the take() that claims a prefetch");
   assert.match(take[1], /started\.delete\(path\)/);
-  assert.match(app, /render\(\)\.finally\(\(\) => started\.clear\(\)\)/);
+  assert.match(app, /render\(\)\.finally\(\(\) => \{[^}]*started\.clear\(\);\s*\}\)/);
+  // A restored overview is painted in place of a read, so the real read still
+  // in flight has to be claimed before that drop — or the page keeps the
+  // snapshot's until the cache expires.
+  const boot = app.slice(app.indexOf("render().finally("));
+  assert.ok(boot.indexOf("refreshOverview()") < boot.indexOf("started.clear()"));
 
   // Every prefetched path has to be spelled the way the code that consumes it
   // spells it, or the read is done twice and the prefetch is pure cost.

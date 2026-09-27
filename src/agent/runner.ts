@@ -9,7 +9,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, ImageContent, Model, UserMessage } from "@earendil-works/pi-ai";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
@@ -142,35 +142,64 @@ export interface RetryNotice {
  */
 export function createProseBlocks(onDelta: (delta: string) => void, onBlock: (block: string) => void) {
   let current = "";
-  let settled = 0;
+  let settled: string[] = [];
   const endBlock = () => {
     const block = current;
     current = "";
-    settled++;
+    settled.push(block);
     onBlock(block);
   };
   return {
     startMessage() {
       current = "";
-      settled = 0;
+      settled = [];
     },
     delta(delta: string) {
       current += delta;
       onDelta(delta);
     },
     endBlock,
-    /** `full` is the message's whole text as the provider finally reported it. */
-    endMessage(full: string) {
+    /** `full` is the message's whole text as the provider finally reported it.
+     * Returns the blocks this message settled, in order. */
+    endMessage(full: string): string[] {
       // Once a block has settled, the message is already accounted for — and how
       // `full` joined those blocks is the reader's business, not a tail to
       // stream again. The catch-up is for a provider that streamed nothing.
-      if (!settled && full.length > current.length) {
+      if (!settled.length && full.length > current.length) {
         const tail = full.slice(current.length);
         current += tail;
         onDelta(tail);
       }
       endBlock();
+      return settled;
     },
+  };
+}
+
+/**
+ * The prose half of a session's event stream, folded into `prose`.
+ *
+ * A Pi-native model runs its tool loop as one assistant message per step, and
+ * prose that settles in a message carrying tool calls is the model saying what
+ * it is about to do — the same narration Claude Code's loop reports through its
+ * prose listener. It goes to `onInterim` the moment its message ends: held to
+ * the end of the turn it reaches the chat glued to the answer, minutes after it
+ * was written, reading as if the work had not started yet.
+ */
+export function followProse(prose: ReturnType<typeof createProseBlocks>, onInterim: (text: string) => void) {
+  return (event: AgentSessionEvent | AgentEvent) => {
+    if (event.type === "message_start") {
+      prose.startMessage();
+    } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      prose.delta(event.assistantMessageEvent.delta);
+    } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
+      prose.endBlock();
+    } else if (event.type === "message_end" && event.message.role === "assistant") {
+      const message = event.message;
+      const blocks = prose.endMessage(contentText(message.content));
+      if (!message.content.some((block) => block.type === "toolCall")) return;
+      for (const block of blocks) if (block.trim()) onInterim(block.trim());
+    }
   };
 }
 
@@ -564,15 +593,11 @@ export class Runner {
     setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
     setClaudeProseListener(session.sessionId, (text) => events.onProse?.(text));
     setClaudeEarlyAnswerListener(session.sessionId, (text) => events.onEarlyAnswer?.(text));
+    const onProseEvent = followProse(prose, (text) => events.onProse?.(text));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
-      if (event.type === "message_start") {
-        prose.startMessage();
-      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        prose.delta(event.assistantMessageEvent.delta);
-      } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
-        prose.endBlock();
-      } else if (event.type === "auto_retry_start") {
+      onProseEvent(event);
+      if (event.type === "auto_retry_start") {
         // Pi retries a retryable provider error under the failover loop, without
         // ever settling prompt() — so this is the only trace the turn stalled.
         log.warn(`retrying turn of ${threadId} (${event.attempt}/${event.maxAttempts}) after: ${event.errorMessage}`);
@@ -593,7 +618,6 @@ export class Runner {
         const message = event.message;
         lastStopReason = message.stopReason;
         lastErrorMessage = message.errorMessage;
-        prose.endMessage(contentText(message.content));
       }
     });
 

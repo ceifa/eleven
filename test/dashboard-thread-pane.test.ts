@@ -29,9 +29,9 @@ function functionBody(source: string, signature: string) {
 test("the pane stops showing the last screen before the read, not after it", () => {
   const open = functionBody(app, "async function openThread(id)");
   const painted = open.indexOf("paneLoading(id)");
-  const read = open.indexOf("await withLoading");
+  const read = open.indexOf("withLoading(read)");
   assert.ok(painted >= 0, "openThread should hand the pane over to a placeholder");
-  assert.ok(read >= 0, "openThread should still read the thread through withLoading");
+  assert.ok(read >= 0, "openThread should still read a thread it is not showing through withLoading");
   assert.ok(painted < read, "the placeholder has to be painted before the read is awaited, or it is not a placeholder");
 
   // Re-opening the thread already on screen is the common case — a turn ending,
@@ -42,7 +42,7 @@ test("the pane stops showing the last screen before the read, not after it", () 
 
 test("a read that comes back empty puts the pane back", () => {
   const open = functionBody(app, "async function openThread(id)");
-  const failure = open.slice(open.indexOf("await withLoading"));
+  const failure = open.slice(open.indexOf("withLoading(read)"));
   // Without this the placeholder is the last thing painted and stays up for
   // good: a thread that was deleted, or a phone that lost the tunnel mid-tap,
   // would leave a spinner spinning over nothing.
@@ -85,4 +85,27 @@ test("a conversation read before opens as it was, not as a spinner", () => {
   const open = functionBody(app, "async function openThread(id)");
   const stale = open.indexOf("if (!data || seq !== openSeq)");
   assert.ok(stale >= 0 && stale < open.indexOf("rememberThread(data)"));
+});
+
+test("a cold start paints what the page knew before anything is read", () => {
+  // The snapshot is read before the first render, and what it holds is put
+  // where the render looks: the overview in the read cache, the list in state,
+  // the recent transcripts where paneLoading finds them.
+  const restore = app.indexOf("await readSnapshot()");
+  const render = app.indexOf("render().finally(");
+  assert.ok(restore >= 0 && restore < render, "the snapshot has to be restored before the first render");
+  const boot = app.slice(restore, render);
+  assert.match(boot, /seedCache\("\/overview", restored\.overview\)/);
+  assert.match(boot, /state\.threads = restored\.threads/);
+  assert.match(boot, /rememberThread\(read, \{ persist: false \}\)/);
+  // Only the unfiltered list is a first frame: opening on an old search's
+  // answer would be wrong.
+  assert.match(boot, /restored\.threads && !threadsQuery\(\)/);
+  assert.match(functionBody(app, "async function refreshThreads()"), /if \(!threadsQuery\(\)\) keep\("threads", threads\);/);
+
+  // And the list view only waits for the network when it has nothing to show.
+  const view = functionBody(app, "async function viewThreads()");
+  assert.match(view, /const reading = refreshThreads\(\);\s*if \(!state\.threads\.length\) await reading;/);
+  // A deleted thread leaves the device too.
+  assert.match(functionBody(app, "async function deleteThread(id)"), /forgetThread\(id\)/);
 });

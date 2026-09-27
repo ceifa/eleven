@@ -5,6 +5,7 @@ import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH
 import { md } from "./markdown.js";
 import { navDrag } from "./nav-drag.js";
 import { openLightbox } from "./lightbox.js";
+import { keep, readSnapshot } from "./snapshot.js";
 import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
 
@@ -336,6 +337,7 @@ function connectWs() {
     }
     if (message.type === "thread-deleted") {
       markThreadIdle(message.threadId);
+      forgetThread(message.threadId);
       if (active) {
         state.activeThread = null;
         renderThreadPane();
@@ -508,6 +510,15 @@ function applyPairingBadge() {
   tab.hidden = count === 0;
   tab.textContent = count;
 }
+/** The daemon's overview over the snapshot's, without repainting the page. */
+function refreshOverview() {
+  cachedGet("/overview", { force: true }).then((overview) => {
+    state.overview = overview;
+    keep("overview", overview);
+    applyPairingBadge();
+  }, () => {});
+}
+
 // Fetch a fresh overview, then repaint the badge (used when only the badge,
 // not the whole view, needs to react — e.g. an incoming pairing request).
 async function updatePairingBadge() {
@@ -543,6 +554,9 @@ async function refreshThreads() {
   const threads = await api.get(`/threads${threadsQuery()}`).catch((error) => (toast(error.message, true), null));
   if (!threads || seq !== threadsSeq) return;
   state.threads = threads;
+  // The list a cold start paints first. Only the unfiltered one: a search is a
+  // question, and opening the app on the answer to an old one would be wrong.
+  if (!threadsQuery()) keep("threads", threads);
   for (const thread of threads) state.sources.add(thread.source);
   seedRunning(threads, readAt);
   if (onThreadsView()) renderThreadList();
@@ -625,6 +639,9 @@ function buildThreadCard(thread, older) {
       // The full reading (channel · group · topic) is one hover away; the card
       // itself only has room for the part that identifies it.
       title: thread.conversation,
+      // The read starts when the finger lands, not when it lifts: a tap is a
+      // tenth of a second of that round trip already spent.
+      onpointerdown: () => prefetchThread(thread.id),
       onclick: () => { openThread(thread.id); openPaneMobile(thread.id); },
     },
     h("div", { class: "card-body py-3 px-4" },
@@ -833,11 +850,30 @@ let liveEpoch = 0;
  * this is a head start, not a copy of the daemon.
  */
 const seenThreads = new Map(); // thread id → the /threads/:id answer
-const SEEN_THREADS = 12;
-function rememberThread(data) {
+const SEEN_THREADS = 16;
+function rememberThread(data, { persist = true } = {}) {
   seenThreads.delete(data.thread.id); // re-inserted as the newest
   seenThreads.set(data.thread.id, data);
   while (seenThreads.size > SEEN_THREADS) seenThreads.delete(seenThreads.keys().next().value);
+  if (persist) keepSeen();
+}
+function forgetThread(id) {
+  if (seenThreads.delete(id)) keepSeen();
+}
+// ...and across a cold start, through the snapshot. Without what the turn was
+// doing: that part is never painted from memory, so it is not worth keeping.
+const keepSeen = () => keep("seen", [...seenThreads.values()].map(({ live, ...read }) => read));
+
+/** A read of the thread under a finger that has just landed, for the click it
+ *  is probably about to be. A press that turns into a scroll opens nothing, so
+ *  the answer is only held for a moment — left longer, it would be served,
+ *  stale, to whichever open of that thread came next. */
+function prefetchThread(id) {
+  const path = `/threads/${id}`;
+  if (started.has(path) || renderedThreadId === id) return;
+  prefetch(path);
+  const value = started.get(path);
+  setTimeout(() => { if (started.get(path) === value) started.delete(path); }, 2000);
 }
 
 /** Read ahead the conversations at the top of the list — the ones a tap is
@@ -848,7 +884,7 @@ function readAheadThreads() {
   readAhead = true;
   const idle = window.requestIdleCallback ?? ((run) => setTimeout(run, 1500));
   idle(async () => {
-    for (const thread of state.threads.slice(0, 4)) {
+    for (const thread of state.threads.slice(0, 8)) {
       if (seenThreads.has(thread.id)) continue;
       const data = await fetch(`/api/threads/${thread.id}`).then(ok).catch(() => null);
       if (data && !seenThreads.has(thread.id)) rememberThread(data);
@@ -872,7 +908,11 @@ async function openThread(id) {
   // with it for the length of the trip. Holding the launcher, that answers
   // "open this conversation" with a blank composer titled NEW THREAD.
   if (renderedThreadId !== id) paneLoading(id);
-  const data = await withLoading(() => api.get(`/threads/${id}`).catch(() => null));
+  // With the thread already on the pane — painted from its last read just now,
+  // or simply the one being read — this read is a correction, not a wait: no
+  // loading bar over content that is there, and no fading the page for it.
+  const read = () => api.get(`/threads/${id}`).catch(() => null);
+  const data = await (renderedThreadId === id ? read() : withLoading(read));
   if (!data || seq !== openSeq) {
     // A read that came back empty would otherwise leave the placeholder up for
     // good. Put back whatever the pane can still show — unless a newer open is
@@ -2400,6 +2440,7 @@ async function deleteThread(id) {
   }
   toast("Thread deleted.");
   drafts.clear(id); // nothing left to send it to
+  forgetThread(id);
   // The thread-deleted broadcast also lands here, but don't depend on the
   // socket being healthy to clear the pane we're looking at.
   if (state.activeThread?.id === id) {
@@ -2485,7 +2526,11 @@ function showOutgoing(message) {
  *  list is the whole page. What's left above the threads is one search row and,
  *  only when there is something to choose between, a line of quiet filters. */
 async function viewThreads() {
-  await refreshThreads();
+  // A list this page already holds — the snapshot a cold start restored, or
+  // the one it read before visiting another tab — is painted now and corrected
+  // when the read lands. Only a page with nothing to show waits for it.
+  const reading = refreshThreads();
+  if (!state.threads.length) await reading;
   renderedFilters = ""; // the markup below is a fresh DOM — the filters have to be built into it again
   view.replaceChildren(
     h("div", { class: "threads-layout flex gap-4", id: "threads-layout" },
@@ -2527,14 +2572,28 @@ async function viewThreads() {
   // button to the launcher was one click of ceremony in front of every session.
   if (requested || state.activeThread) {
     renderThreadPane();
-    // A link to a thread that has since been collected falls back to the
-    // launcher rather than to an empty pane.
-    if (!(await openThread(requested ?? state.activeThread.id))) newThreadDialog();
+    const id = requested ?? state.activeThread.id;
+    // A conversation read before is on screen the moment openThread starts
+    // (paneLoading paints it); the read that corrects it doesn't get to hold
+    // the page — or fade it, as a route still loading does.
+    const painted = seenThreads.has(id);
     // A URL that names a thread is a request to read it, so on a phone it opens
     // the conversation rather than the list it is buried in. No history entry:
     // this *is* the entry — a back from here belongs to whatever came before
-    // eleven, not to a list the reader never saw.
-    else if (requested) showPane();
+    // eleven, not to a list the reader never saw. Shown before it is painted
+    // when it can be: a pane painted while hidden has no height to scroll to
+    // the bottom of, and opens on the top of the thread.
+    if (painted && requested) showPane();
+    // A link to a thread that has since been collected falls back to the
+    // launcher rather than to an empty pane.
+    const opening = openThread(id).then((opened) => {
+      if (!opened) newThreadDialog();
+      return opened;
+    });
+    if (!painted && (await opening) && requested) {
+      showPane();
+      scrollToBottom();
+    }
   } else {
     newThreadDialog();
   }
@@ -3843,6 +3902,7 @@ async function render() {
   try {
     await withLoading(async () => {
       state.overview = await cachedGet("/overview");
+      keep("overview", state.overview);
       applyPairingBadge();
       await route();
     }, { swap: true });
@@ -4092,10 +4152,26 @@ if (!bootRoute || bootRoute === "threads") {
   if (bootThread) prefetch(`/threads/${bootThread}`);
 }
 
+/* And while those are in flight, what the page knew the last time it ran: the
+   first frame is painted from it, and the reads above correct it as they land
+   (snapshot.js). Waited on for a few milliseconds at most — it is local, and a
+   store slower than the network is simply skipped. */
+const restored = await readSnapshot();
+if (restored.overview) seedCache("/overview", restored.overview);
+if (restored.threads && !threadsQuery()) {
+  state.threads = restored.threads;
+  for (const thread of restored.threads) state.sources.add(thread.source);
+}
+for (const read of restored.seen ?? []) rememberThread(read, { persist: false });
+
 initStringLights();
 connectWs();
 // Paints the first screen from the reads above, pairing badge included. Then
 // whatever is left unclaimed is dropped: a prefetch nobody wanted is an answer
-// that only gets staler.
-render().finally(() => started.clear());
+// that only gets staler. A restored overview is not a read: the daemon's own
+// answer is still in flight, and is taken before the drop.
+render().finally(() => {
+  if (restored.overview) refreshOverview();
+  started.clear();
+});
 

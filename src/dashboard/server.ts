@@ -418,9 +418,11 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // Reads get an ETag: the dashboard refetches the thread list on every
       // event that could have touched it, and most of those answers are the
       // bytes it already holds — that costs an empty 304 instead of the list.
+      // `private` for the same reason as the shell's (sendAsset): no shared
+      // cache between this daemon and the browser gets to keep a copy.
       if (method === "GET" && status === 200) {
         headers.etag = etagOf(body);
-        headers["cache-control"] = "no-cache";
+        headers["cache-control"] = "private, no-cache";
         headers.vary = "accept-encoding";
         if (isFresh(req, headers.etag)) {
           res.writeHead(304, headers);
@@ -943,7 +945,12 @@ function sendAsset(req: IncomingMessage, res: ServerResponse, asset: Asset) {
     // Fonts never change — cache them hard. The app shell (html/js/css) changes
     // with the daemon, so it revalidates; with an ETag that is an empty 304
     // rather than the file again.
-    "cache-control": asset.immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    // And only the browser revalidates it: `no-cache` alone lets a shared cache
+    // store the file too, and Cloudflare in front of the tunnel does — .css and
+    // .js are on its cache-by-default list, while html is not. It kept handing
+    // out a style.css from before the tab bar, a day after the change, next to
+    // the current index.html that names one. `private` keeps it out of the edge.
+    "cache-control": asset.immutable ? "public, max-age=31536000, immutable" : "private, no-cache",
   };
   if (asset.encoded.size) headers.vary = "accept-encoding";
   if (isFresh(req, asset.etag)) {

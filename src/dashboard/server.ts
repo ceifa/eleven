@@ -283,6 +283,13 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // how you actually recognize a thread — the label is the tooltip.
       conversationName: identity.name,
       conversationContext: identity.context,
+      // The face on the card: a picture the daemon serves, over the initial it
+      // falls back to — tinted with the topic's colour when Telegram gave one.
+      avatar: identity.picture && {
+        kind: identity.picture.kind,
+        src: `/api/avatars/${encodeURIComponent(thread.sessionKey)}?v=${encodeURIComponent(identity.picture.version)}`,
+      },
+      avatarColor: identity.color === undefined ? undefined : `#${identity.color.toString(16).padStart(6, "0")}`,
     };
   }
 
@@ -529,6 +536,22 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           // Stored names are unique per file and their contents never change.
           "cache-control": "private, max-age=31536000, immutable",
         }, bytes);
+      }
+      // A conversation's picture, fetched from Telegram once and kept on disk.
+      // Cached here for a day (the URL changes when a topic's emoji does); a
+      // miss for five minutes, so a chat without a photo isn't asked for on
+      // every paint, and one that just set a photo shows it soon enough.
+      if (method === "GET" && path.startsWith("/avatars/")) {
+        const avatar = await telegram.avatar(decodeURIComponent(path.slice("/avatars/".length)));
+        if (!avatar) {
+          res.writeHead(404, { "cache-control": "private, max-age=300" });
+          return res.end();
+        }
+        return deliver(req, res, 200, {
+          "content-type": avatar.type,
+          "x-content-type-options": "nosniff",
+          "cache-control": "private, max-age=86400",
+        }, avatar.bytes);
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);

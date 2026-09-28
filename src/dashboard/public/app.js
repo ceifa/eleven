@@ -608,6 +608,7 @@ const cardSignature = (thread, older) =>
   JSON.stringify([
     older, thread.sessionKey, thread.conversationName, thread.conversation,
     thread.title, thread.workspace, thread.lastActivityAt, thread.matches ?? null, state.query,
+    thread.avatar?.src ?? null, thread.avatarColor ?? null,
   ]);
 
 function threadCard(thread, older = false) {
@@ -674,19 +675,36 @@ function buildThreadCard(thread, older) {
 
 /**
  * A face for a conversation on a phone, where the list is rows rather than
- * cards and a column of names needs something to land the eye on. The initial
- * is the conversation's own; the hue is fixed by its session key, so a group
- * keeps its colour across every generation of its threads. The channel rides
- * along as a badge in the corner. Hidden on a desktop, whose cards already
- * carry the glyph at the head of the name.
+ * cards and a column of names needs something to land the eye on. It is the
+ * face Telegram gives it where there is one — the group's or the person's
+ * photo, a topic's emoji — laid over the initial, which is what shows while it
+ * loads and what stays when there is none. A topic's initial sits on the
+ * topic's own colour, as in Telegram; anything else takes a hue fixed by its
+ * session key, so a group keeps its colour across every generation of its
+ * threads. The channel rides along as a badge in the corner. Hidden on a
+ * desktop, whose cards already carry the glyph at the head of the name.
  */
 function threadAvatar(thread) {
   const name = thread.conversationName ?? thread.sessionKey;
   const initial = name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "·";
   let hash = 0;
   for (const char of thread.sessionKey) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
-  return h("span", { class: "thread-avatar", style: `--hue:${hash % 360}`, "aria-hidden": "true" },
+  const style = thread.avatarColor ? `--tint:${thread.avatarColor}` : `--hue:${hash % 360}`;
+  return h("span", { class: `thread-avatar ${thread.avatarColor ? "is-tinted" : ""}`, style, "aria-hidden": "true" },
     initial,
+    thread.avatar
+      ? h("img", {
+        class: `avatar-picture is-${thread.avatar.kind}`,
+        src: thread.avatar.src,
+        alt: "",
+        loading: "lazy",
+        decoding: "async",
+        onload: (event) => event.currentTarget.classList.add("is-loaded"),
+        // No picture (a 404, or a bot that is down): the initial underneath
+        // was the answer all along.
+        onerror: (event) => event.currentTarget.remove(),
+      })
+      : null,
     channelSource(thread.sessionKey),
   );
 }

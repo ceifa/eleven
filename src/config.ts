@@ -71,6 +71,11 @@ export interface ModelScope {
 
 export interface TopicConfig extends ModelScope {
   title?: string;
+  /** The topic's icon as Telegram draws it: the bubble's colour (0xRRGGBB)… */
+  iconColor?: number;
+  /** …and the custom emoji drawn in its place — "" when it has none. Both
+   * self-heal from live traffic, like the title. */
+  iconEmojiId?: string;
   /** Extra instructions appended to this topic's system prompt. */
   appendSystemPrompt?: string;
 }

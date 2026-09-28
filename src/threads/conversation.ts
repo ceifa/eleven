@@ -14,6 +14,11 @@ export interface ConversationIdentity {
   context?: string;
   /** The full one-line reading, channel spelled out. */
   label: string;
+  /** What Telegram draws for it, when that is a picture: the chat's photo, or
+   *  a topic's custom emoji. */
+  picture?: { kind: "photo" | "emoji"; version: string };
+  /** A topic's own colour (0xRRGGBB) — Telegram's bubble behind its initial. */
+  color?: number;
 }
 
 /**
@@ -41,14 +46,26 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || chatKey;
   const channelContext = inDm ? "Telegram DM" : "Telegram";
   if (target.topic === undefined) {
-    return { name: ownerName, context: channelContext, label: `${channelContext} · ${ownerName}` };
+    return {
+      name: ownerName,
+      context: channelContext,
+      label: `${channelContext} · ${ownerName}`,
+      // Worth asking for only once the chat is registered: the daemon serves
+      // pictures of the conversations it knows and no others.
+      ...(owner && { picture: { kind: "photo", version: "1" } as const }),
+    };
   }
   // Inside a forum the topic is the conversation; the group — or, in a DM with
   // topic mode, the person — is where it sits.
-  const topicName = owner?.topics?.[String(target.topic)]?.title || `topic ${target.topic}`;
+  const topic = owner?.topics?.[String(target.topic)];
+  const topicName = topic?.title || `topic ${target.topic}`;
   return {
     name: topicName,
     context: inDm ? `${channelContext} · ${ownerName}` : ownerName,
     label: `${channelContext} · ${ownerName} · ${topicName}`,
+    // The emoji's id is the version: a topic that changes its icon names a
+    // new picture, and no cache anywhere keeps showing the old one.
+    ...(topic?.iconEmojiId && { picture: { kind: "emoji", version: topic.iconEmojiId } as const }),
+    ...(topic?.iconColor !== undefined && { color: topic.iconColor }),
   };
 }

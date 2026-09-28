@@ -59,6 +59,9 @@ const DEFAULT_NATIVE_TOOLS: readonly string[] = BUILTIN_TOOLS.flatMap((name) => 
 const MAX_NOOP_RESULT_SKIPS = 3;
 // If the real turn never follows a skipped result, stop waiting on the child.
 const NOOP_RESULT_GRACE_MS = 60_000;
+// How long input stays open for a steered message no result named, once the
+// CLI reports nothing left in its queue (see InputQueue.settle).
+const STEER_DRAIN_GRACE_MS = 15_000;
 // Such a turn does not always settle with empty prose: the CLI fills it with a
 // synthetic placeholder of its own. These are constants in the Claude Code
 // binary, sitting next to "<synthetic>", and neither is ever something a model
@@ -154,34 +157,45 @@ class InputQueue {
   private readonly buffer: SDKUserMessage[] = [];
   private waiting: ((message: SDKUserMessage | undefined) => void) | undefined;
   private open = true;
-  private accepted = false;
-
-  /** Whether a live follow-up was handed to the child during this turn. Claude
-   * may queue it behind the seed's own answer, so its result can arrive after. */
-  get steered(): boolean {
-    return this.accepted;
-  }
+  /** Uuids of the messages handed to the child that no result has answered yet,
+   * in the order they were handed over. */
+  private readonly unanswered = new Set<string>();
 
   /** The message this turn was created for; it answers the caller's own prompt. */
   seed(message: SDKUserMessage): void {
+    this.unanswered.add(message.uuid!);
     this.buffer.push(message);
   }
 
   /**
-   * Queue one human follow-up, then close input. The Agent SDK folds every
-   * queued message into one query and withholds its single final result until
-   * this iterable reaches EOF; leaving it open for another steer deadlocks both
-   * sides. Later messages return false and fall back to Pi's own steering.
+   * Queue a human follow-up — as many as arrive while the turn runs. Claude
+   * folds one that lands before a tool boundary into the running turn, and runs
+   * one that lands after the last boundary as a turn of its own; either way the
+   * result names the messages it answered (see settle), so input can stay open
+   * for the next one. False once the turn is wrapping up: the caller falls back
+   * to Pi's own steering.
    */
   push(message: SDKUserMessage): boolean {
     if (!this.open) return false;
-    this.open = false;
-    this.accepted = true;
+    this.unanswered.add(message.uuid!);
     const resume = this.waiting;
     this.waiting = undefined;
     if (resume) resume(message);
     else this.buffer.push(message);
     return true;
+  }
+
+  /**
+   * Cross off the messages one SDK result answered; true while another message
+   * still waits for a result of its own. A result carries the uuid of every
+   * message its turn consumed, the ones folded in mid-loop included. One that
+   * carries none (an older CLI) answers the oldest message still waiting.
+   */
+  settle(result: { user_message_uuid?: string; user_message_uuids?: string[] }): boolean {
+    const answered = result.user_message_uuids ?? (result.user_message_uuid ? [result.user_message_uuid] : []);
+    if (answered.length) for (const uuid of answered) this.unanswered.delete(uuid);
+    else for (const uuid of this.unanswered) { this.unanswered.delete(uuid); break; }
+    return this.unanswered.size > 0;
   }
 
   /** Stop accepting input without ending the stream (the turn is wrapping up). */
@@ -618,7 +632,6 @@ async function consumeClaudeQuery(
     // One Pi turn can settle several SDK results (a steered message answered in
     // a turn of its own); every answer they carry belongs to this Pi message.
     const answers: string[] = [];
-    let steerSettled = false;
     // Interim prose already on the stream, so the result can't answer with it a
     // second time (Claude's last message may carry both prose and a tool call).
     const flushed = new Set<string>();
@@ -689,6 +702,7 @@ async function consumeClaudeQuery(
     let skippedResult: SDKMessage | undefined;
     let noopSkips = 0;
     let grace: NodeJS.Timeout | undefined;
+    let drainGrace: NodeJS.Timeout | undefined;
     sdk = deps.query({ prompt, options: sdkOptions });
     for await (const message of sdk) {
       // The child is alive and talking — a skipped result was indeed not the end.
@@ -736,18 +750,26 @@ async function consumeClaudeQuery(
         if (hasModelProse(settled) && !flushed.has(settled.trim())) answers.push(settled.trim());
         lastTopLevelText = "";
         // A steered message that arrived with no tool boundary left to inject it
-        // at is queued behind the seed's own answer: Claude settles the seed
+        // at is queued behind this answer: Claude settles what it was running
         // first, then dequeues the steered prompt and runs it as another turn.
         // Breaking here killed the child with that prompt already dequeued — it
-        // was recorded in the transcript, looked delivered, and never ran.
-        if (input.steered && !steerSettled) {
-          steerSettled = true;
-          log.info("a steered message is still queued — reading past the seed's result for its answer");
-          // What settled here answers the prompt this turn started with; the
-          // message that arrived meanwhile is about to get an answer of its own.
-          // Settle it as its own block now and offer it to the channel: joined
-          // at the end of the turn, the person reads the reply to what they said
-          // first below the reply to what they said next.
+        // was recorded in the transcript, looked delivered, and never ran. One
+        // folded in mid-loop is named by this very result, and waits for nothing.
+        if (input.settle(message)) {
+          log.info("a steered message is still queued — reading past this result for its answer");
+          // The CLI says nothing else is coming, yet a message went unnamed: a
+          // producer that does not echo uuids. End input rather than wait on a
+          // result that may never come — whatever the child still holds runs,
+          // and then the stream ends.
+          if (message.queued_turn_count === 0 && !drainGrace) {
+            drainGrace = setTimeout(() => input.close(), STEER_DRAIN_GRACE_MS);
+            drainGrace.unref();
+          }
+          // What settled here answers what was said first; the message that
+          // arrived meanwhile is about to get an answer of its own. Settle it as
+          // its own block now and offer it to the channel: joined at the end of
+          // the turn, the person reads the reply to what they said first below
+          // the reply to what they said next.
           const pending = answers.splice(0).join("\n\n");
           if (pending && !isolated) {
             flushed.add(emit(pending));
@@ -755,15 +777,15 @@ async function consumeClaudeQuery(
           }
           continue;
         }
-        // A result closes this query. With live steering, InputQueue already
-        // reached EOF after accepting its one follow-up; without steering the
-        // SDK can emit the seed result while input remains open, so seal here to
-        // reject a push racing the provider's teardown.
+        // Every message handed over is answered. Seal before the first await
+        // below, so a push racing this break falls back to Pi instead of being
+        // queued into a stream nobody reads anymore.
         input.seal();
         break;
       }
     }
     if (grace) clearTimeout(grace);
+    if (drainGrace) clearTimeout(drainGrace);
     if (!result) {
       // The stream ended (or the grace above aborted it) without the real turn
       // ever starting — fall back to the empty result the runner knows how to
@@ -928,6 +950,8 @@ function userBlocks(content: string | (TextContent | ImageContent)[], images?: I
 function humanMessage(blocks: Array<Record<string, unknown>>): SDKUserMessage {
   return {
     type: "user",
+    // The key each result names its answered messages by (InputQueue.settle).
+    uuid: randomUUID(),
     message: { role: "user", content: blocks as never },
     parent_tool_use_id: null,
     origin: { kind: "human" },

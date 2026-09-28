@@ -65,35 +65,38 @@ function scriptedQuery(messages: SDKMessage[], capture: (input: unknown) => void
   }) as never;
 }
 
-function resultMessage(text: string, uuid: string) {
+function resultMessage(text: string, uuid: string, answered?: Array<SDKUserMessage | undefined>, queued = 0) {
   return {
     type: "result", subtype: "success", is_error: false, result: text, session_id: "session",
     duration_ms: 1, duration_api_ms: 1, num_turns: 2, total_cost_usd: 0,
     usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     modelUsage: {}, permission_denials: [], uuid,
+    // The CLI names every message the turn consumed, folded ones included.
+    ...(answered ? { user_message_uuids: answered.map((message) => message?.uuid), queued_turn_count: queued } : {}),
   } as unknown as SDKMessage;
 }
 
 /**
- * Reproduce the Agent SDK's real streaming-input contract: it consumes the seed
- * and a queued human message, then withholds its one final result until the
- * prompt iterable reaches EOF. It does not emit one result per input message.
+ * Reproduce the Agent SDK's real streaming-input contract (0.3.280, observed
+ * 2026-09-28): messages that land while Claude is still working fold into the
+ * running turn at its next tool boundary, and the one result that turn settles
+ * names all of them — with the input iterable still open, waiting for more.
  */
-function steerableQuery(steer: () => void, seen: string[]) {
+function steerableQuery(steer: () => void, seen: string[], steers = 1) {
   return ((input: { prompt: AsyncIterable<SDKUserMessage> }) => {
     const stream = input.prompt[Symbol.asyncIterator]();
     const iterator = (async function* () {
       const seed = await stream.next();
       seen.push(promptText(seed.value));
-      // The message lands while Claude is still working on the seed prompt.
+      // The messages land while Claude is still working on the seed prompt.
       steer();
-      const steered = await stream.next();
-      seen.push(promptText(steered.value));
-      // Production deadlocked here: Eleven waited for the result while the SDK
-      // waited for EOF, because Eleven left the prompt open for more steering.
-      const end = await stream.next();
-      assert.equal(end.done, true);
-      yield resultMessage("answer to both messages", "result-1");
+      const consumed = [seed.value];
+      for (let i = 0; i < steers; i++) {
+        const steered = await stream.next();
+        seen.push(promptText(steered.value));
+        consumed.push(steered.value);
+      }
+      yield resultMessage("answer to every message", "result-1", consumed);
     })();
     return Object.assign(iterator, {
       close() {},
@@ -119,13 +122,11 @@ function lateSteerQuery(steer: () => void, seen: string[]) {
       steer();
       const steered = await stream.next();
       seen.push(promptText(steered.value));
-      const end = await stream.next();
-      assert.equal(end.done, true);
       // The seed's answer settles first, with the steered prompt still queued.
-      yield resultMessage("answer to the seed", "result-1");
+      yield resultMessage("answer to the seed", "result-1", [seed.value], 1);
       // Production broke out of the loop above and killed the child right here,
       // with the steered prompt already dequeued into Claude's transcript.
-      yield resultMessage("answer to the steered message", "result-2");
+      yield resultMessage("answer to the steered message", "result-2", [steered.value]);
     })();
     return Object.assign(iterator, {
       close() {},
@@ -627,7 +628,7 @@ test("a message steered into a live turn is answered inside that same turn", { t
     assert.deepEqual(seen, ["investigate the zip", "Viu minha msg?"]);
     const done = events.find((event) => event.type === "done");
     // The real SDK emits one result after processing both inputs.
-    assert.equal(done?.message.content[0]?.type === "text" && done.message.content[0].text, "answer to both messages");
+    assert.equal(done?.message.content[0]?.type === "text" && done.message.content[0].text, "answer to every message");
     assert.equal(done?.message.usage.totalTokens, 6);
     // The turn is over: a late steer must find no live stream and fall back to Pi.
     assert.equal(steerClaudeSession(piSessionId, "too late"), false);
@@ -636,9 +637,50 @@ test("a message steered into a live turn is answered inside that same turn", { t
   }
 });
 
+test("every message sent while a turn runs reaches it live, and one folded in waits for nothing", { timeout: 1_000 }, async () => {
+  // Observed on 2026-09-28: a print, then "Olha a margem la embaixo" four
+  // seconds later. The print went into the live turn; the text found input
+  // already closed behind it and waited in Pi's queue for the whole Claude loop
+  // to end — the agent read it a minute and a half late, after answering the
+  // print, and took it for a message about a print it never got.
+  const piSessionId = "cccccccc-4444-4444-8444-444444444444";
+  const seen: string[] = [];
+  const early: string[] = [];
+  registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
+  setClaudeEarlyAnswerListener(piSessionId, (text) => early.push(text));
+  try {
+    const provider = createClaudeCodeProvider({
+      query: steerableQuery(() => {
+        assert.equal(steerClaudeSession(piSessionId, "[media attached: print.jpg]"), true);
+        assert.equal(steerClaudeSession(piSessionId, "Olha a margem la embaixo"), true);
+      }, seen, 2),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("iphone, app instalado")], tools: [] };
+    const events = [];
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) {
+      events.push(event);
+    }
+
+    assert.deepEqual(seen, ["iphone, app instalado", "[media attached: print.jpg]", "Olha a margem la embaixo"]);
+    const done = events.find((event) => event.type === "done");
+    assert.deepEqual(
+      done?.message.content.map((block) => (block.type === "text" ? block.text : block.type)),
+      ["answer to every message"],
+    );
+    // The one result answered all three; nothing is queued behind it, so it is
+    // not split off as an early answer to the first.
+    assert.deepEqual(early, []);
+    assert.equal(steerClaudeSession(piSessionId, "too late"), false);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+  }
+});
+
 test("input the child already took mid-turn is not handed to it again", { timeout: 1_000 }, async () => {
-  // A second message arriving in the same turn misses the child's one-shot
-  // input window and goes through Pi's queue, which opens another request of
+  // A message arriving as the turn wraps up misses the child's input window
+  // and goes through Pi's queue, which opens another request of
   // the same turn. That request's context now carries the message the child
   // took directly (it is in the transcript, and the loop is given it back) —
   // sending it again would ask the child to answer it twice.
@@ -668,7 +710,7 @@ test("input the child already took mid-turn is not handed to it again", { timeou
     });
     const nextContext: Context = {
       systemPrompt: "eleven prompt",
-      messages: [seed, assistant("answer to both messages"), steered, user("tb*")],
+      messages: [seed, assistant("answer to every message"), steered, user("tb*")],
       tools: [],
     };
     for await (const _event of next.streamSimple(model, normalizeContext(nextContext), { sessionId: piSessionId })) { /* drain */ }

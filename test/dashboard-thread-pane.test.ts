@@ -109,3 +109,33 @@ test("a cold start paints what the page knew before anything is read", () => {
   // A deleted thread leaves the device too.
   assert.match(functionBody(app, "async function deleteThread(id)"), /forgetThread\(id\)/);
 });
+
+test("a thread painted before its pane is on screen still opens at the newest message", () => {
+  // On a phone the pane is display:none until the slide puts it on screen, and
+  // a thread read before is painted on the tap — before that. A hidden scroller
+  // has no height, so scrollTop = scrollHeight lands on 0; the read after it
+  // then saw a reader "scrolled up" at the first message and kept them there.
+  const render = functionBody(app, "function renderThreadPane()");
+  assert.match(render, /bottomOnShow = keepScroll === null && !messages\.clientHeight;/);
+  // The wish survives the read that lands before the pane shows…
+  assert.match(render, /const keepScroll = !opened && prev && !bottomOnShow && !atBottom\(prev\)/);
+  // …and is granted the moment the transcript has a size.
+  assert.match(render, /transcriptShown\.observe\(messages\)/);
+  const observer = app.slice(app.indexOf("const transcriptShown = new ResizeObserver("));
+  assert.match(observer.slice(0, observer.indexOf("\n});\n")), /if \(!bottomOnShow \|\| !el\?\.clientHeight\) return;[\s\S]*el\.scrollTop = el\.scrollHeight;/);
+});
+
+test("the document is put back when a phone leaves it scrolled under the tab bar", () => {
+  // iOS scrolls the window to show a focused field and can leave it there once
+  // the keyboard is gone: the fixed tab bar then floats over an empty strip
+  // until the reader drags the page home by hand.
+  const home = functionBody(app, "function homeDocument()");
+  assert.match(home, /if \(typing\(\)\) return;/);
+  assert.match(home, /window\.scrollTo\(0, 0\)/);
+  for (const hook of [
+    /document\.addEventListener\("focusout", \(\) => setTimeout\(homeDocument, 50\)\)/,
+    /window\.addEventListener\("scroll", homeDocument/,
+    /viewport\?\.addEventListener\("resize", homeDocument\)/,
+    /window\.addEventListener\("pageshow", homeDocument\)/,
+  ]) assert.match(app, hook);
+});

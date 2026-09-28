@@ -119,3 +119,30 @@ export function navDrag({ slop = AXIS_SLOP, flick = FLICK_SPEED, window = VELOCI
     cancel,
   };
 }
+
+/** How long after a popstate its hashchange can still arrive. Going back fires
+ *  the two as separate tasks, and a busy page can put a render between them. */
+export const TRAVERSAL_WINDOW = 1000;
+
+/**
+ * Whether the browser already animated the way back.
+ *
+ * Safari's edge swipe and Android's back gesture slide the previous screen in
+ * themselves, and then tell the page it went back. A page that answers that
+ * with a slide of its own plays the trip twice: the conversation leaves, comes
+ * back, and leaves again. popstate says when the browser did the animating
+ * (`hasUAVisualTransition`); the hashchange right after it does not, so the
+ * answer is kept for the one traversal both events belong to.
+ */
+export function browserBack({ window = TRAVERSAL_WINDOW } = {}) {
+  let slidAt = -Infinity;
+  return {
+    popstate(event) {
+      slidAt = event.hasUAVisualTransition ? event.timeStamp : -Infinity;
+    },
+    /** Did the browser animate the navigation this event belongs to? */
+    animated(event) {
+      return event.timeStamp - slidAt < window;
+    },
+  };
+}

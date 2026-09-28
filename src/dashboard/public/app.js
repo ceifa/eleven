@@ -3,7 +3,7 @@
 import { syncChildren } from "./dom.js";
 import { agentDetail, agentMeta, displayId, elapsed, hasTasks, liveStatus, MATCH_CHARS, startOfDay, taskIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
-import { navDrag } from "./nav-drag.js";
+import { browserBack, navDrag } from "./nav-drag.js";
 import { openLightbox } from "./lightbox.js";
 import { keep, readSnapshot } from "./snapshot.js";
 import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
@@ -3961,11 +3961,14 @@ function loadFailure(error) {
   );
 }
 
-window.addEventListener("hashchange", () => {
+// A back the browser already slid (see browserBack) is shown as a cut: the
+// screen it slid to is the one the page lands on.
+const nativeBack = browserBack();
+window.addEventListener("hashchange", (e) => {
   const layout = threadsLayout();
   const [route, id] = location.hash.replace(/^#\/?/, "").split("/");
   if (!layout || (route || "threads") !== "threads") return render();
-  setPane(Boolean(id));
+  setPane(Boolean(id), { animate: !nativeBack.animated(e) });
   if (id && id !== state.activeThread?.id) openThread(id);
 });
 
@@ -3973,8 +3976,9 @@ window.addEventListener("hashchange", () => {
 // changing the hash (it has no thread to name yet), so backing out of it fires
 // popstate alone. `pane` marks the entries this page pushed for that — landing
 // on anything else means the pane is not what the reader is on anymore.
-window.addEventListener("popstate", () => {
-  if (!history.state?.pane) setPane(false);
+window.addEventListener("popstate", (e) => {
+  nativeBack.popstate(e);
+  if (!history.state?.pane) setPane(false, { animate: !nativeBack.animated(e) });
 });
 
 /* ---------- the phone: sliding between screens, and the way back ---------- */

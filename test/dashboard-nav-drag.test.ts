@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { AXIS_SLOP, edgeZone, navDrag } from "../src/dashboard/public/nav-drag.js";
+import { AXIS_SLOP, browserBack, edgeZone, navDrag } from "../src/dashboard/public/nav-drag.js";
 
 /* The edge swipe was written for the navigation drawer and now drives the
    swipe back out of a conversation (the module still speaks the drawer's
@@ -134,4 +134,34 @@ test("the page and the gesture agree on how a swipe back is painted", () => {
   // preventDefault is ignored on a passive listener, and without it the
   // transcript scrolls under a pane that is supposed to be following the finger.
   assert.match(app, /"touchmove",[\s\S]*?\{ passive: false \}\)/);
+});
+
+test("a back the browser already slid is not slid again by the page", () => {
+  // Regression: Safari's edge swipe animated the way back to the list, then
+  // the popstate and hashchange it fires slid the page back a second time.
+  const back = browserBack();
+  back.popstate({ hasUAVisualTransition: true, timeStamp: 1_000 });
+  assert.equal(back.animated({ timeStamp: 1_000 }), true); // popstate itself
+  assert.equal(back.animated({ timeStamp: 1_040 }), true); // its hashchange
+
+  // The ‹ button and the in-page swipe go back through history too, with no
+  // animation from the browser: the page does the sliding.
+  back.popstate({ hasUAVisualTransition: false, timeStamp: 5_000 });
+  assert.equal(back.animated({ timeStamp: 5_020 }), false);
+
+  // Nor does a later hashchange — a tap on a thread — inherit an old answer.
+  back.popstate({ hasUAVisualTransition: true, timeStamp: 9_000 });
+  assert.equal(back.animated({ timeStamp: 15_000 }), false);
+  // A browser that never says has never animated anything.
+  const plain = browserBack();
+  plain.popstate({ timeStamp: 100 });
+  assert.equal(plain.animated({ timeStamp: 120 }), false);
+});
+
+test("the page hands the browser's answer to both halves of a traversal", () => {
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const popstate = app.slice(app.indexOf('window.addEventListener("popstate"'));
+  assert.match(popstate.slice(0, 200), /nativeBack\.popstate\(e\);\s*if \(!history\.state\?\.pane\) setPane\(false, \{ animate: !nativeBack\.animated\(e\) \}\)/);
+  const hashchange = app.slice(app.indexOf('window.addEventListener("hashchange"'));
+  assert.match(hashchange.slice(0, 400), /setPane\(Boolean\(id\), \{ animate: !nativeBack\.animated\(e\) \}\)/);
 });

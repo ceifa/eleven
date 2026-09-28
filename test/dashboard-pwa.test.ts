@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 /* The installable half of the dashboard is a set of files that only work if
    they agree with each other, and nothing at runtime checks that they do: a
@@ -110,12 +111,15 @@ test("the shell is answered from the cache, and a stale one is corrected after",
   assert.match(navigate[1], /waitUntil\(revalidateShell\(\)\)/);
   const revalidate = worker.match(/function revalidateShell\(\)\s*\{([\s\S]*?)\n\}/);
   assert.ok(revalidate, "the worker should still revalidate the shell");
-  assert.match(revalidate[1], /SHELL\.map/); // all of it, not just the html
-  assert.match(revalidate[1], /store\(cache, path, response\)/);
+  assert.match(revalidate[1], /refreshShell\(\)/);
   assert.match(revalidate[1], /postMessage\(\{ type: "shell-updated" \}\)/);
+  const refresh = worker.match(/async function refreshShell\(\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(refresh, "the worker should still refresh the shell in one place");
+  assert.match(refresh[1], /SHELL\.map/); // all of it, not just the html
+  assert.match(refresh[1], /store\(cache, path, response\)/);
   // A file the worker never had is not a change — flagging it would reload the
   // page once for every asset added to the list since it was installed.
-  assert.match(revalidate[1], /previous && version\(previous\) !== version\(response\)/);
+  assert.match(refresh[1], /previous && version\(previous\) !== version\(response\)/);
 
   // Everything that fills the cache goes through the one writer, which drops
   // the headers describing a compression the stored body no longer has. The
@@ -128,7 +132,7 @@ test("the shell is answered from the cache, and a stale one is corrected after",
   assert.match(worker, /headers\.delete\("content-length"\)/);
   // …including the install, which used to hand the job to cache.add().
   assert.doesNotMatch(worker, /caches?\.add\(/);
-  assert.match(worker, /store\(cache, path, response\)/);
+  assert.match(worker, /"install"[\s\S]{0,300}refreshShell\(\)/);
   // One writer, and it is store(): any other cache.put() is a path that skipped
   // the headers being dropped.
   assert.equal([...worker.matchAll(/\.put\(/g)].length, 1, "the cache should only ever be written through store()");
@@ -139,6 +143,65 @@ test("the shell is answered from the cache, and a stale one is corrected after",
   assert.ok(listener, "app.js should listen for the worker's messages");
   assert.match(listener[1], /"shell-updated"/);
   assert.match(listener[1], /location\.reload\(\)/);
+});
+
+/** sw.js run for real, against a cache and a network held in memory: the
+ *  worker's global scope, with `fetch` answering from `network` (a path mapped
+ *  to the version it is at, or to nothing for a fetch that fails). */
+function loadWorker(network: Map<string, string | undefined>) {
+  const store = new Map<string, Response>();
+  const cache = {
+    match: async (key: string) => store.get(key)?.clone(),
+    put: async (key: string, response: Response) => { store.set(key, response); },
+  };
+  const posted: string[] = []; // serialized: the worker's objects are from another realm
+  const self = {
+    addEventListener() {},
+    skipWaiting: async () => {},
+    clients: { claim: async () => {}, matchAll: async () => [{ postMessage: (message: unknown) => posted.push(JSON.stringify(message)) }] },
+  };
+  const fetch = async (path: string) => {
+    const at = network.get(path);
+    if (at === undefined) throw new TypeError("Load failed");
+    const response = new Response(`${path}@${at}`, { headers: { etag: `"${at}"` } });
+    Object.defineProperty(response, "type", { value: "basic" });
+    return response;
+  };
+  const context = vm.createContext({ self, caches: { open: async () => cache }, fetch, Response, Headers, URL });
+  vm.runInContext(read("sw.js"), context);
+  const shell = vm.runInContext("SHELL", context) as string[];
+  const at = async (path: string) => (await store.get(path)?.clone().text())?.split("@")[1];
+  return { shell, store, posted, at, revalidate: () => vm.runInContext("revalidateShell()", context) as Promise<void> };
+}
+
+test("a shell that arrives in part is not written over a whole one", async () => {
+  const network = new Map<string, string | undefined>();
+  const worker = loadWorker(network);
+  for (const path of worker.shell) {
+    worker.store.set(path, new Response(`${path}@old`, { headers: { etag: '"old"' } }));
+    network.set(path, "new");
+  }
+  // One file the cache never had, and the stylesheet cut off on the way — the
+  // biggest file, so the one still in flight when the phone drops the fetch.
+  worker.store.delete("/snapshot.js");
+  network.set("/style.css", undefined);
+
+  await worker.revalidate();
+  // The html that names a tab bar stays out of the cache until the stylesheet
+  // that draws one is in it too; nothing is announced, so no page reloads into
+  // half of an update.
+  assert.equal(await worker.at("/index.html"), "old");
+  assert.equal(await worker.at("/app.js"), "old");
+  assert.equal(await worker.at("/style.css"), "old");
+  assert.deepEqual(worker.posted, []);
+  // A hole is still filled: that file would have come from the network anyway.
+  assert.equal(await worker.at("/snapshot.js"), "new");
+
+  // The next open, with the whole set arriving, takes all of it and says so.
+  network.set("/style.css", "new");
+  await worker.revalidate();
+  for (const path of worker.shell) assert.equal(await worker.at(path), "new", path);
+  assert.deepEqual(worker.posted, [JSON.stringify({ type: "shell-updated" })]);
 });
 
 test("the first screen's reads leave together", () => {

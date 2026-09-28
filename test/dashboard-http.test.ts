@@ -162,7 +162,11 @@ test("static assets are compressed, revalidated with an ETag, and answered 304 u
 
     const etag = response.headers["etag"] as string;
     assert.ok(etag);
-    assert.equal(response.headers["cache-control"], "no-cache");
+    // `private`: the tunnel's CDN caches .js and .css by default, and with a
+    // bare `no-cache` it kept serving a stylesheet a day older than the page.
+    assert.equal(response.headers["cache-control"], "private, no-cache");
+    assert.equal((await get(`${base}/style.css`)).headers["cache-control"], "private, no-cache");
+    assert.equal((await get(`${base}/`)).headers["cache-control"], "private, no-cache");
     const revalidated = await get(`${base}/app.js`, { "if-none-match": etag, "accept-encoding": "br" });
     assert.equal(revalidated.status, 304);
     assert.equal(revalidated.body.length, 0);
@@ -242,7 +246,7 @@ test("the manifest and the worker are served as themselves, not as the app shell
     assert.match(worker.body.toString(), /addEventListener\("fetch"/);
     // And it revalidates rather than sitting in the browser's cache: it is the
     // one file that decides what every other one is allowed to be.
-    assert.equal(worker.headers["cache-control"], "no-cache");
+    assert.equal(worker.headers["cache-control"], "private, no-cache");
 
     const icon = await get(`${base}/icons/icon-192.png`, { "accept-encoding": "br, gzip" });
     assert.equal(icon.headers["content-type"], "image/png");
@@ -269,7 +273,7 @@ test("API reads carry an ETag, so an unchanged answer costs a 304", async () => 
     const response = await get(`${base}/api/threads`);
     const etag = response.headers["etag"] as string;
     assert.ok(etag);
-    assert.equal(response.headers["cache-control"], "no-cache");
+    assert.equal(response.headers["cache-control"], "private, no-cache");
 
     const revalidated = await get(`${base}/api/threads`, { "if-none-match": etag });
     assert.equal(revalidated.status, 304);

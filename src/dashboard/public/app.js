@@ -1950,6 +1950,22 @@ function emptyPane() {
 }
 
 let renderedThreadId;
+/**
+ * A transcript laid out while its pane is hidden has no height to scroll
+ * through: asked for the bottom, it stays at the first message. A phone hits
+ * that on every thread it has read before — paneLoading paints it on the tap,
+ * and the slide only puts the pane on screen a frame later. The read that
+ * lands after then finds the reader "scrolled up" and politely keeps them
+ * there. So the wish is kept, and granted the moment the transcript has a size.
+ */
+let bottomOnShow = false;
+const transcriptShown = new ResizeObserver(() => {
+  const el = scroller();
+  if (!bottomOnShow || !el?.clientHeight) return;
+  bottomOnShow = false;
+  el.scrollTop = el.scrollHeight;
+  updateJumpButton();
+});
 // Everything the head paints. A thread gets its title after the first turn and
 // can change model mid-conversation, but neither happens on most re-renders —
 // and rebuilding the head for nothing would snap a menu shut under the pointer.
@@ -2036,7 +2052,7 @@ function renderThreadPane() {
   // would rebuild that pane on every event — scrolling the reader to the bottom
   // each time.
   const opened = renderedThreadId !== thread.id || !pane.querySelector(".composer");
-  const keepScroll = !opened && prev && !atBottom(prev) ? prev.scrollTop : null;
+  const keepScroll = !opened && prev && !bottomOnShow && !atBottom(prev) ? prev.scrollTop : null;
   renderedThreadId = thread.id;
   pane.classList.toggle("is-running", isThreadLive(thread.id));
 
@@ -2080,7 +2096,14 @@ function renderThreadPane() {
   renderLive(true);
   renderTasks();
   const messages = scroller();
-  if (messages) messages.scrollTop = keepScroll ?? messages.scrollHeight;
+  if (messages) {
+    messages.scrollTop = keepScroll ?? messages.scrollHeight;
+    bottomOnShow = keepScroll === null && !messages.clientHeight;
+    if (opened) {
+      transcriptShown.disconnect();
+      transcriptShown.observe(messages);
+    }
+  }
   updateJumpButton();
   // Opening a thread is almost always the first half of answering in it, so the
   // caret lands in the composer. Not on a phone, where it would slide the
@@ -4124,6 +4147,28 @@ if (viewport) {
   viewport.addEventListener("scroll", measure);
   measure();
 }
+
+// Nothing here scrolls the document — every pane owns its own scroller — but a
+// phone scrolls it anyway: iOS moves the window to bring a focused field above
+// the keyboard and, since iOS 26, can leave it there after the keyboard is
+// gone. The fixed chrome is then placed against a viewport that is no longer
+// the screen, and the tab bar floats over a strip of nothing until a drag
+// scrolls the page home. That drag, done for the reader: whenever the document
+// is found off its origin and no field is taking keys, it goes back to 0.
+const typing = () => document.activeElement?.matches("input, textarea, select, [contenteditable]") ?? false;
+function homeDocument() {
+  if (typing()) return;
+  // Pinch-zoomed, an offset visual viewport is the reader looking around.
+  const zoomed = viewport && viewport.scale > 1.01;
+  if (window.scrollY || window.scrollX || (!zoomed && viewport?.offsetTop)) window.scrollTo(0, 0);
+}
+// focusout fires before focus lands anywhere else: a tap from one field to the
+// next must not bounce the page in between.
+document.addEventListener("focusout", () => setTimeout(homeDocument, 50));
+window.addEventListener("scroll", homeDocument, { passive: true });
+viewport?.addEventListener("resize", homeDocument);
+window.addEventListener("pageshow", homeDocument);
+document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && homeDocument());
 
 /* ---------- installable app ---------- */
 

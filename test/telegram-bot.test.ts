@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { createSeenMessages, createTurnDelivery, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry } from "../src/channels/telegram/bot.ts";
+import { createSeenMessages, createTurnDelivery, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry, userTopicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
 import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
@@ -383,13 +383,14 @@ test("a topic registers and names itself under whoever owns it — a group or a 
 
   const user: { topics?: Record<string, { title?: string }> } = {};
   assert.equal(registerTopic(user, topicEntry(created)), true);
-  assert.deepEqual(user.topics, { "7": { title: "eleven" } });
+  // Created without an emoji: that is known too, and recorded as none.
+  assert.deepEqual(user.topics, { "7": { title: "eleven", iconEmojiId: "" } });
   // Already known and already named: nothing to persist.
   assert.equal(registerTopic(user, topicEntry(created)), false);
 
   // A later message in the topic carries no name — the title has to survive it.
   assert.equal(registerTopic(user, topicEntry({ message_thread_id: 7, is_topic_message: true })), false);
-  assert.deepEqual(user.topics, { "7": { title: "eleven" } });
+  assert.deepEqual(user.topics, { "7": { title: "eleven", iconEmojiId: "" } });
 
   // A rename lands; a plain reply in a non-forum chat is not a topic at all.
   const renamed = { message_thread_id: 7, is_topic_message: true, forum_topic_edited: { name: "eleven v2" } };
@@ -397,6 +398,47 @@ test("a topic registers and names itself under whoever owns it — a group or a 
   assert.equal(user.topics?.["7"].title, "eleven v2");
   assert.equal(topicEntry({ message_thread_id: 9 }), undefined);
   assert.equal(registerTopic(user, undefined), false);
+});
+
+test("a topic's icon is learned from its root and kept current by edits the root knows nothing about", () => {
+  // What every message in a topic points at: the service message that created
+  // it, icon and all, as it was at creation.
+  const root = { forum_topic_created: { name: "eleven", icon_color: 0x6fb9f0, icon_custom_emoji_id: "111" } };
+  const inTopic = { message_thread_id: 8, is_topic_message: true, reply_to_message: root };
+  const group: { topics?: Record<string, { title?: string; iconColor?: number; iconEmojiId?: string }> } = {
+    topics: { "8": { title: "eleven" } }, // registered before icons were read
+  };
+
+  assert.equal(registerTopic(group, topicEntry(inTopic)), true);
+  assert.deepEqual(group.topics?.["8"], { title: "eleven", iconColor: 0x6fb9f0, iconEmojiId: "111" });
+  assert.equal(registerTopic(group, topicEntry(inTopic)), false);
+
+  // The icon changes. The root still says 111 on every message after this,
+  // and must not put it back.
+  const edited = { message_thread_id: 8, is_topic_message: true, forum_topic_edited: { icon_custom_emoji_id: "222" } };
+  assert.equal(registerTopic(group, topicEntry(edited)), true);
+  assert.equal(registerTopic(group, topicEntry(inTopic)), false);
+  assert.equal(group.topics?.["8"].iconEmojiId, "222");
+
+  // A rename leaves the emoji alone — and survives the root, which still has
+  // the old name (regression: every message after a rename reverted it). ""
+  // is Telegram removing the emoji.
+  assert.equal(registerTopic(group, topicEntry({ ...edited, forum_topic_edited: { name: "eleven v2" } })), true);
+  assert.equal(registerTopic(group, topicEntry(inTopic)), false);
+  assert.equal(group.topics?.["8"].title, "eleven v2");
+  assert.equal(group.topics?.["8"].iconEmojiId, "222");
+  assert.equal(registerTopic(group, topicEntry({ ...edited, forum_topic_edited: { icon_custom_emoji_id: "" } })), true);
+  assert.equal(registerTopic(group, topicEntry(inTopic)), false);
+  assert.deepEqual(group.topics?.["8"], { title: "eleven v2", iconColor: 0x6fb9f0, iconEmojiId: "" });
+});
+
+test("a forum topic someone speaks in is filed under the group, not under their DM", () => {
+  // Regression: the sender's entry registered every topic they spoke in, so a
+  // person's DM carried the topics of every group they are in — under ids
+  // that mean something else in their DM.
+  const message = { message_thread_id: 8, is_topic_message: true, forum_topic_created: { name: "eleven" } };
+  assert.equal(userTopicEntry("supergroup", message), undefined);
+  assert.deepEqual(userTopicEntry("private", message), { id: "8", name: "eleven", iconColor: undefined, iconEmojiId: "" });
 });
 
 test("a replayed command is deduped like any other message", () => {

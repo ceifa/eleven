@@ -310,7 +310,7 @@ test("a conversation is named by its topic, then its group, then the person", ()
       token: "t",
       users: { "42": { name: "Gabriel" }, "43": { username: "ceifa" }, "45": { name: "Samara", topics: { "3": { title: "work" } } } },
       groups: {
-        "-100": { title: "Sesh", topics: { "7": { title: "eleven" } } },
+        "-100": { title: "Sesh", topics: { "7": { title: "eleven" }, "8": { title: "agent", iconColor: 0xffd67e, iconEmojiId: "111" } } },
         "-200": {},
       },
     },
@@ -321,11 +321,22 @@ test("a conversation is named by its topic, then its group, then the person", ()
     context: "Sesh",
     label: "Telegram · Sesh · eleven",
   });
+  // What Telegram draws for them: a topic's emoji on its colour, a chat's photo.
+  assert.deepEqual(conversationIdentity("telegram:main:-100:topic:8", channels), {
+    name: "agent",
+    context: "Sesh",
+    label: "Telegram · Sesh · agent",
+    picture: { kind: "emoji", version: "111" },
+    color: 0xffd67e,
+  });
   assert.deepEqual(conversationIdentity("telegram:main:-100", channels), {
     name: "Sesh",
     context: "Telegram",
     label: "Telegram · Sesh",
+    picture: { kind: "photo", version: "1" },
   });
+  // A chat nobody registered has no picture the daemon would serve.
+  assert.equal(conversationIdentity("telegram:main:-999", channels).picture, undefined);
   assert.equal(conversationIdentity("telegram:main:42", channels).name, "Gabriel");
   assert.equal(conversationIdentity("telegram:main:43", channels).name, "@ceifa");
   // A DM is a forum too when the bot has topic mode on: the topic becomes the

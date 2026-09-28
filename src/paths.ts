@@ -9,6 +9,7 @@ export const CONFIG_FILE = join(CONFIG_DIR, "eleven.json");
 export const STATE_DIR = process.env.ELEVEN_STATE_DIR ?? join(home, ".local", "share", "eleven");
 export const THREADS_DIR = join(STATE_DIR, "threads");
 export const MEDIA_DIR = join(STATE_DIR, "media");
+export const AVATARS_DIR = join(STATE_DIR, "avatars");
 export const REQUESTS_DIR = join(STATE_DIR, "requests");
 export const THREAD_STORE_FILE = join(STATE_DIR, "threads.json");
 export const PENDING_TURNS_FILE = join(STATE_DIR, "pending-turns.json");

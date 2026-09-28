@@ -91,7 +91,13 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     lastActivityAt: 1_500,
     title: "a topic thread",
   };
-  const topicScope = { title: "eleven", appendSystemPrompt: "this one is TypeScript", models: [{ model: "claude-code/opus" }] };
+  const topicScope = {
+    title: "eleven",
+    appendSystemPrompt: "this one is TypeScript",
+    models: [{ model: "claude-code/opus" }],
+    iconColor: 0x6fb9f0,
+    iconEmojiId: "5312536423851630001",
+  };
   const groupScope = {
     title: "Sesh",
     appendSystemPrompt: "work on the repo named after the topic",
@@ -139,6 +145,8 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     status: () => [],
     pairing: { list: () => [], on: () => {} },
     discardPending: (sessionKey: string) => (spy.discarded.push(sessionKey), true),
+    avatar: async (sessionKey: string) =>
+      sessionKey === topicThread.sessionKey ? { bytes: Buffer.from([0xff, 0xd8, 0xff, 0xe0]), type: "image/jpeg" } : undefined,
   };
   const dashboard = startDashboard(config as never, gateway as never, telegram as never);
   try {
@@ -290,6 +298,34 @@ test("the thread list leaves out the session file path; the detail view keeps it
 
     const detail = JSON.parse((await get(`${base}/api/threads/${thread.id}`)).body.toString());
     assert.equal(detail.thread.sessionFile, thread.sessionFile);
+  });
+});
+
+test("a Telegram conversation's card carries Telegram's face for it, served by the daemon", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    const threads = JSON.parse((await get(`${base}/api/threads`)).body.toString());
+    const topic = threads.find((thread: { id: string }) => thread.id === spy.topic.id);
+    // The topic's emoji, versioned by its id so a new icon is a new URL; and
+    // the topic's own colour for the bubble under it.
+    assert.deepEqual(topic.avatar, {
+      kind: "emoji",
+      src: `/api/avatars/${encodeURIComponent(spy.topic.sessionKey)}?v=5312536423851630001`,
+    });
+    assert.equal(topic.avatarColor, "#6fb9f0");
+    // The dashboard's own thread has nothing to draw but its initial.
+    const local = threads.find((thread: { id: string }) => thread.id !== spy.topic.id);
+    assert.equal(local.avatar, undefined);
+    assert.equal(local.avatarColor, undefined);
+
+    const picture = await get(`${base}${topic.avatar.src}`);
+    assert.equal(picture.status, 200);
+    assert.equal(picture.headers["content-type"], "image/jpeg");
+    assert.equal(picture.headers["cache-control"], "private, max-age=86400");
+    assert.deepEqual([...picture.body], [0xff, 0xd8, 0xff, 0xe0]);
+
+    const missing = await get(`${base}/api/avatars/${encodeURIComponent("telegram:main:-1002")}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers["cache-control"], "private, max-age=300");
   });
 });
 

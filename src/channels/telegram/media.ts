@@ -116,7 +116,7 @@ function describeError(error: unknown): string {
  * used to cost the user the whole message — the agent received an error note
  * instead of the voice note, with no way to recover the audio.
  */
-export async function download(ctx: Context, token: string, fileId: string): Promise<Buffer> {
+export async function download(ctx: Pick<Context, "api">, token: string, fileId: string): Promise<Buffer> {
   return withRetry("idempotent", "download inbound file", async () => {
     // Inside the retry: file_path comes from the same flaky network, and it is
     // valid for an hour, so re-fetching it on a second attempt is free.

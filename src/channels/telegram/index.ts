@@ -4,9 +4,14 @@ import { PairingStore, type PairingRequest } from "./pairing.ts";
 import { startTelegramBot, type BotHandle } from "./bot.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { sendRich } from "./rich.ts";
+import { AvatarCache, chatPhoto, topicEmoji, type Avatar } from "./avatars.ts";
+import { AVATARS_DIR } from "../../paths.ts";
 import { logger } from "../../log.ts";
 
 const log = logger("telegram");
+// People and groups change their pictures now and then; a day behind is fine
+// for a face in a list. A custom emoji's id names one image forever.
+const CHAT_PHOTO_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface BotStatus {
   name: string;
@@ -22,12 +27,14 @@ export interface BotStatus {
  */
 export class TelegramChannel {
   readonly pairing = new PairingStore();
+  private avatars: AvatarCache;
   private bots = new Map<string, { handle: BotHandle; token: string }>();
   private config: ConfigStore;
   private gateway: Gateway;
 
-  constructor(config: ConfigStore, gateway: Gateway) {
+  constructor(config: ConfigStore, gateway: Gateway, avatarsDir = AVATARS_DIR) {
     this.config = config;
+    this.avatars = new AvatarCache(avatarsDir);
     this.gateway = gateway;
     config.on("change", () => this.sync());
     this.sync();
@@ -140,6 +147,32 @@ export class TelegramChannel {
       const owner = [...this.bots].find(([name]) => sessionKey.startsWith(`telegram:${name}:`));
       if (owner) void owner[1].handle.wake(sessionKey);
     }
+  }
+
+  /** The picture Telegram draws for a conversation: a forum topic's custom
+   *  emoji, or the chat's photo — the group's, or the person's in a DM. Only
+   *  for conversations this channel knows: a session key off the street does
+   *  not get to make the bot look up arbitrary chats. A topic without an emoji
+   *  has no picture; Telegram draws it as a coloured bubble, and so does the
+   *  dashboard. With its bot down, whatever was cached is still served. */
+  async avatar(sessionKey: string): Promise<Avatar | undefined> {
+    const target = parseTelegramSessionKey(sessionKey);
+    if (!target) return undefined;
+    const channel = this.find(target.channel)?.channel;
+    const chatKey = String(target.chatId);
+    const owner = target.chatId > 0 ? channel?.users?.[chatKey] : channel?.groups?.[chatKey];
+    if (!channel || !owner) return undefined;
+    const api = this.bots.get(target.channel)?.handle.bot.api;
+    const token = channel.token;
+    const offline = () => Promise.reject(new Error(`channel ${target.channel} is not running`));
+    if (target.topic !== undefined) {
+      const emojiId = owner.topics?.[String(target.topic)]?.iconEmojiId;
+      if (!emojiId) return undefined;
+      return this.avatars.get(`emoji-${emojiId}`, Infinity, () => (api ? topicEmoji(api, token, emojiId) : offline()));
+    }
+    return this.avatars.get(`chat-${target.channel}-${chatKey}`, CHAT_PHOTO_TTL_MS, () =>
+      api ? chatPhoto(api, token, target.chatId) : offline(),
+    );
   }
 
   denyPairing(id: string): PairingRequest {

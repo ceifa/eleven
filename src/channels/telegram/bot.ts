@@ -7,10 +7,11 @@ import { TurnFailure, type TurnRewind } from "../../agent/runner.ts";
 import { lruTouch, summarizeToolArgs } from "../../util.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
-import { collectInboundMedia, download, formatInboundBody } from "./media.ts";
+import { collectInboundMedia, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { TelegramTaskProgress } from "./task-progress.ts";
 import { sendRich } from "./rich.ts";
+import { chatPhoto } from "./avatars.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, modelName } from "./failover.ts";
@@ -21,9 +22,6 @@ const WATCHDOG_INTERVAL_MS = 30_000;
 const RESTART_BACKOFF_MS = { initial: 30_000, max: 600_000 };
 const ACK_REACTION = "👀";
 const MAX_CHAT_TOOLS = 128;
-// A pairing request carries the requester's picture inline; the 160px thumb is
-// ~10 KB, and this cap keeps a surprise from bloating the request store.
-const MAX_AVATAR_BYTES = 128 * 1024;
 // Coalesce rapid arrivals (forwarded batches, albums) into a single turn: each
 // message re-arms the quiet window; the cap bounds the total added latency.
 const BURST_QUIET_MS = 1_500;
@@ -336,7 +334,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (config.users?.[String(message.from.id)]) {
       const { id, username } = message.from;
       const name = fullName(message.from);
-      const topic = topicEntry(message);
+      const topic = userTopicEntry(ctx.chat!.type, message);
       deps.updateUser(String(id), (user) => {
         let changed = false;
         if (name && user.name !== name) {
@@ -707,11 +705,8 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
    *  decision that must still be made without it: any failure is a shrug. */
   async function profilePhoto(ctx: Context, chatId: number): Promise<string | undefined> {
     try {
-      const fileId = (await ctx.api.getChat(chatId)).photo?.small_file_id;
-      if (!fileId) return undefined;
-      const buffer = await download(ctx, token, fileId);
-      // The small thumb is ~10 KB; anything near this cap is not what we asked for.
-      return buffer.length > MAX_AVATAR_BYTES ? undefined : `data:image/jpeg;base64,${buffer.toString("base64")}`;
+      const buffer = await chatPhoto(ctx.api, token, chatId);
+      return buffer && `data:image/jpeg;base64,${buffer.toString("base64")}`;
     } catch (error) {
       log.debug(`profile photo unavailable for chat ${chatId}: ${error}`);
       return undefined;
@@ -862,27 +857,55 @@ export function foldDisplayName(value: string): { name: string; disguised: boole
   return { name, disguised: name !== value.normalize("NFC").replaceAll(/\s+/g, " ").trim() };
 }
 
-/** The topic a message belongs to, plus whatever name Telegram let slip along
- * with it (topics announce themselves through service messages). */
+interface TopicAnnouncement {
+  name?: string;
+  icon_color?: number;
+  icon_custom_emoji_id?: string;
+}
+
+export interface TopicEntry {
+  id: string;
+  name?: string;
+  iconColor?: number;
+  /** "" when the message says the topic has no emoji; absent when it says nothing. */
+  iconEmojiId?: string;
+  /** Read off the topic's root, which keeps the name and icon the topic was
+   *  created with — true once, stale after any edit. It only fills gaps. */
+  fromRoot?: boolean;
+}
+
+/** The topic a message belongs to, plus whatever name and icon Telegram let
+ * slip along with it (topics announce themselves through service messages). */
 export function topicEntry(message: {
   message_thread_id?: number;
   is_topic_message?: boolean;
-  forum_topic_created?: { name?: string };
-  forum_topic_edited?: { name?: string };
+  forum_topic_created?: TopicAnnouncement;
+  forum_topic_edited?: TopicAnnouncement;
   reply_to_message?: unknown;
-}): { id: string; name?: string } | undefined {
+}): TopicEntry | undefined {
   const id = topicOf(message);
   if (id === undefined) return undefined;
-  const replied = message.reply_to_message as { forum_topic_created?: { name?: string } } | undefined;
-  return {
-    id: String(id),
-    name: message.forum_topic_created?.name ?? message.forum_topic_edited?.name ?? replied?.forum_topic_created?.name,
-  };
+  const root = (message.reply_to_message as { forum_topic_created?: TopicAnnouncement } | undefined)?.forum_topic_created;
+  const created = message.forum_topic_created;
+  const edited = message.forum_topic_edited;
+  // A creation without an emoji is a statement that there is none; an edit
+  // without the field left the emoji alone, and "" in it removed it.
+  if (created) return { id: String(id), name: created.name, iconColor: created.icon_color, iconEmojiId: created.icon_custom_emoji_id ?? "" };
+  if (edited) return { id: String(id), name: edited.name, iconEmojiId: edited.icon_custom_emoji_id };
+  if (root) return { id: String(id), name: root.name, iconColor: root.icon_color, iconEmojiId: root.icon_custom_emoji_id ?? "", fromRoot: true };
+  return { id: String(id) };
+}
+
+/** The topic to file under the sender's own entry. Only a DM's topics belong
+ * to the person: a forum topic they speak in is the group's, and filing it
+ * there too filled every DM with the topics of every group its owner talks in. */
+export function userTopicEntry(chatType: string, message: Parameters<typeof topicEntry>[0]): TopicEntry | undefined {
+  return chatType === "private" ? topicEntry(message) : undefined;
 }
 
 /** Register (and name) a topic under whatever owns it — a group, or the DM of
  * a bot with topic mode enabled. Returns whether the config changed. */
-export function registerTopic(owner: { topics?: Record<string, TopicConfig> }, entry?: { id: string; name?: string }): boolean {
+export function registerTopic(owner: { topics?: Record<string, TopicConfig> }, entry?: TopicEntry): boolean {
   if (!entry) return false;
   const topics = (owner.topics ??= {});
   let changed = false;
@@ -890,8 +913,21 @@ export function registerTopic(owner: { topics?: Record<string, TopicConfig> }, e
     topics[entry.id] = {};
     changed = true;
   }
-  if (entry.name && topics[entry.id].title !== entry.name) {
-    topics[entry.id].title = entry.name;
+  const topic = topics[entry.id];
+  // The root would put a renamed topic's old name back on its next message.
+  if (entry.name && !(entry.fromRoot && topic.title) && topic.title !== entry.name) {
+    topic.title = entry.name;
+    changed = true;
+  }
+  // The colour is picked at creation and never edited, so any report of it is
+  // current. The emoji can change, and the root would put the old one back.
+  if (entry.iconColor !== undefined && topic.iconColor !== entry.iconColor) {
+    topic.iconColor = entry.iconColor;
+    changed = true;
+  }
+  const emojiKnown = topic.iconEmojiId !== undefined;
+  if (entry.iconEmojiId !== undefined && !(entry.fromRoot && emojiKnown) && topic.iconEmojiId !== entry.iconEmojiId) {
+    topic.iconEmojiId = entry.iconEmojiId;
     changed = true;
   }
   return changed;

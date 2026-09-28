@@ -20,7 +20,9 @@
    attachments included (/api/media), and none of it belongs in a store that
    outlives the tab. */
 
-const CACHE = "eleven-shell-v3";
+// v4: a v3 cache can hold a half-updated shell (see refreshShell), and a new
+// name is the one way to make every phone start over from a whole one.
+const CACHE = "eleven-shell-v4";
 
 // The app shell: what a cold start needs to paint the app with no network at
 // all. Fonts are in here too — they are immutable and small, and the wordmark
@@ -48,17 +50,9 @@ const SHELL = [
 const CACHED_PATHS = new Set(SHELL);
 
 self.addEventListener("install", (event) => {
-  // One missing file must not fail the whole install — the worker is still
-  // worth having for everything that did land.
-  event.waitUntil(
-    caches.open(CACHE)
-      .then((cache) => Promise.all(SHELL.map(async (path) => {
-        try {
-          await store(cache, path, await fetch(path));
-        } catch { /* not there, or no network yet: the next open fills it in */ }
-      })))
-      .then(() => self.skipWaiting()),
-  );
+  // A file that doesn't arrive must not fail the whole install — the worker is
+  // still worth having for everything that did land.
+  event.waitUntil(refreshShell().catch(() => {}).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (event) => {
@@ -150,10 +144,55 @@ const fromCache = async (request, fallback) =>
  *  bytes, so they compare across encodings and across restarts. */
 const version = (response) => response.headers.get("etag") ?? response.headers.get("last-modified") ?? "";
 
-/** Hold every shell entry against the daemon and take whatever has moved. The
- *  shell carries `cache-control: no-cache`, so these are conditional requests
- *  that come back as empty 304s while nothing has changed — a handful of them,
- *  after the page is already up.
+/** Fetch the whole shell and put it in the cache as one set. The files only
+ *  work together: an index.html that names a tab bar, next to a stylesheet from
+ *  before there was one, paints the tab bar's icons at 300×150 down the left of
+ *  the phone and squeezes the app into what is left. Writing them one by one as
+ *  they arrived did exactly that whenever the fetches were cut off halfway — the
+ *  app sent to the background, the tunnel dropping — because the small html
+ *  lands first and the stylesheet, the biggest file, last.
+ *
+ *  So a set that did not arrive whole replaces nothing: what the cache holds
+ *  stays the older, coherent copy, and the next open tries again. It only fills
+ *  in files the cache has no copy of at all, which would have come from the
+ *  network, current, anyway. Resolves true when a whole set replaced a copy
+ *  whose bytes had moved. */
+async function refreshShell() {
+  const cache = await caches.open(CACHE);
+  const fetched = await Promise.all(SHELL.map(async (path) => {
+    try {
+      const response = await fetch(path);
+      if (!response.ok || response.type !== "basic") return { path };
+      // Read to the end before anything is written: a download cut off in the
+      // middle is a fetch that failed, and it has to count as one.
+      const { status, statusText, headers } = response;
+      return { path, response: new Response(await response.blob(), { status, statusText, headers }) };
+    } catch {
+      return { path }; // offline: the cache is the only copy there is, and it stays
+    }
+  }));
+  const whole = fetched.every((entry) => entry.response);
+  const writes = await Promise.all(fetched.map(async ({ path, response }) => {
+    if (!response) return undefined;
+    const previous = await cache.match(path, { ignoreVary: true });
+    if (previous && !whole) return undefined;
+    return { path, response, previous };
+  }));
+  let moved = false;
+  await Promise.all(writes.map(async (write) => {
+    if (!write) return;
+    const { path, response, previous } = write;
+    // No previous copy is not a change — it is a file this worker never had.
+    if (previous && version(previous) !== version(response)) moved = true;
+    await store(cache, path, response);
+  }));
+  return moved;
+}
+
+/** Hold the shell against the daemon and take it if it has moved. The shell
+ *  carries `cache-control: no-cache`, so these are conditional requests that
+ *  come back as empty 304s while nothing has changed — a handful of them, after
+ *  the page is already up.
  *
  *  When something *has* changed, the page that is running is older than the API
  *  it talks to, and the next render can throw on a field that was renamed under
@@ -161,23 +200,7 @@ const version = (response) => response.headers.get("etag") ?? response.headers.g
 let checking;
 function revalidateShell() {
   checking ??= (async () => {
-    const cache = await caches.open(CACHE);
-    let moved = false;
-    await Promise.all(SHELL.map(async (path) => {
-      let response;
-      try {
-        response = await fetch(path);
-      } catch {
-        return; // offline: the cache is the only copy there is, and it stays
-      }
-      if (!response.ok || response.type !== "basic") return;
-      const previous = await cache.match(path, { ignoreVary: true });
-      // No previous copy is not a change — it is a file this worker never had.
-      const changed = previous && version(previous) !== version(response);
-      await store(cache, path, response).catch(() => {});
-      if (changed) moved = true;
-    }));
-    if (!moved) return;
+    if (!(await refreshShell())) return;
     for (const client of await self.clients.matchAll({ type: "window" })) {
       client.postMessage({ type: "shell-updated" });
     }

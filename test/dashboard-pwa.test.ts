@@ -370,6 +370,10 @@ test("an expanded group cannot push the page wider than the screen", () => {
   // Layout is not something these tests can run, so this holds the two
   // declarations that prevent it instead.
   assert.match(css, /\.collapse \{ display: grid; min-width: 0;/);
+  // Observed on 2026-09-28 on an iPhone: Workspaces' collapses would not open
+  // on a tap. The hidden checkbox over the title is the target, and iOS sizes a
+  // native checkbox itself, so it only fills the title once it stops being one.
+  assert.match(css, /\.collapse > input\[type="checkbox"\] \{[^}]*appearance: none;[^}]*width: 100%; height: 100%;/);
   assert.match(css, /\.collapse > \.collapse-content \{ min-width: 0; \}/);
   assert.match(css, /\.collapse > \.collapse-content > \* \{ min-width: 0; \}/);
 

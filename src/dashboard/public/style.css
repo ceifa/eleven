@@ -622,7 +622,11 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 .collapse { display: grid; min-width: 0; border-radius: var(--radius-box); }
 .collapse > .collapse-content { min-width: 0; }
 .collapse > .collapse-content > * { min-width: 0; }
-.collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; opacity: 0; cursor: pointer; margin: 0; }
+/* The invisible checkbox is the tap target, laid over the title. It has to be
+   told to fill the cell: iOS gives a native checkbox a fixed size of its own,
+   so grid stretch never reaches it and the target was a 16px square in the
+   corner, with a tap on the title landing on nothing. */
+.collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; appearance: none; width: 100%; height: 100%; opacity: 0; cursor: pointer; margin: 0; }
 .collapse-title { grid-area: 1 / 1; z-index: 1; position: relative; padding: 0.5rem 0.9rem; padding-right: 2rem; }
 /* .collapse > … keeps this one notch more specific than the .flex utility the
    content rows also carry, so the closed state actually hides them. */

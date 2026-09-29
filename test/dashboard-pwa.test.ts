@@ -256,6 +256,28 @@ test("the shell asks for the app frame a phone needs", () => {
   }
 });
 
+test("an installed iPhone app fills the screen from launch, not after a drag", () => {
+  // Observed on 2026-09-28, iPhone installed app at launch: screen 852,
+  // innerHeight/100dvh/body 793, 100vh 852 — the tab bar floated 59pt (the
+  // status bar) over an empty strip until the page was dragged.
+  const css = read("style.css");
+  const html = read("index.html");
+
+  // The mark has to be on <html> before the stylesheet paints the first frame.
+  const mark = html.indexOf('classList.add("standalone")');
+  assert.ok(mark > 0, "index.html should mark an installed app on <html>");
+  assert.ok(mark < html.indexOf('href="/style.css"'), "the mark must come before the stylesheet");
+  assert.match(html, /navigator\.standalone === true/);
+
+  // Installed, the phone layout fills 100vh (the whole screen) and the root is
+  // that tall; in a browser it keeps following the dynamic viewport.
+  assert.match(css, /:root \{ --app-h: 100dvh; \}/);
+  assert.match(css, /:root\.standalone \{ --app-h: 100vh; \}/);
+  assert.match(css, /:root\.standalone, :root\.standalone body \{ height: 100vh; \}/);
+  const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+  assert.doesNotMatch(mobile, /100dvh/, "phone rules must size from --app-h, never a bare 100dvh");
+});
+
 test("the phone layout subtracts the chrome it actually has", () => {
   const css = read("style.css");
   const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
@@ -264,7 +286,7 @@ test("the phone layout subtracts the chrome it actually has", () => {
   // the top bar (notch included) and the keyboard.
   const layout = css.match(/@media \(max-width: 768px\)[\s\S]*?\.threads-layout \{([\s\S]*?)\}/);
   assert.ok(layout, "the mobile block should still size .threads-layout");
-  for (const term of ["100dvh", "var(--topbar)", "var(--keyboard, 0px)"]) {
+  for (const term of ["var(--app-h)", "var(--topbar)", "var(--keyboard, 0px)"]) {
     assert.ok(layout[1].includes(term), `.threads-layout must account for ${term}`);
   }
 

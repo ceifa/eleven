@@ -19,6 +19,10 @@
   <meta name="apple-mobile-web-app-title" content="eleven" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <!-- Marked before the stylesheet paints anything: an installed iPhone app
+       launches with its dynamic viewport short by the status bar, and the
+       standalone rules in style.css have to win from the very first frame. -->
+  <script>if (navigator.standalone === true || matchMedia("(display-mode: standalone)").matches) document.documentElement.classList.add("standalone");</script>
   <link rel="stylesheet" href="/style.css" />
   <!-- the wordmark's weight, which is on screen before anything is fetched: without
        this the browser only discovers it after parsing the stylesheet, and the sign

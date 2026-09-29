@@ -55,6 +55,16 @@
 * { margin: 0; }
 
 html, body { height: 100%; }
+/* The height a phone layout gets to fill. In a browser that is the dynamic
+   viewport, which follows the toolbars. An app installed on an iPhone has no
+   toolbars, yet launches with the dynamic viewport (and innerHeight, and the
+   layout viewport fixed chrome is pinned to) short by the status bar: 793 of
+   852 behind a Dynamic Island, until the page is dragged. 100vh is the whole
+   screen from the first frame, and a root that tall overflows the short
+   viewport, which is what makes WebKit settle it at full height on its own. */
+:root { --app-h: 100dvh; }
+:root.standalone { --app-h: 100vh; }
+:root.standalone, :root.standalone body { height: 100vh; }
 
 body {
   font-family: var(--font-sans);
@@ -1758,6 +1768,7 @@ video.msg-media { max-width: 22rem; }
    ever gets — so the composer spends the whole session a toolbar's height below
    the screen. vh first as the fallback for anything that doesn't know dvh. */
 .h-screen { height: 100vh; height: 100dvh; }
+:root.standalone .h-screen { height: 100vh; }
 .min-h-0 { min-height: 0; }
 
 .text-xs { font-size: 0.75rem; }
@@ -1931,7 +1942,7 @@ video.msg-media { max-width: 22rem; }
     margin: -0.75rem calc(-0.6rem - var(--safe-r)) calc(-1.25rem - var(--tabbar)) calc(-0.6rem - var(--safe-l));
     /* The keyboard comes up over the tab bar, so only the taller of the two is
        taken off the bottom. */
-    height: calc(100dvh - var(--topbar) - max(var(--tabbar), var(--keyboard, 0px)));
+    height: calc(var(--app-h) - var(--topbar) - max(var(--tabbar), var(--keyboard, 0px)));
     gap: 0;
     position: relative; /* the list is laid under the pane here during a swipe back */
   }
@@ -2055,7 +2066,7 @@ video.msg-media { max-width: 22rem; }
   .modal-box {
     width: 100%;
     max-width: none;
-    max-height: calc(100dvh - var(--topbar) - 1rem - var(--safe-b));
+    max-height: calc(var(--app-h) - var(--topbar) - 1rem - var(--safe-b));
     margin: auto 0 0;
     padding: 1rem calc(1rem + var(--safe-r)) calc(1rem + var(--safe-b)) calc(1rem + var(--safe-l));
     border-radius: var(--radius-box) var(--radius-box) 0 0;

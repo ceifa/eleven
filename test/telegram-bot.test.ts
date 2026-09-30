@@ -714,6 +714,28 @@ test("working narration goes out silently, a steered flush still notifies", asyn
   ]);
 });
 
+test("a steered message does not flush prose the chat already has", async () => {
+  // Regression (2026-09-29): prose sent mid-loop was flushed again when a
+  // steered message cut the turn — the blocks were joined before being checked
+  // against `sent`, so the chat got that prose twice, the second time glued on
+  // top of the answer.
+  const posted: Array<{ text: string; silent: boolean }> = [];
+  const delivery = createTurnDelivery(
+    async (text, silent) => void posted.push({ text, silent }),
+    new Set(),
+    (error) => assert.fail(String(error)),
+  );
+
+  delivery.early("You're right to call it out.", { silent: true });
+  delivery.catchUp(["You're right to call it out.", "Because I treated it as a list."]);
+  await delivery.settled();
+
+  assert.deepEqual(posted, [
+    { text: "You're right to call it out.", silent: true },
+    { text: "Because I treated it as a list.", silent: false },
+  ]);
+});
+
 test("a turn that never spoke mid-loop still answers with the runtime's own text", () => {
   const delivery = createTurnDelivery(async () => {}, new Set(), () => {});
   // Nothing was flushed, so the result's text is the answer verbatim — blocks

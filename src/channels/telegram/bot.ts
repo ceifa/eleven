@@ -136,22 +136,30 @@ export function createTurnDelivery(
   // overtake it. Sending prose early is worth nothing if the chat reorders it.
   let chain: Promise<unknown> = Promise.resolve();
   let flushed = false;
+  /** Ship a block of prose now, unless the chat already has it. `silent` is for
+   * prose that only says the turn is still working: it belongs in the chat, but
+   * buzzing a phone for "checking X now" is a notification nobody asked for. */
+  const early = (chunk: string, options: { silent?: boolean } = {}): void => {
+    const text = chunk.trim();
+    if (!text || sent.has(text)) return;
+    // Remembering it here is also what keeps the final send from repeating it:
+    // the turn's own text still carries this prose.
+    sent.add(text);
+    flushed = true;
+    chain = chain.then(() => send(text, !!options.silent)).catch(onError);
+  };
+  const unsent = (blocks: string[]) => blocks.filter((block) => !sent.has(block)).join("\n\n");
   return {
-    /** Ship a block of prose now, unless the chat already has it. `silent` is for
-     * prose that only says the turn is still working: it belongs in the chat, but
-     * buzzing a phone for "checking X now" is a notification nobody asked for. */
-    early(chunk: string, options: { silent?: boolean } = {}): void {
-      const text = chunk.trim();
-      if (!text || sent.has(text)) return;
-      // Remembering it here is also what keeps the final send from repeating it:
-      // the turn's own text still carries this prose.
-      sent.add(text);
-      flushed = true;
-      chain = chain.then(() => send(text, !!options.silent)).catch(onError);
+    early,
+    /** Ship, as one message, the blocks the chat doesn't have yet — what a
+     * steered message cuts off. Joining first and checking after would miss the
+     * prose already sent on its own and post it again glued to the answer. */
+    catchUp(blocks: string[]): void {
+      early(unsent(blocks));
     },
     /** What the chat is still owed once the early sends are out. */
     remaining(blocks: string[], resultText: string): string {
-      return (flushed ? blocks.filter((block) => !sent.has(block)).join("\n\n") : resultText).trim();
+      return (flushed ? unsent(blocks) : resultText).trim();
     },
     /** Resolves when every early send has landed. */
     settled(): Promise<unknown> {
@@ -520,7 +528,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           // not narration, so it notifies like any other.
           onEvent: (event) => {
             if (event.type !== "message_end" || event.message.role !== "user") return;
-            delivery.early(blocks.splice(0).join("\n\n"));
+            delivery.catchUp(blocks.splice(0));
           },
           // Failover abandons the attempt's prose — drop our copy of it too.
           onFailover: () => {

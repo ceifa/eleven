@@ -1286,7 +1286,6 @@ function panelSection(panel) {
   );
 }
 
-/** A row with detail opens it; the rest are just read. */
 function panelRow(row) {
   const opens = !!row.detail?.length;
   return h("div", {

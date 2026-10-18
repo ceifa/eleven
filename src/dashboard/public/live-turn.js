@@ -56,7 +56,7 @@ export function shownLive(live, item, at, startedAt) {
 const STATE_ICONS = { idle: "○", waiting: "⏸", active: "◐", done: "✓", failed: "✕", stopped: "◼" };
 
 /** State reads at a glance or it doesn't read at all: the icon is the state. */
-export const stateIcon = (state) => STATE_ICONS[state] ?? STATE_ICONS.active;
+export const stateIcon = (state) => STATE_ICONS[state];
 
 export const startOfDay = (ts) => new Date(ts).setHours(0, 0, 0, 0);
 

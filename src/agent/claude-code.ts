@@ -873,8 +873,10 @@ function buildMcpServer(
           // contract either way: the tool publishes panels, this forwards them.
           const scope = request.requestId ?? `${tool.name}-${randomUUID()}`;
           const onUpdate = (partial: unknown) => {
+            const listener = sessions.get(ownerSessionId)?.onPanels;
+            if (!listener) return;
             const update = readToolPanels(partial, scope, tool.name);
-            if (update) sessions.get(ownerSessionId)?.onPanels?.(update);
+            if (update) listener(update);
           };
           // MCP callbacks cross the SDK transport boundary. Re-enter the owner
           // explicitly so extension tools that spawn nested AgentSessions

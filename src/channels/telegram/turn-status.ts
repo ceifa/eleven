@@ -71,8 +71,6 @@ export class TelegramTurnStatus {
   private readonly startedAt = Date.now();
   private currentTool: RunningStatus["tool"];
   private currentRetry: RetryStatus | undefined;
-  /** This turn published panels — the message is worth keeping after finish. */
-  private hasPanels = false;
   private messageId: number | undefined;
   private timer: NodeJS.Timeout | undefined;
   private ticker: NodeJS.Timeout | undefined;
@@ -120,9 +118,6 @@ export class TelegramTurnStatus {
   panels(update: PanelUpdate): void {
     if (this.dead || this.outcome) return;
     this.board.apply(update);
-    // A quiet panel is context from an earlier turn: it may be drawn, but it
-    // must not be the reason this turn posts a status message at all.
-    this.hasPanels = this.board.changed;
     // A tool that publishes its own panels has just said more than its
     // arguments ever could — the "🔧 workflow · script: export const meta…"
     // line over a live phase list is noise.
@@ -172,7 +167,7 @@ export class TelegramTurnStatus {
 
   /** Panels and retries outlive the turn; bare tool status does not. */
   private get worthKeeping(): boolean {
-    return this.hasPanels || !!this.currentRetry;
+    return this.board.changed || !!this.currentRetry;
   }
 
   /** The status message exists in the chat. */
@@ -198,7 +193,7 @@ export class TelegramTurnStatus {
 
   private schedule(): void {
     if (this.timer || this.dead || this.outcome) return;
-    const hold = this.hasPanels || this.currentRetry
+    const hold = this.board.changed || this.currentRetry
       ? FIRST_RENDER_DELAY_MS
       : this.currentTool
         ? this.toolRenderDelayMs
@@ -316,21 +311,22 @@ export function renderTurnStatus(
  *  "… N more" while a page of old ✅ stayed on screen. */
 function renderPanel(panel: Panel): string {
   const title = panel.icon ? `${panel.icon} ${panel.title}` : panel.title;
-  const total = panel.rows.length + (panel.more ?? 0);
-  if (panel.rows.length <= MAX_PANEL_ROWS) return renderRows(title, panel.rows, MAX_PANEL_ROWS, total);
-  let hide = panel.rows.length - MAX_PANEL_ROWS + 1;
-  const shown = panel.rows.filter((row) => row.state !== "done" || hide-- <= 0);
-  const done = panel.rows.length - shown.length;
-  if (!done) return renderRows(title, panel.rows, MAX_PANEL_ROWS, total);
-  return renderRows(`${title}\n✅ ${done} done`, shown, MAX_PANEL_ROWS - 1, total - done);
+  const more = panel.more ?? 0;
+  if (panel.rows.length > MAX_PANEL_ROWS) {
+    let hide = panel.rows.length - MAX_PANEL_ROWS + 1;
+    const shown = panel.rows.filter((row) => row.state !== "done" || hide-- <= 0);
+    const done = panel.rows.length - shown.length;
+    if (done) return renderRows(`${title}\n✅ ${done} done`, shown, MAX_PANEL_ROWS - 1, more);
+  }
+  return renderRows(title, panel.rows, MAX_PANEL_ROWS, more);
 }
 
-/** `total` is how many exist, which is not always how many arrived: a producer
- *  may cap the rows it sends. Counting the rows instead would understate a
- *  40-agent fan-out as "… 2 more". */
-function renderRows(title: string, rows: readonly PanelRow[], limit: number, total: number): string {
+/** `more` is what the producer left out, on top of what this cap hides: a
+ *  count of the rows that arrived would understate a 40-agent fan-out as
+ *  "… 2 more". */
+function renderRows(title: string, rows: readonly PanelRow[], limit: number, more: number): string {
   const visible = rows.slice(0, limit).map(renderRow);
-  const hidden = total - Math.min(rows.length, limit);
+  const hidden = Math.max(0, rows.length - limit) + more;
   if (hidden > 0) visible.push(`… ${hidden} more`);
   return `${title}\n${visible.join("\n")}`;
 }
@@ -352,7 +348,6 @@ function compact(value: string, limit = 120): string {
   const text = value.replaceAll(/\s+/g, " ").trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1).trimEnd()}…`;
 }
-
 
 function formatDuration(milliseconds: number): string {
   if (milliseconds < 1_000) return `${Math.max(0, Math.round(milliseconds))}ms`;

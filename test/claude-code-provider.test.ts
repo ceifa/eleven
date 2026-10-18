@@ -7,6 +7,7 @@ import {
   CLAUDE_CODE_MODELS,
   claudeAttemptId,
   claudeInputHash,
+  claudeShell,
   cleanToolName,
   createClaudeCodeProvider,
   nativeToolsForPolicy,
@@ -854,6 +855,44 @@ test("the child carries none of the CLI's own git, attribution or background def
   } finally {
     unregisterClaudeSession(piSessionId);
   }
+});
+
+test("the child is told the shell its Bash tool actually runs", async () => {
+  const piSessionId = "dddddddd-3333-4111-8111-111111111111";
+  let captured: { options: { env?: Record<string, string> } } | undefined;
+  const previous = process.env.SHELL;
+  process.env.SHELL = "/bin/fish";
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages, (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
+
+    // Claude Code runs Bash under zsh or bash, but its Environment block prints
+    // $SHELL verbatim. With a fish login shell the model read "fish" and wrote
+    // fish syntax that the real shell rejected.
+    const shell = captured?.options.env?.SHELL;
+    assert.match(shell ?? "", /\/(zsh|bash)$/);
+    assert.equal(captured?.options.env?.CLAUDE_CODE_SHELL, shell);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+    if (previous === undefined) delete process.env.SHELL;
+    else process.env.SHELL = previous;
+  }
+});
+
+test("claudeShell keeps a shell Claude Code can run and replaces one it cannot", () => {
+  const has = (...paths: string[]) => (path: string) => paths.includes(path);
+  assert.equal(claudeShell("/usr/bin/zsh", has()), "/usr/bin/zsh");
+  assert.equal(claudeShell("/bin/bash", has()), "/bin/bash");
+  assert.equal(claudeShell("/bin/fish", has("/usr/bin/zsh", "/bin/bash")), "/usr/bin/zsh");
+  assert.equal(claudeShell("/bin/fish", has("/bin/bash")), "/bin/bash");
+  assert.equal(claudeShell(undefined, has("/bin/bash")), "/bin/bash");
+  assert.equal(claudeShell("/bin/fish", has()), undefined);
 });
 
 test("stopping a turn interrupts the CLI instead of only killing its transport", async () => {

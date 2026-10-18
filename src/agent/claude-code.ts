@@ -28,6 +28,8 @@ import {
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { z } from "zod";
 import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.ts";
 import { contentText } from "../util.ts";
@@ -1053,6 +1055,17 @@ function foregroundToolInput(name: string, input: Record<string, unknown>): Reco
   return undefined;
 }
 
+const SHELL_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+
+/** The shell Claude Code's Bash tool will run, or undefined if there is none.
+ * The CLI only runs zsh or bash: any other $SHELL (fish, nu) makes it fall back
+ * to one of those, yet its Environment block still prints $SHELL verbatim, so
+ * the model writes syntax for a shell that never sees it. */
+export function claudeShell(shell: string | undefined, exists: (path: string) => boolean = existsSync): string | undefined {
+  if (shell && /(bash|zsh)$/.test(basename(shell))) return shell;
+  return ["zsh", "bash"].flatMap((name) => SHELL_DIRS.map((dir) => `${dir}/${name}`)).find(exists);
+}
+
 /** Do not hand Telegram/provider tokens from Eleven's daemon environment to
  * the child. Claude's local login lives under HOME/CLAUDE_CONFIG_DIR. */
 function claudeChildEnv(): Record<string, string | undefined> {
@@ -1062,8 +1075,11 @@ function claudeChildEnv(): Record<string, string | undefined> {
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR",
     "SSL_CERT_FILE", "SSL_CERT_DIR",
   ];
+  // Pin execution to the same shell the prompt announces, so the two cannot drift.
+  const shell = claudeShell(process.env.SHELL);
   return {
     ...Object.fromEntries(keys.map((key) => [key, process.env[key]])),
+    ...(shell && { SHELL: shell, CLAUDE_CODE_SHELL: shell }),
     ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     // eleven forces every Bash call into the foreground anyway (see

@@ -21,7 +21,7 @@ import {
   runWithClaudeSession,
   setClaudeEarlyAnswerListener,
   setClaudeProseListener,
-  setClaudeTaskListener,
+  setClaudePanelListener,
   setClaudeToolListener,
   setClaudeWorkspaceTools,
   steerClaudeSession,
@@ -39,8 +39,8 @@ import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceToo
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
-import { readToolActivity, type TaskActivityEvent } from "./task-activity.ts";
-import { runWithActivitySink } from "./host-api.ts";
+import { readToolPanels, type PanelUpdate } from "./panels.ts";
+import { runWithPanelSink } from "./host-api.ts";
 
 const log = logger("runner");
 
@@ -120,8 +120,8 @@ export interface TurnEvents {
    *  written under — so a live row can open the same detail view (args, and
    *  the result once it lands) a persisted one does. */
   onToolCall?: (name: string, args: Record<string, unknown>, id: string) => void;
-  /** Plan snapshots and native subagent lifecycle updates. */
-  onTaskActivity?: (event: TaskActivityEvent) => void;
+  /** A producer replaced the panels it shows (see panels.ts). */
+  onPanels?: (update: PanelUpdate) => void;
 }
 
 export interface RetryNotice {
@@ -347,12 +347,12 @@ export class Runner {
     if (running && (await this.steerIntoTurn(threadId, running, request))) return undefined;
     return keyedLane(this.lanes, threadId, async () => {
       try {
-        // Everything the turn reaches runs inside its activity sink: pi's agent
+        // Everything the turn reaches runs inside its panel sink: pi's agent
         // loop, its extension handlers, every tool execution. That is what lets
-        // a workspace extension report progress from outside a tool call
+        // a workspace extension publish panels from outside a tool call
         // (host-api.ts) and still be routed to the right conversation.
-        const result = await runWithActivitySink(
-          (activity) => events.onTaskActivity?.(activity),
+        const result = await runWithPanelSink(
+          (update) => events.onPanels?.(update),
           () => this.runTurn(threadId, request, events),
         );
         // Inside the lane but outside runTurn: a delivery failure must not
@@ -590,7 +590,7 @@ export class Runner {
       }
       events.onToolCall?.(name, args, call.id);
     });
-    setClaudeTaskListener(session.sessionId, (event) => events.onTaskActivity?.(event));
+    setClaudePanelListener(session.sessionId, (update) => events.onPanels?.(update));
     setClaudeProseListener(session.sessionId, (text) => events.onProse?.(text));
     setClaudeEarlyAnswerListener(session.sessionId, (text) => events.onEarlyAnswer?.(text));
     const onProseEvent = followProse(prose, (text) => events.onProse?.(text));
@@ -608,12 +608,11 @@ export class Runner {
         attemptHadToolActivity = true;
         events.onToolCall?.(event.toolName, event.args, event.toolCallId);
       } else if (event.type === "tool_execution_update") {
-        // A long-running tool reporting its own plan/subagents. The payload is
-        // the tool's, not eleven's: readToolActivity validates it and namespaces
-        // its ids, so nothing here knows what the tool actually does.
-        for (const activity of readToolActivity(event.partialResult, event.toolCallId, event.toolName)) {
-          events.onTaskActivity?.(activity);
-        }
+        // A long-running tool publishing its own panels. The payload is the
+        // tool's, not eleven's: readToolPanels validates it, so nothing here
+        // knows what the tool actually does.
+        const update = readToolPanels(event.partialResult, event.toolCallId, event.toolName);
+        if (update) events.onPanels?.(update);
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
         lastStopReason = message.stopReason;
@@ -724,7 +723,7 @@ export class Runner {
       throw error;
     } finally {
       setClaudeToolListener(session.sessionId, undefined);
-      setClaudeTaskListener(session.sessionId, undefined);
+      setClaudePanelListener(session.sessionId, undefined);
       setClaudeProseListener(session.sessionId, undefined);
       setClaudeEarlyAnswerListener(session.sessionId, undefined);
       unsubscribe();
@@ -835,7 +834,7 @@ export class Runner {
     // tool call) — deliver them all at once, not one per boundary.
     session.setSteeringMode("all");
 
-    // Workspace extension tools (workflow, etc.) are Eleven-owned capabilities
+    // Workspace extension tools are Eleven-owned capabilities
     // just like channel tools. Keep Claude builtins native, but expose every
     // Eleven-owned tool through the isolated MCP bridge with its bound executor.
     // Deriving this from the session registry instead would sweep up the pi

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { normalizeActivity, type TaskActivityEvent } from "./task-activity.ts";
+import { readPanels, type PanelUpdate } from "./panels.ts";
 import { logger } from "../log.ts";
 
 const log = logger("host-api");
@@ -9,9 +9,9 @@ const log = logger("host-api");
  *
  * A pi extension can only speak to the outside world from inside a tool's
  * `execute` — that is where `onUpdate` lives, and pi has no host-service channel
- * of its own. So an extension that wants to paint the turn's status UI at any
- * other moment (on `turn_start`, say, to show a plan it carried over from the
- * previous turn) has nowhere to write.
+ * of its own. So an extension that wants to show something at any other moment
+ * (on `turn_start`, say, to draw work it carried over from the previous turn)
+ * has nowhere to write.
  *
  * eleven hands it one, over a `globalThis` handshake. That is the only mechanism
  * available: pi loads workspace extensions itself and decides what context they
@@ -26,38 +26,38 @@ const log = logger("host-api");
  */
 export interface ElevenHost {
   /** Bumped when the shape changes incompatibly. */
-  readonly version: 1;
+  readonly version: 2;
   /**
-   * Report progress for the turn currently running on this call stack.
-   *
-   * `scope` identifies the producer: a snapshot replaces that scope's rows and
-   * nothing else, and ids are namespaced under it. `label` titles the section on
-   * screen. Returns false when there is no turn to report to — under plain pi,
-   * or when called outside one — so a caller can tell "not shown" from "shown".
+   * Replace this producer's panels in the turn currently running on this call
+   * stack (see panels.ts). `scope` identifies the producer: its panels replace
+   * its own and nothing else. Returns false when there is no turn to show them
+   * in — under plain pi, or when called outside one — so a caller can tell
+   * "not shown" from "shown".
    */
-  activity(events: unknown, options?: { scope?: string; label?: string }): boolean;
+  panels(panels: unknown, options?: { scope?: string }): boolean;
 }
 
 /** The sink of the turn on this call stack, if a turn owns it. */
-const turnSink = new AsyncLocalStorage<(event: TaskActivityEvent) => void>();
+const turnSink = new AsyncLocalStorage<(update: PanelUpdate) => void>();
 
 /** Run `operation` as the turn that owns `sink`. Everything the turn reaches —
  *  pi's agent loop, extension handlers, tool executions — is inside it. */
-export function runWithActivitySink<T>(sink: (event: TaskActivityEvent) => void, operation: () => T): T {
+export function runWithPanelSink<T>(sink: (update: PanelUpdate) => void, operation: () => T): T {
   return turnSink.run(sink, operation);
 }
 
 const host: ElevenHost = {
-  version: 1,
-  activity(events, options = {}) {
+  version: 2,
+  panels(panels, options = {}) {
     const sink = turnSink.getStore();
     if (!sink) return false;
-    const scope = options.scope?.trim() || options.label?.trim() || "extension";
+    const update = readPanels(panels, options.scope?.trim() || "extension");
+    if (!update) return false;
     try {
-      for (const event of normalizeActivity(events, scope, options.label?.trim())) sink(event);
+      sink(update);
     } catch (error) {
       // Reporting progress must never be able to fail whatever was reporting it.
-      log.warn(`extension activity report failed: ${error}`);
+      log.warn(`extension panel report failed: ${error}`);
       return false;
     }
     return true;

@@ -9,7 +9,7 @@ import type { Gateway } from "../../gateway.ts";
 import type { PairingStore } from "./pairing.ts";
 import { collectInboundMedia, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
-import { TelegramTaskProgress } from "./task-progress.ts";
+import { TelegramTurnStatus } from "./turn-status.ts";
 import { sendRich } from "./rich.ts";
 import { chatPhoto } from "./avatars.ts";
 import { isNoop, withRetry } from "./retry.ts";
@@ -465,14 +465,14 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       sent,
       (error) => log.warn(`mid-turn flush failed: ${error}`),
     );
-    const taskProgress = new TelegramTaskProgress(bot.api, chatId, {
+    const turnStatus = new TelegramTurnStatus(bot.api, chatId, {
       topic,
       replyParameters: sendOptions.replyParameters,
     });
     // A turn that produces no event at all (a provider stalling on the first
     // request) still owes the chat a sign of life — the typing action expires in
     // five seconds and says nothing about a turn that takes minutes.
-    taskProgress.start();
+    turnStatus.start();
 
     // Whatever owns this conversation: the person in a DM, the group in a group.
     // Both carry topics — a bot with topic mode enabled has them in its DMs too
@@ -535,9 +535,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
             blocks.length = 0;
             current = "";
           },
-          onTaskActivity: (activity) => taskProgress.update(activity),
-          onToolCall: (name, args) => taskProgress.tool(name, summarizeToolArgs(args)),
-          onRetry: (notice) => taskProgress.retry(notice),
+          onPanels: (update) => turnStatus.panels(update),
+          onToolCall: (name, args) => turnStatus.tool(name, summarizeToolArgs(args)),
+          onRetry: (notice) => turnStatus.retry(notice),
         },
         // The final send runs inside the turn's durable window: the pending
         // ledger releases only after this settles, so a daemon death before
@@ -545,7 +545,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         // silently losing the reply. A steered message never gets here — the
         // owning turn's deliver ships the combined result (and clears `sent`).
         deliver: async (result) => {
-          await taskProgress.finish(result.status === "stopped" ? "stopped" : "completed");
+          await turnStatus.finish(result.status === "stopped" ? "stopped" : "completed");
           const final = delivery.remaining(blocks, result.text);
           const duplicate = !!final && sent.has(final);
           sent.clear(); // the turn is over — next one starts clean
@@ -556,7 +556,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       });
     } catch (error) {
       sent.clear();
-      await taskProgress.finish("failed");
+      await turnStatus.finish("failed");
       log.error(`turn failed: ${error}`);
       // The runner stops instead of failing over once an attempt ran tools (a
       // spent quota mid-turn is the common way there) — so when its plan still
@@ -575,7 +575,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         silent: !!autoRetry,
       }).catch(() => {});
     } finally {
-      taskProgress.cancel();
+      turnStatus.cancel();
     }
     // Outside the try: this is a turn of its own, with its own status message
     // and its own failure handling (including, if it comes to it, the next

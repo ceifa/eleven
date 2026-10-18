@@ -327,7 +327,7 @@ export function renderTaskActivity(
   for (const section of plan) {
     if (!section.tasks.length) continue;
     const title = `📋 ${section.label ?? "Plan"}`;
-    sections.push(renderSection(title, section.tasks, MAX_PLAN_ROWS, renderPlanRow, section.tasks.length));
+    sections.push(renderPlanSection(title, section.tasks));
   }
   if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow, agentTotal));
   const text = sections.join("\n\n");
@@ -348,6 +348,18 @@ function renderSection(
   const hidden = total - Math.min(tasks.length, limit);
   if (hidden > 0) visible.push(`… ${hidden} more`);
   return `${title}\n${visible.join("\n")}`;
+}
+
+/** Over the limit, finished rows give way first, oldest first, and are counted
+ *  on one line: cutting the tail instead hid the work still in play behind
+ *  "… N more" while a page of old ✅ stayed on screen. */
+function renderPlanSection(title: string, tasks: readonly TaskActivityItem[]): string {
+  if (tasks.length <= MAX_PLAN_ROWS) return renderSection(title, tasks, MAX_PLAN_ROWS, renderPlanRow, tasks.length);
+  let hide = tasks.length - MAX_PLAN_ROWS + 1;
+  const shown = tasks.filter((task) => task.status !== "completed" || hide-- <= 0);
+  const done = tasks.length - shown.length;
+  if (!done) return renderSection(title, tasks, MAX_PLAN_ROWS, renderPlanRow, tasks.length);
+  return renderSection(`${title}\n✅ ${done} done`, shown, MAX_PLAN_ROWS - 1, renderPlanRow, shown.length);
 }
 
 function renderPlanRow(task: TaskActivityItem): string {

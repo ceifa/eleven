@@ -100,6 +100,25 @@ test("the hidden-row count is how many exist, not how many arrived", () => {
   assert.match(renderTaskActivity([], agents), /… 2 more/);
 });
 
+test("a long plan gives up its finished rows before the ones still in play", () => {
+  // Regression: the section showed its first twelve rows, so in a plan that had
+  // grown over a conversation the running task sat behind "… 8 more" while old
+  // completed rows filled the screen.
+  const tasks = Array.from({ length: 20 }, (_, i) => ({
+    id: String(i + 1),
+    title: `task ${i + 1}`,
+    status: i < 15 ? "completed" as const : i === 15 ? "running" as const : "pending" as const,
+  }));
+  const text = renderTaskActivity([{ tasks }], []);
+  assert.equal(text, [
+    "⚙️ Agent working",
+    "",
+    "📋 Plan",
+    "✅ 9 done",
+    ...tasks.slice(9).map((task) => `${task.status === "completed" ? "✅" : task.status === "running" ? "⏳" : "○"} ${task.title}`),
+  ].join("\n"));
+});
+
 test("a blocker id is shown without the scope it was namespaced with", () => {
   const text = renderTaskActivity(
     [{ label: "workflow", tasks: [{ id: "call-7:p2", title: "dig", status: "pending", blockedBy: ["call-7:p1"] }] }],

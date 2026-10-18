@@ -16,7 +16,7 @@ import {
   runWithClaudeSession,
   setClaudeEarlyAnswerListener,
   setClaudeProseListener,
-  setClaudeTaskListener,
+  setClaudePanelListener,
   steerClaudeSession,
   unregisterClaudeSession,
 } from "../src/agent/claude-code.ts";
@@ -292,7 +292,7 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
   }
 });
 
-test("nothing in the runtime's own task stream reaches the turn's activity", async () => {
+test("nothing in the runtime's own task stream reaches the turn's panels", async () => {
   const piSessionId = "aaaaaaaa-1111-4111-8111-111111111111";
   // Neither half of Claude's task stream is eleven's any more. The plan is the
   // workspace's, through its own tools on every provider; delegation is not a
@@ -316,10 +316,10 @@ test("nothing in the runtime's own task stream reaches the turn's activity", asy
     },
     successfulMessages[1],
   ] as unknown as SDKMessage[];
-  const activities: Array<import("../src/agent/task-activity.ts").TaskActivityEvent> = [];
+  const activities: Array<import("../src/agent/panels.ts").PanelUpdate> = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudeTaskListener(piSessionId, (event) => activities.push(event));
+    setClaudePanelListener(piSessionId, (event) => activities.push(event));
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(taskMessages, () => {}),
       deleteSession: (async () => {}) as never,
@@ -328,8 +328,8 @@ test("nothing in the runtime's own task stream reaches the turn's activity", asy
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
     for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
-    // Not a plan row, not an agent row. The only producers left are the
-    // workspace's own tools, over the host handshake.
+    // No panel. The only producers are the workspace's own extensions and
+    // tools, over the host handshake or a tool's onUpdate.
     assert.deepEqual(activities, []);
   } finally {
     unregisterClaudeSession(piSessionId);
@@ -357,10 +357,10 @@ test("a resume that reports jobs orphaned by an earlier process still answers th
     },
     ...successfulMessages,
   ] as unknown as SDKMessage[];
-  const activities: Array<import("../src/agent/task-activity.ts").TaskActivityEvent> = [];
+  const activities: Array<import("../src/agent/panels.ts").PanelUpdate> = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudeTaskListener(piSessionId, (event) => activities.push(event));
+    setClaudePanelListener(piSessionId, (event) => activities.push(event));
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(messages, () => {}),
       deleteSession: (async () => {}) as never,

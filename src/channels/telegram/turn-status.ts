@@ -1,10 +1,10 @@
 import type { Api } from "grammy";
 import type { ReplyParameters } from "@grammyjs/types";
-import { displayId, TaskActivityBoard, type TaskActivityEvent, type TaskActivityItem, type TaskActivitySection } from "../../agent/task-activity.ts";
+import { PanelBoard, type Panel, type PanelRow, type PanelRowState, type PanelUpdate } from "../../agent/panels.ts";
 import { logger } from "../../log.ts";
 import { isNoop, withRetry } from "./retry.ts";
 
-const log = logger("telegram/tasks");
+const log = logger("telegram/status");
 const FIRST_RENDER_DELAY_MS = 250;
 // A tool-status-only message has no lasting value — hold it back long enough
 // that quick turns never spawn one.
@@ -22,8 +22,7 @@ const ELAPSED_MIN_MS = 10_000;
 // faster earns a 429 that stalls everything else queued for that chat.
 const THROTTLE_MS = 900;
 const GROUP_THROTTLE_MS = 3_000;
-const MAX_PLAN_ROWS = 12;
-const MAX_AGENT_ROWS = 8;
+const MAX_PANEL_ROWS = 12;
 const MAX_TEXT = 4_000;
 
 /** When each group last had its status card written to. A group's flood limit is
@@ -34,7 +33,7 @@ const MAX_TEXT = 4_000;
  * already spaces those out on its own. */
 const lastGroupEditAt = new Map<number, number>();
 
-export type TaskProgressOutcome = "completed" | "failed" | "stopped";
+export type TurnOutcome = "completed" | "failed" | "stopped";
 
 /** Live-turn status for the header line: the last top-level tool the model
  * started, plus how long the turn has been running. */
@@ -50,7 +49,7 @@ export interface RetryStatus {
   errorMessage: string;
 }
 
-export interface TaskProgressOptions {
+export interface TurnStatusOptions {
   topic?: number;
   replyParameters?: ReplyParameters;
   /** Spacing between edits; defaults to what the chat kind tolerates. */
@@ -61,20 +60,17 @@ export interface TaskProgressOptions {
   idleRenderDelayMs?: number;
 }
 
-/** One quiet, editable Telegram message for a turn's plan, subagents, the
- * top-level tool currently running, and provider retries. Plan/agent content and
- * retries are a durable record of the turn; a message that only ever showed tool
- * status is deleted when the turn ends — the reply (or failure notice) that
- * follows supersedes it. */
-export class TelegramTaskProgress {
-  private readonly board = new TaskActivityBoard();
+/** One quiet, editable Telegram message for a turn's panels, the top-level tool
+ * currently running, and provider retries. Panels and retries are a durable
+ * record of the turn; a message that only ever showed tool status is deleted
+ * when the turn ends — the reply (or failure notice) that follows supersedes it. */
+export class TelegramTurnStatus {
+  private readonly board = new PanelBoard();
   /** Tools whose own rows are on screen — their argument preview adds nothing. */
   private readonly reporting = new Set<string>();
   private readonly startedAt = Date.now();
   private currentTool: RunningStatus["tool"];
   private currentRetry: RetryStatus | undefined;
-  /** Plan/agent content appeared — the message is worth keeping after finish. */
-  private hasTasks = false;
   private messageId: number | undefined;
   private timer: NodeJS.Timeout | undefined;
   private ticker: NodeJS.Timeout | undefined;
@@ -82,7 +78,7 @@ export class TelegramTaskProgress {
   private lastText = "";
   private pendingText: string | undefined;
   private draining: Promise<void> | undefined;
-  private outcome: TaskProgressOutcome | undefined;
+  private outcome: TurnOutcome | undefined;
   private dead = false;
   private readonly api: Api;
   private readonly chatId: number;
@@ -92,7 +88,7 @@ export class TelegramTaskProgress {
   private readonly toolRenderDelayMs: number;
   private readonly idleRenderDelayMs: number;
 
-  constructor(api: Api, chatId: number, options: TaskProgressOptions = {}) {
+  constructor(api: Api, chatId: number, options: TurnStatusOptions = {}) {
     this.api = api;
     this.chatId = chatId;
     this.topic = options.topic;
@@ -119,18 +115,15 @@ export class TelegramTaskProgress {
     this.rearm();
   }
 
-  update(event: TaskActivityEvent): void {
+  panels(update: PanelUpdate): void {
     if (this.dead || this.outcome) return;
-    this.board.apply(event);
-    // A seeded plan is context from an earlier turn: it may be drawn, but it
-    // must not be the reason this turn posts a status message at all.
-    this.hasTasks = this.board.changed;
-    // A tool that reports its own phases has just said more than its arguments
-    // ever could — the "🔧 workflow · script: export const meta…" line under a
-    // live phase list is noise.
-    if (event.kind === "plan" && event.label) {
-      this.reporting.add(event.label);
-      if (this.currentTool?.name === event.label) this.currentTool = undefined;
+    this.board.apply(update);
+    // A tool that publishes its own panels has just said more than its
+    // arguments ever could — the "🔧 workflow · script: export const meta…"
+    // line over a live phase list is noise.
+    if (update.tool) {
+      this.reporting.add(update.tool);
+      if (this.currentTool?.name === update.tool) this.currentTool = undefined;
     }
     this.rearm();
   }
@@ -144,7 +137,7 @@ export class TelegramTaskProgress {
     this.rearm();
   }
 
-  async finish(outcome: TaskProgressOutcome): Promise<void> {
+  async finish(outcome: TurnOutcome): Promise<void> {
     if (this.dead || this.outcome) return;
     if (!this.worthKeeping) {
       // Tool-status-only message: the reply (or failure notice) that follows
@@ -153,7 +146,7 @@ export class TelegramTaskProgress {
       this.cancel();
       void Promise.resolve(this.draining).then(() => {
         if (!this.posted) return;
-        return withRetry("idempotent", "delete task progress", () =>
+        return withRetry("idempotent", "delete turn status", () =>
           this.api.raw.deleteMessage({ chat_id: this.chatId, message_id: this.messageId! }),
         );
       }).catch((error) => {
@@ -163,7 +156,7 @@ export class TelegramTaskProgress {
     }
     this.stopTimers();
     this.outcome = outcome;
-    if (outcome !== "completed") this.board.settle(outcome === "failed" ? "failed" : "stopped");
+    if (outcome !== "completed") this.board.settle();
     await this.queueRender();
   }
 
@@ -172,9 +165,9 @@ export class TelegramTaskProgress {
     this.stopTimers();
   }
 
-  /** Plan/agent content and retries outlive the turn; bare tool status does not. */
+  /** Panels and retries outlive the turn; bare tool status does not. */
   private get worthKeeping(): boolean {
-    return this.hasTasks || !!this.currentRetry;
+    return this.board.changed || !!this.currentRetry;
   }
 
   /** The status message exists in the chat. */
@@ -200,7 +193,7 @@ export class TelegramTaskProgress {
 
   private schedule(): void {
     if (this.timer || this.dead || this.outcome) return;
-    const hold = this.hasTasks || this.currentRetry
+    const hold = this.board.changed || this.currentRetry
       ? FIRST_RENDER_DELAY_MS
       : this.currentTool
         ? this.toolRenderDelayMs
@@ -221,15 +214,7 @@ export class TelegramTaskProgress {
     const running = this.outcome
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
-    let text = renderTaskActivity(
-      this.board.sections,
-      this.board.agents,
-      this.outcome,
-      running,
-      this.currentRetry,
-      this.board.agentTotal,
-    );
-    if (!text && this.messageId !== undefined) text = "📋 No active tasks";
+    const text = renderTurnStatus(this.board.panels, this.outcome, running, this.currentRetry);
     if (!text || text === this.lastText || text === this.pendingText || this.dead) return this.draining ?? Promise.resolve();
     this.pendingText = text; // latest wins while Telegram is slow
     if (!this.draining) {
@@ -258,13 +243,13 @@ export class TelegramTaskProgress {
     } catch (error) {
       this.dead = true;
       this.stopTimers();
-      log.warn(`task progress disabled for chat ${this.chatId}: ${error}`);
+      log.warn(`turn status disabled for chat ${this.chatId}: ${error}`);
     }
   }
 
   /** First render: post the message. */
   private async post(text: string): Promise<void> {
-    const message = await withRetry("send", "send task progress", () =>
+    const message = await withRetry("send", "send turn status", () =>
       this.api.raw.sendMessage({
         chat_id: this.chatId,
         message_thread_id: this.topic,
@@ -286,7 +271,7 @@ export class TelegramTaskProgress {
   /** Later renders: edit the message in place. */
   private async repost(text: string): Promise<void> {
     try {
-      await withRetry("idempotent", "edit task progress", () =>
+      await withRetry("idempotent", "edit turn status", () =>
         this.api.raw.editMessageText({ chat_id: this.chatId, message_id: this.messageId!, text }),
       );
     } catch (error) {
@@ -295,14 +280,11 @@ export class TelegramTaskProgress {
   }
 }
 
-export function renderTaskActivity(
-  plan: readonly TaskActivitySection[],
-  agents: readonly TaskActivityItem[],
-  outcome?: TaskProgressOutcome,
+export function renderTurnStatus(
+  panels: readonly Panel[],
+  outcome?: TurnOutcome,
   running?: RunningStatus,
   retry?: RetryStatus,
-  /** Agents that exist, when more of them ran than were reported. */
-  agentTotal = agents.length,
 ): string {
   const elapsed = running && running.elapsedMs >= ELAPSED_MIN_MS ? ` · ${formatDuration(running.elapsedMs)}` : "";
   const header = outcome === "failed"
@@ -319,80 +301,52 @@ export function renderTaskActivity(
   const head = lines.join("\n");
   // A bare running header is the whole point of an event-less turn: it says the
   // message arrived. Only a call with nothing at all to report renders empty.
-  const planRows = plan.reduce((sum, section) => sum + section.tasks.length, 0);
-  if (!planRows && !agents.length) return outcome || running || retry ? head : "";
-  const sections = [head];
-  // The session's plan and a tool's internal phases are different things and
-  // get different headings — merged, a reader cannot tell which is theirs.
-  for (const section of plan) {
-    if (!section.tasks.length) continue;
-    const title = `📋 ${section.label ?? "Plan"}`;
-    sections.push(renderPlanSection(title, section.tasks));
-  }
-  if (agents.length) sections.push(renderSection("🤖 Agents", agents, MAX_AGENT_ROWS, renderAgentRow, agentTotal));
-  const text = sections.join("\n\n");
+  if (!panels.length) return outcome || running || retry ? head : "";
+  const text = [head, ...panels.map(renderPanel)].join("\n\n");
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
-}
-
-/** `total` is how many exist, which is not always how many arrived: a producer
- *  may cap the rows it sends. Counting the rows instead would understate a
- *  40-agent fan-out as "… 2 more". */
-function renderSection(
-  title: string,
-  tasks: readonly TaskActivityItem[],
-  limit: number,
-  row: (task: TaskActivityItem) => string,
-  total: number,
-): string {
-  const visible = tasks.slice(0, limit).map(row);
-  const hidden = total - Math.min(tasks.length, limit);
-  if (hidden > 0) visible.push(`… ${hidden} more`);
-  return `${title}\n${visible.join("\n")}`;
 }
 
 /** Over the limit, finished rows give way first, oldest first, and are counted
  *  on one line: cutting the tail instead hid the work still in play behind
  *  "… N more" while a page of old ✅ stayed on screen. */
-function renderPlanSection(title: string, tasks: readonly TaskActivityItem[]): string {
-  if (tasks.length <= MAX_PLAN_ROWS) return renderSection(title, tasks, MAX_PLAN_ROWS, renderPlanRow, tasks.length);
-  let hide = tasks.length - MAX_PLAN_ROWS + 1;
-  const shown = tasks.filter((task) => task.status !== "completed" || hide-- <= 0);
-  const done = tasks.length - shown.length;
-  if (!done) return renderSection(title, tasks, MAX_PLAN_ROWS, renderPlanRow, tasks.length);
-  return renderSection(`${title}\n✅ ${done} done`, shown, MAX_PLAN_ROWS - 1, renderPlanRow, shown.length);
-}
-
-function renderPlanRow(task: TaskActivityItem): string {
-  const blocked = task.blockedBy?.length ? ` · blocked by ${task.blockedBy.map((id) => `#${displayId(id)}`).join(", ")}` : "";
-  return `${statusIcon(task)} ${compact(task.title)}${blocked}`;
-}
-
-function renderAgentRow(task: TaskActivityItem): string {
-  const details: string[] = [];
-  if (task.status === "running" && task.lastToolName) details.push(task.lastToolName);
-  if (task.usage?.durationMs !== undefined) details.push(formatDuration(task.usage.durationMs));
-  if (task.usage?.totalTokens !== undefined) details.push(formatTokens(task.usage.totalTokens));
-  if (task.status !== "running" && task.summary && normalized(task.summary) !== normalized(task.title)) {
-    details.push(compact(task.summary, 70));
+function renderPanel(panel: Panel): string {
+  const title = panel.icon ? `${panel.icon} ${panel.title}` : panel.title;
+  const more = panel.more ?? 0;
+  if (panel.rows.length > MAX_PANEL_ROWS) {
+    let hide = panel.rows.length - MAX_PANEL_ROWS + 1;
+    const shown = panel.rows.filter((row) => row.state !== "done" || hide-- <= 0);
+    const done = panel.rows.length - shown.length;
+    if (done) return renderRows(`${title}\n✅ ${done} done`, shown, MAX_PANEL_ROWS - 1, more);
   }
-  return `${statusIcon(task)} ${compact(task.title)}${details.length ? ` · ${details.join(" · ")}` : ""}`;
+  return renderRows(title, panel.rows, MAX_PANEL_ROWS, more);
 }
 
-function statusIcon(task: TaskActivityItem): string {
-  if (task.status === "completed") return "✅";
-  if (task.status === "failed") return "❌";
-  if (task.status === "stopped") return "⏹";
-  if (task.status === "running") return "⏳";
-  return task.blockedBy?.length ? "⏸" : "○";
+/** `more` is what the producer left out, on top of what this cap hides: a
+ *  count of the rows that arrived would understate a 40-agent fan-out as
+ *  "… 2 more". */
+function renderRows(title: string, rows: readonly PanelRow[], limit: number, more: number): string {
+  const visible = rows.slice(0, limit).map(renderRow);
+  const hidden = Math.max(0, rows.length - limit) + more;
+  if (hidden > 0) visible.push(`… ${hidden} more`);
+  return `${title}\n${visible.join("\n")}`;
 }
+
+function renderRow(row: PanelRow): string {
+  return `${STATE_ICONS[row.state]} ${compact(row.text)}${row.note ? ` · ${compact(row.note, 90)}` : ""}`;
+}
+
+const STATE_ICONS: Record<PanelRowState, string> = {
+  idle: "○",
+  waiting: "⏸",
+  active: "⏳",
+  done: "✅",
+  failed: "❌",
+  stopped: "⏹",
+};
 
 function compact(value: string, limit = 120): string {
   const text = value.replaceAll(/\s+/g, " ").trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1).trimEnd()}…`;
-}
-
-function normalized(value: string): string {
-  return value.replaceAll(/\s+/g, " ").trim().toLowerCase();
 }
 
 function formatDuration(milliseconds: number): string {
@@ -400,8 +354,4 @@ function formatDuration(milliseconds: number): string {
   const seconds = Math.round(milliseconds / 1_000);
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
-}
-
-function formatTokens(tokens: number): string {
-  return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}k tok` : `${tokens} tok`;
 }

@@ -84,49 +84,41 @@ test("a turn does not inherit the previous turn's live record", async () => {
   assert.deepEqual(seen, [["first", "text"], ["second", "text"]]);
 });
 
-test("the board a mid-turn page reads is folded, and broadcast whole", async () => {
-  // The dashboard must never have to replay events to know what the plan looks
-  // like: the catch-up endpoint and the live broadcast carry the same folded
-  // shape, so a page that connects late and one that watched all along agree.
+test("a mid-turn page reads every producer's panels, broadcast whole", async () => {
+  // The dashboard must never have to replay updates to know what is on screen:
+  // the catch-up endpoint and the live broadcast carry the same shape, so a
+  // page that connects late and one that watched all along agree.
   const gateway = new Gateway(config as never);
-  const broadcasts: Array<{ plan: unknown[]; agents: unknown[]; agentTotal: number }> = [];
-  gateway.on("task-activity", (event: { tasks: { plan: unknown[]; agents: unknown[]; agentTotal: number } }) => broadcasts.push(event.tasks));
+  const broadcasts: unknown[] = [];
+  gateway.on("panels", (event: { panels: unknown }) => broadcasts.push(event.panels));
   let live: ReturnType<GatewayType["liveTurn"]>;
+  const plan = (text: string) => ({ title: "Plan", rows: [{ text, state: "active" as const }] });
 
   stubTurn(gateway, (threadId, hooks, events) => {
     hooks.onTurnStart?.(threadId, undefined);
-    events.onTaskActivity?.({ kind: "plan", tasks: [{ id: "1", title: "scout", status: "running" }] });
-    events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "running", subagentType: "general-purpose" } });
-    // A tool reporting its own phases must not evict the session's plan.
-    events.onTaskActivity?.({ kind: "plan", scope: "call-7", label: "workflow", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] });
-    // An incremental agent update merges rather than replacing the row.
-    events.onTaskActivity?.({ kind: "agent", task: { id: "a1", title: "reader", status: "completed", usage: { totalTokens: 900 } } });
+    events.onPanels?.({ scope: "tasks", panels: [plan("scout")] });
+    // A tool publishing its own panels must not evict the plan.
+    events.onPanels?.({ scope: "call-7", tool: "workflow", panels: [plan("fan out")] });
+    events.onPanels?.({ scope: "tasks", panels: [plan("dig")] });
     live = gateway.liveTurn(threadId);
   });
 
   await send(gateway, "go");
 
-  // Grouped by producer: the session's plan first, then the tool's own phases
-  // under the tool's name — not one merged list.
-  assert.deepEqual(live?.tasks.plan, [
-    { tasks: [{ id: "1", title: "scout", status: "running" }] },
-    { label: "workflow", tasks: [{ id: "call-7:p1", title: "fan out", status: "running" }] },
-  ]);
-  assert.deepEqual(live?.tasks.agents, [
-    { id: "a1", title: "reader", status: "completed", subagentType: "general-purpose", usage: { totalTokens: 900 } },
-  ]);
-  // One broadcast per change, each carrying the whole board — the last one is
+  // In the order producers first reported, each replaced only by itself.
+  assert.deepEqual(live?.panels, [plan("dig"), plan("fan out")]);
+  // One broadcast per update, each carrying everything — the last one is
   // exactly what the catch-up endpoint would serve.
-  assert.equal(broadcasts.length, 4);
-  assert.deepEqual(broadcasts.at(-1), { plan: live?.tasks.plan, agents: live?.tasks.agents, agentTotal: 1 });
+  assert.equal(broadcasts.length, 3);
+  assert.deepEqual(broadcasts.at(-1), live?.panels);
 });
 
-test("a turn that ends takes its board with it", async () => {
-  // The board belongs to the running turn; the next one starts from nothing.
+test("a turn that ends takes its panels with it", async () => {
+  // Panels belong to the running turn; the next one starts from nothing.
   const gateway = new Gateway(config as never);
   stubTurn(gateway, (threadId, hooks, events) => {
     hooks.onTurnStart?.(threadId, undefined);
-    events.onTaskActivity?.({ kind: "plan", tasks: [{ id: "1", title: "scout", status: "running" }] });
+    events.onPanels?.({ scope: "tasks", panels: [{ title: "Plan", rows: [{ text: "scout", state: "active" }] }] });
     hooks.onTurnEnd?.(threadId);
   });
   await send(gateway, "go");

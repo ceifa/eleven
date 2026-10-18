@@ -847,11 +847,11 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
 }
 
-/* The turn's plan and its subagents. A board, not a chat row: it is scanned,
+/* The panels a turn's producers publish. A board, not a chat row: it is scanned,
    so status is encoded in the icon's shape and color before anyone reads a
-   word of the title. Deliberately quieter than the transcript — it is
+   word of the text. Deliberately quieter than the transcript — it is
    scaffolding around the conversation, not part of it. */
-.task-board:not(:empty) {
+.panel-board:not(:empty) {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
@@ -862,30 +862,30 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   border: 1px solid var(--color-base-300);
   background: color-mix(in oklab, var(--color-base-content) 3%, transparent);
 }
-.task-section { display: flex; flex-direction: column; gap: 0.1rem; }
-.task-section-title {
+.panel-section { display: flex; flex-direction: column; gap: 0.1rem; }
+.panel-section-title {
   font-family: var(--font-mono); font-size: 0.65rem;
   letter-spacing: 0.12em; text-transform: uppercase;
   color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
   margin-bottom: 0.15rem;
 }
-.task-row {
+.panel-row {
   display: flex; gap: 0.5rem; align-items: baseline;
   padding: 0.1rem 0.3rem 0.1rem 0;
   border-radius: var(--radius-field);
   font-size: 0.78rem; line-height: 1.6;
   color: color-mix(in oklab, var(--color-base-content) 72%, transparent);
 }
-.task-row.is-clickable { cursor: pointer; }
-.task-row.is-clickable:hover { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
-.task-icon { flex: 0 0 auto; width: 1ch; font-family: var(--font-mono); opacity: 0.75; }
+.panel-row.is-clickable { cursor: pointer; }
+.panel-row.is-clickable:hover { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
+.panel-icon { flex: 0 0 auto; width: 1ch; font-family: var(--font-mono); opacity: 0.75; }
 /* Semantic, and separate from the warning accent the tool rows use. */
-.task-row.is-running .task-icon { color: var(--color-warning); opacity: 1; }
-.task-row.is-completed .task-icon { color: var(--color-success); }
-.task-row.is-failed .task-icon { color: var(--color-error); }
-.task-row.is-completed .task-title { text-decoration: line-through; opacity: 0.6; }
-.task-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-meta {
+.panel-row.is-active .panel-icon { color: var(--color-warning); opacity: 1; }
+.panel-row.is-done .panel-icon { color: var(--color-success); }
+.panel-row.is-failed .panel-icon { color: var(--color-error); }
+.panel-row.is-done .panel-text { text-decoration: line-through; opacity: 0.6; }
+.panel-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-note {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); font-size: 0.7rem;
@@ -893,31 +893,21 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
 }
 /* Rows a producer capped away. It says how many exist, so this is a real count
    and not "everything past the fold". */
-.task-more { padding-left: 1.5ch; font-style: italic; opacity: 0.55; }
-.task-open { flex: 0 0 auto; opacity: 0; transition: opacity 0.15s; }
-.task-row.is-clickable:hover .task-open { opacity: 0.7; }
+.panel-more { padding-left: 1.5ch; font-style: italic; opacity: 0.55; }
+.panel-open { flex: 0 0 auto; opacity: 0; transition: opacity 0.15s; }
+.panel-row.is-clickable:hover .panel-open { opacity: 0.7; }
 
-/* One subagent, opened. Label/value pairs because that is what it is: a small
-   fixed set of facts the runtime reported, not a document. */
-.agent-detail { display: flex; flex-direction: column; gap: 0.3rem; }
-.agent-detail-row { display: flex; gap: 1rem; align-items: baseline; font-size: 0.8rem; }
-.agent-detail-label {
+/* One row, opened. Label/value pairs because that is what it is: a small fixed
+   set of facts its producer reported, not a document. */
+.row-detail { display: flex; flex-direction: column; gap: 0.3rem; }
+.row-detail-row { display: flex; gap: 1rem; align-items: baseline; font-size: 0.8rem; }
+.row-detail-label {
   flex: 0 0 6.5rem;
   font-family: var(--font-mono); font-size: 0.7rem;
   letter-spacing: 0.06em; text-transform: uppercase;
   color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
 }
-.agent-detail-value { min-width: 0; word-break: break-word; }
-.agent-detail-summary {
-  margin: 0.6rem 0 0; padding-top: 0.6rem;
-  border-top: 1px solid var(--color-base-300);
-  font-size: 0.85rem; line-height: 1.55;
-}
-.agent-detail-note {
-  margin: 0.8rem 0 0;
-  font-size: 0.72rem; line-height: 1.5;
-  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
-}
+.row-detail-value { min-width: 0; word-break: break-word; }
 
 /* What the running turn is doing, at the foot of the transcript. It stays for
    the whole turn rather than only until the first token: the gap before the
@@ -1985,7 +1975,7 @@ video.msg-media { max-width: 22rem; }
   .thread-head { padding: 0.55rem 0.6rem; gap: 0.4rem; }
   .thread-head-title { font-size: 1.05rem; }
   .messages { padding: 0.9rem 0.75rem 0.5rem; }
-  .chat-bubble, .tool-calls, .task-board:not(:empty) { max-width: 90%; }
+  .chat-bubble, .tool-calls, .panel-board:not(:empty) { max-width: 90%; }
   .composer { padding: 0.5rem 0.6rem 0.7rem; }
   .composer-hint { display: none; } /* no keyboard to explain */
   .composer-send, .composer-stop, .composer-icon { width: 2.3rem; height: 2.3rem; }
@@ -2395,7 +2385,7 @@ video.msg-media { max-width: 22rem; }
     border-left: 2px solid color-mix(in oklab, var(--color-warning) 35%, transparent);
   }
   .tool-call { padding-block: 0.3rem; }
-  .task-board:not(:empty) { max-width: 100%; }
+  .panel-board:not(:empty) { max-width: 100%; }
   .live-status { padding: 0.5rem 0; font-size: 0.85rem; }
   /* The day a scrolled-back reader is in stays pinned under the head, as a
      pill — the way a messenger answers "when was this?" without a scroll back
@@ -2578,7 +2568,7 @@ video.msg-media { max-width: 22rem; }
   .toolbar-icon:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
   .tool-call.is-clickable:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 52%, transparent); }
   .tool-calls-summary:hover { color: color-mix(in oklab, var(--color-base-content) 42%, transparent); }
-  .task-row.is-clickable:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 72%, transparent); }
+  .panel-row.is-clickable:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 72%, transparent); }
   .menu-item:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 85%, transparent); }
   .menu-item.is-danger:hover { background: none; color: var(--color-error); }
   .older-toggle:hover { background: none; color: color-mix(in oklab, var(--color-base-content) 52%, transparent); }

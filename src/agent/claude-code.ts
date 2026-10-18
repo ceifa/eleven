@@ -35,7 +35,7 @@ import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.t
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
-import { readToolActivity, type TaskActivityEvent } from "./task-activity.ts";
+import { readToolPanels, type PanelUpdate } from "./panels.ts";
 
 const log = logger("claude-code");
 
@@ -132,7 +132,7 @@ export interface ClaudeSessionRegistration {
 
 interface RegisteredSession extends ClaudeSessionRegistration {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
-  onTaskActivity?: (event: TaskActivityEvent) => void;
+  onPanels?: (update: PanelUpdate) => void;
   onProse?: (text: string) => void;
   /** An answer settled while human input the child took mid-turn is still
    * waiting for its own — it answers what was asked first, and holding it until
@@ -306,12 +306,12 @@ export function steerClaudeSession(sessionId: string, text: string, images?: Ima
   return true;
 }
 
-export function setClaudeTaskListener(
+export function setClaudePanelListener(
   sessionId: string,
-  listener: ((event: TaskActivityEvent) => void) | undefined,
+  listener: ((update: PanelUpdate) => void) | undefined,
 ): void {
   const session = sessions.get(sessionId);
-  if (session) session.onTaskActivity = listener;
+  if (session) session.onPanels = listener;
 }
 
 /**
@@ -600,8 +600,9 @@ async function consumeClaudeQuery(
 
     const activeCustomNames = new Set(toolNames);
     const customTools = isolated ? [] : registration.customTools.filter((tool) => activeCustomNames.has(tool.name));
-    // Standalone calls are either Pi compaction (no tools) or workflow
-    // subagents (read-only Pi tools). They share the owner's cwd through
+    // Standalone calls are either Pi compaction (no tools) or sessions an
+    // extension spawned inside a tool call, which get the native read tools
+    // when they declared pi's. They share the owner's cwd through
     // AsyncLocalStorage but never its side-effectful MCP tools or session state.
     const nativeTools = isolated
       ? nativeToolsForNestedContext(toolNames)
@@ -869,16 +870,17 @@ function buildMcpServer(
           const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
           // Pi's tool loop turns onUpdate into tool_execution_update; MCP has no
           // such loop, so eleven is the one holding the callback here. Same
-          // contract either way: the tool reports activity, this forwards it.
+          // contract either way: the tool publishes panels, this forwards them.
           const scope = request.requestId ?? `${tool.name}-${randomUUID()}`;
           const onUpdate = (partial: unknown) => {
-            const listener = sessions.get(ownerSessionId)?.onTaskActivity;
+            const listener = sessions.get(ownerSessionId)?.onPanels;
             if (!listener) return;
-            for (const activity of readToolActivity(partial, scope, tool.name)) listener(activity);
+            const update = readToolPanels(partial, scope, tool.name);
+            if (update) listener(update);
           };
           // MCP callbacks cross the SDK transport boundary. Re-enter the owner
           // explicitly so extension tools that spawn nested AgentSessions
-          // (workflow) inherit Claude's cwd/provider bridge.
+          // inherit Claude's cwd/provider bridge.
           const result = await activeOwner.run(ownerSessionId, () =>
             tool.execute(request.requestId ?? randomUUID(), prepared, request.signal, onUpdate),
           );

@@ -4,7 +4,7 @@ import { InputFile } from "grammy";
 import { createSeenMessages, createTurnDelivery, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry, userTopicEntry } from "../src/channels/telegram/bot.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
-import { renderTaskActivity, TelegramTaskProgress } from "../src/channels/telegram/task-progress.ts";
+import { renderTurnStatus, TelegramTurnStatus } from "../src/channels/telegram/turn-status.ts";
 
 test("Telegram command sync removes stale group-scoped commands", async () => {
   const calls: Array<{ method: string; value: unknown }> = [];
@@ -39,20 +39,28 @@ test("Telegram command sync removes stale group-scoped commands", async () => {
   ]);
 });
 
-test("Telegram task progress renders plan and agent lifecycle compactly", () => {
-  const text = renderTaskActivity(
-    [{
-      tasks: [
-        { id: "1", title: "Inspect adapter", status: "completed" },
-        { id: "2", title: "Wire Telegram", status: "running" },
-        { id: "3", title: "Tests", status: "pending", blockedBy: ["2"] },
+test("Telegram draws each panel under its own title, a row's state as its icon", () => {
+  const text = renderTurnStatus([
+    {
+      title: "Plan",
+      icon: "📋",
+      rows: [
+        { text: "Inspect adapter", state: "done" },
+        { text: "Wire Telegram", state: "active" },
+        { text: "Tests", state: "waiting", note: "blocked by #2" },
+        { text: "Docs", state: "idle" },
       ],
-    }],
-    [
-      { id: "a", title: "Review reuse", status: "completed", summary: "Found one duplicate", usage: { durationMs: 7200 } },
-      { id: "b", title: "Check efficiency", status: "running", lastToolName: "Grep", usage: { totalTokens: 1400 } },
-    ],
-  );
+    },
+    {
+      title: "Agents",
+      icon: "🤖",
+      rows: [
+        { text: "Review reuse", state: "failed", note: "timed out" },
+        { text: "Check efficiency", state: "stopped" },
+      ],
+    },
+    { title: "workflow", rows: [{ text: "scout", state: "active" }] },
+  ]);
   assert.equal(text, [
     "⚙️ Agent working",
     "",
@@ -60,71 +68,41 @@ test("Telegram task progress renders plan and agent lifecycle compactly", () => 
     "✅ Inspect adapter",
     "⏳ Wire Telegram",
     "⏸ Tests · blocked by #2",
+    "○ Docs",
     "",
     "🤖 Agents",
-    "✅ Review reuse · 7s · Found one duplicate",
-    "⏳ Check efficiency · Grep · 1.4k tok",
-  ].join("\n"));
-});
-
-test("a producer's rows are their own section, under its own name", () => {
-  // Regression: scope existed for correctness (one snapshot must not evict
-  // another) but was ignored when rendering, so a workflow's internal phases
-  // sat in the user's plan as if they were tasks the user asked for.
-  const text = renderTaskActivity(
-    [
-      { tasks: [{ id: "1", title: "Ship it", status: "running" }] },
-      { label: "workflow", tasks: [{ id: "w:phase-0", title: "scout", status: "completed" }] },
-    ],
-    [],
-  );
-  assert.equal(text, [
-    "⚙️ Agent working",
+    "❌ Review reuse · timed out",
+    "⏹ Check efficiency",
     "",
-    "📋 Plan",
-    "⏳ Ship it",
-    "",
-    "📋 workflow",
-    "✅ scout",
+    "workflow",
+    "⏳ scout",
   ].join("\n"));
 });
 
 test("the hidden-row count is how many exist, not how many arrived", () => {
-  // Regression: a fan-out caps the rows it sends (10), the section shows 8, and
-  // the count was computed from what arrived — so 40 agents rendered as
-  // "… 2 more". The producer reports its real total; that is what counts.
-  const agents = Array.from({ length: 10 }, (_, i) => ({ id: `a${i}`, title: `agent ${i}`, status: "completed" as const }));
-  const text = renderTaskActivity([], agents, undefined, undefined, undefined, 40);
-  assert.match(text, /… 32 more/);
-  // Without a reported total it still degrades to counting the rows it has.
-  assert.match(renderTaskActivity([], agents), /… 2 more/);
+  // Regression: a fan-out caps the rows it sends, and the count was computed
+  // from what arrived — so 40 agents rendered as "… 2 more". The producer says
+  // how many it left out; that is what counts.
+  const rows = Array.from({ length: 10 }, (_, i) => ({ text: `agent ${i}`, state: "done" as const }));
+  assert.match(renderTurnStatus([{ title: "Agents", rows, more: 30 }]), /… 30 more$/);
 });
 
-test("a long plan gives up its finished rows before the ones still in play", () => {
+test("a long panel gives up its finished rows before the ones still in play", () => {
   // Regression: the section showed its first twelve rows, so in a plan that had
   // grown over a conversation the running task sat behind "… 8 more" while old
   // completed rows filled the screen.
-  const tasks = Array.from({ length: 20 }, (_, i) => ({
-    id: String(i + 1),
-    title: `task ${i + 1}`,
-    status: i < 15 ? "completed" as const : i === 15 ? "running" as const : "pending" as const,
+  const rows = Array.from({ length: 20 }, (_, i) => ({
+    text: `task ${i + 1}`,
+    state: i < 15 ? "done" as const : i === 15 ? "active" as const : "idle" as const,
   }));
-  const text = renderTaskActivity([{ tasks }], []);
+  const text = renderTurnStatus([{ title: "Plan", icon: "📋", rows }]);
   assert.equal(text, [
     "⚙️ Agent working",
     "",
     "📋 Plan",
     "✅ 9 done",
-    ...tasks.slice(9).map((task) => `${task.status === "completed" ? "✅" : task.status === "running" ? "⏳" : "○"} ${task.title}`),
+    ...rows.slice(9).map((row) => `${row.state === "done" ? "✅" : row.state === "active" ? "⏳" : "○"} ${row.text}`),
   ].join("\n"));
-});
-
-test("a blocker id is shown without the scope it was namespaced with", () => {
-  const text = renderTaskActivity(
-    [{ label: "workflow", tasks: [{ id: "call-7:p2", title: "dig", status: "pending", blockedBy: ["call-7:p1"] }] }],
-    [],
-  );
-  assert.match(text, /blocked by #p1$/m);
 });
 
 /** Fake bot API recording every raw call; messages are created with id 77. */
@@ -151,10 +129,10 @@ function fakeApi() {
 
 test("Telegram task progress sends once then edits the same quiet message", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, -100, { topic: 42, replyParameters: { message_id: 9 }, throttleMs: 200 });
-  progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
+  const progress = new TelegramTurnStatus(api, -100, { topic: 42, replyParameters: { message_id: 9 }, throttleMs: 200 });
+  progress.panels({ scope: "s", panels: [{ title: "Agents", rows: [{ text: "Review", state: "active" }] }] });
   await new Promise((resolve) => setTimeout(resolve, 300));
-  progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "completed" } });
+  progress.panels({ scope: "s", panels: [{ title: "Agents", rows: [{ text: "Review", state: "done" }] }] });
   await progress.finish("completed");
   progress.cancel();
 
@@ -165,36 +143,36 @@ test("Telegram task progress sends once then edits the same quiet message", asyn
   assert.match(String(calls[1]?.payload.text), /✅ Turn completed/);
 });
 
-test("Telegram task progress terminalizes running agents when stopped", async () => {
+test("a turn that ends without finishing leaves no row spinning", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 1);
-  progress.update({ kind: "agent", task: { id: "a", title: "Long review", status: "running" } });
+  const progress = new TelegramTurnStatus(api, 1);
+  progress.panels({ scope: "s", panels: [{ title: "Agents", rows: [{ text: "Long review", state: "active" }] }] });
   await progress.finish("stopped");
   progress.cancel();
 
   assert.deepEqual(calls.map((call) => call.method), ["send"]);
   assert.match(String(calls[0]?.payload.text), /⏹ Turn stopped/);
   assert.match(String(calls[0]?.payload.text), /⏹ Long review/);
-  assert.equal(renderTaskActivity([], [], "completed"), "✅ Turn completed");
+  assert.equal(renderTurnStatus([], "completed"), "✅ Turn completed");
 });
 
 test("running header shows the current top-level tool and elapsed time", () => {
   assert.equal(
-    renderTaskActivity([], [], undefined, { tool: { name: "Bash", summary: "npm test" }, elapsedMs: 65_000 }),
+    renderTurnStatus([], undefined, { tool: { name: "Bash", summary: "npm test" }, elapsedMs: 65_000 }),
     "⚙️ Agent working · 1m05s\n🔧 Bash · npm test",
   );
   // Elapsed time stays quiet while the turn still feels instant.
   assert.equal(
-    renderTaskActivity([], [], undefined, { tool: { name: "Read" }, elapsedMs: 400 }),
+    renderTurnStatus([], undefined, { tool: { name: "Read" }, elapsedMs: 400 }),
     "⚙️ Agent working\n🔧 Read",
   );
   // Finished renders never carry the live tool line.
-  assert.equal(renderTaskActivity([], [], "completed", undefined), "✅ Turn completed");
+  assert.equal(renderTurnStatus([], "completed", undefined), "✅ Turn completed");
 });
 
 test("quick tool-only turns never post a status message", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 1);
+  const progress = new TelegramTurnStatus(api, 1);
   progress.tool("Bash", "npm test");
   // finish() lands before the tool-only render hold-off expires.
   await progress.finish("completed");
@@ -206,7 +184,7 @@ test("quick tool-only turns never post a status message", async () => {
 
 test("a tool-status-only message is deleted when the turn ends", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 7, { toolRenderDelayMs: 30 });
+  const progress = new TelegramTurnStatus(api, 7, { toolRenderDelayMs: 30 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
   await progress.finish("completed");
@@ -221,7 +199,7 @@ test("a tool-status-only message is deleted when the turn ends", async () => {
 
 test("a turn that produces no event at all still reports that it is working", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 5, { idleRenderDelayMs: 30 });
+  const progress = new TelegramTurnStatus(api, 5, { idleRenderDelayMs: 30 });
   progress.start();
   await new Promise((resolve) => setTimeout(resolve, 150));
 
@@ -237,7 +215,7 @@ test("a turn that produces no event at all still reports that it is working", as
 
 test("a provider retry is announced live and kept after the turn", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 5);
+  const progress = new TelegramTurnStatus(api, 5);
   progress.retry({ attempt: 1, maxAttempts: 3, errorMessage: "API Error: 529 Overloaded" });
   await new Promise((resolve) => setTimeout(resolve, 300));
   await progress.finish("completed");
@@ -251,10 +229,10 @@ test("a provider retry is announced live and kept after the turn", async () => {
 
 test("in a group the status is one message, sent once and edited in place", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, -101, { toolRenderDelayMs: 30, throttleMs: 200 });
+  const progress = new TelegramTurnStatus(api, -101, { toolRenderDelayMs: 30, throttleMs: 200 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
-  progress.update({ kind: "agent", task: { id: "a", title: "Review", status: "running" } });
+  progress.panels({ scope: "s", panels: [{ title: "Agents", rows: [{ text: "Review", state: "active" }] }] });
   await new Promise((resolve) => setTimeout(resolve, 950));
   await progress.finish("completed");
   progress.cancel();
@@ -270,12 +248,12 @@ test("two turns in one chat share a single edit budget", async () => {
   // ended up with the status disabled for that chat entirely.
   const { calls, api } = fakeApi();
   const options = { toolRenderDelayMs: 0, throttleMs: 300 };
-  const first = new TelegramTaskProgress(api, -102, options);
-  const second = new TelegramTaskProgress(api, -102, options);
+  const first = new TelegramTurnStatus(api, -102, options);
+  const second = new TelegramTurnStatus(api, -102, options);
   const at: number[] = [];
   const started = Date.now();
-  first.update({ kind: "plan", tasks: [{ id: "1", title: "Ship it", status: "running" }] });
-  second.update({ kind: "plan", tasks: [{ id: "2", title: "Ship it too", status: "running" }] });
+  first.panels({ scope: "s", panels: [{ title: "Plan", rows: [{ text: "Ship it", state: "active" }] }] });
+  second.panels({ scope: "s", panels: [{ title: "Plan", rows: [{ text: "Ship it too", state: "active" }] }] });
   for (let i = 0; i < 200 && calls.length < 2; i++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
     while (calls.length > at.length) at.push(Date.now() - started);
@@ -289,14 +267,14 @@ test("two turns in one chat share a single edit budget", async () => {
 
 test("an infinite hold-off keeps tool status off the chat until real tasks appear", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTaskProgress(api, 1, { toolRenderDelayMs: Infinity, idleRenderDelayMs: Infinity });
+  const progress = new TelegramTurnStatus(api, 1, { toolRenderDelayMs: Infinity, idleRenderDelayMs: Infinity });
   progress.start();
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.deepEqual(calls, []);
 
   // Plan content is a record of the turn, not scaffolding — it still posts.
-  progress.update({ kind: "plan", tasks: [{ id: "1", title: "Ship it", status: "running" }] });
+  progress.panels({ scope: "s", panels: [{ title: "Plan", rows: [{ text: "Ship it", state: "active" }] }] });
   await new Promise((resolve) => setTimeout(resolve, 300));
   progress.cancel();
   assert.deepEqual(calls.map((call) => call.method), ["send"]);
@@ -307,7 +285,7 @@ test("a DM gets the same status a group does", async () => {
   const { calls, api } = fakeApi();
   // A private chat (positive id) is where the status used to be suppressed in
   // favour of a draft preview.
-  const progress = new TelegramTaskProgress(api, 4242, { toolRenderDelayMs: 30 });
+  const progress = new TelegramTurnStatus(api, 4242, { toolRenderDelayMs: 30 });
   progress.tool("Bash", "npm test");
   await new Promise((resolve) => setTimeout(resolve, 150));
   await progress.finish("completed");

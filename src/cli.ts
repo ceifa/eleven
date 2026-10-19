@@ -49,7 +49,7 @@ usage:
   eleven workspaces [name] [--json]    list workspaces or show resolved detail
   eleven threads [filters]             list current threads
   eleven threads <id> [--json]         show thread detail (unique prefix accepted)
-  eleven threads invoke --workspace <name> [--detach] [--json] <message>
+  eleven threads invoke --workspace <name> [--timeout <seconds>] [--detach] [--json] <message>
   eleven threads send <id> [--json] <message>
 
 thread filters:
@@ -59,6 +59,8 @@ thread filters:
 flags:
   --foreground             with start/restart: run in this terminal even if the
                            background service is installed
-  --json                   machine-readable output on inspection/client commands`);
+  --json                   machine-readable output on inspection/client commands
+  --timeout <seconds>      with threads invoke: wait up to this many seconds
+                           (positive integer, default 1800); does not cancel the turn`);
     if (command) process.exitCode = 1;
 }

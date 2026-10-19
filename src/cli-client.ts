@@ -87,12 +87,14 @@ export async function runClientCommand(command: string | undefined, inputArgs: s
   if (action === "invoke") {
     args.shift();
     let workspace: string | undefined;
+    let timeoutMs = 30 * 60_000;
     let detach = false;
     let json = false;
     while (args[0]?.startsWith("--")) {
       const option = args.shift();
       if (option === "--") break;
       if (option === "--workspace") workspace = requiredValue(args, option);
+      else if (option === "--timeout") timeoutMs = parsePositiveInteger(requiredValue(args, option), "timeout") * 1000;
       else if (option === "--detach") detach = true;
       else if (option === "--json") json = true;
       else throw new Error(`unknown option ${option}`);
@@ -108,7 +110,7 @@ export async function runClientCommand(command: string | undefined, inputArgs: s
       console.log(`invoked thread ${thread.id.slice(0, 8)} · ${workspace} · detached`);
       return true;
     }
-    const run = await waitForRun(thread.id, 30 * 60_000);
+    const run = await waitForRun(thread.id, timeoutMs);
     if (run.status === "error") throw new Error(`${run.error || "turn failed"} (thread ${thread.id.slice(0, 8)})`);
     const response = { thread, result: run.result };
     if (json) return printJson(response);

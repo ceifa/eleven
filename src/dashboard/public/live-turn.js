@@ -51,6 +51,21 @@ export function shownLive(live, item, at, startedAt) {
   return live.some((entry) => entry.kind === "message" && sameMessage(entry, item, MATCH_CHARS));
 }
 
+/* ---------- buttons a dashboard turn offers ---------- */
+
+/** A call of the dashboard's channel tool is a message to draw, not work to list. */
+export const isButtonsCall = (call) => call.name === "dashboard" && Array.isArray(call.args?.buttons);
+
+const PRESS_MARK = "[inline button pressed]";
+
+/** What a press sends the agent — the same prompt a Telegram press makes. */
+export const pressPrompt = (data) => `${PRESS_MARK}\n${data}`;
+
+/** The data of the button a reply pressed, or undefined if it was typed. */
+export function pressedData(reply) {
+  return reply?.startsWith(`${PRESS_MARK}\n`) ? reply.slice(PRESS_MARK.length + 1) : undefined;
+}
+
 /* ---------- the panels a turn's producers publish ---------- */
 
 const STATE_ICONS = { idle: "○", waiting: "⏸", active: "◐", done: "✓", failed: "✕", stopped: "◼" };
@@ -91,7 +106,19 @@ export function transcriptRows({ timeline, requests = [], live = [], liveStarted
     } else if (item.kind === "error") {
       rows.push({ kind: "error", at, tie: 0, text: item.text });
     } else {
-      const calls = item.calls.filter((call) => !liveIds.has(call.id));
+      // A buttons call splits the block it sits in, so it lands between the
+      // calls made before and after it.
+      let calls = [];
+      for (const call of item.calls) {
+        if (liveIds.has(call.id)) continue;
+        if (!isButtonsCall(call)) {
+          calls.push(call);
+          continue;
+        }
+        if (calls.length) rows.push({ kind: "tool-calls", at, tie: 0, calls });
+        rows.push({ kind: "buttons", at, tie: 0, call });
+        calls = [];
+      }
       if (calls.length) rows.push({ kind: "tool-calls", at, tie: 0, calls });
     }
   }
@@ -130,6 +157,14 @@ export function transcriptRows({ timeline, requests = [], live = [], liveStarted
     out.push({ ...row, grouped: row.message.role === lastRole && row.at - lastAt < GROUP_WINDOW_MS });
     lastRole = row.message.role;
     lastAt = row.at;
+  }
+  // Buttons are spent once the person has said anything after them, pressed or
+  // typed — the running turn's messages all come later than the transcript.
+  let reply = live.find((item) => item.kind === "message" && item.role === "user")?.text;
+  for (let i = out.length - 1; i >= 0; i--) {
+    const row = out[i];
+    if (row.kind === "message" && row.message.role === "user") reply = row.message.text;
+    else if (row.kind === "buttons") row.reply = reply;
   }
   return out;
 }

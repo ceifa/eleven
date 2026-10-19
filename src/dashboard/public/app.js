@@ -1,7 +1,7 @@
 /* eleven dashboard — vanilla SPA, hand-written CSS, no build step. */
 
 import { syncChildren } from "./dom.js";
-import { elapsed, liveStatus, MATCH_CHARS, startOfDay, stateIcon, transcriptRows } from "./live-turn.js";
+import { elapsed, isButtonsCall, liveStatus, MATCH_CHARS, pressedData, pressPrompt, startOfDay, stateIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { browserBack, navDrag } from "./nav-drag.js";
 import { openLightbox } from "./lightbox.js";
@@ -1184,6 +1184,56 @@ function messageBubble(message, { streaming = false, grouped = false, at } = {})
   );
 }
 
+/* A press is kept here until the transcript holds the reply that settles it:
+   the block is rebuilt on every reconcile and must not come back clickable. */
+const pressedButtons = new Map(); // call id → data
+
+/** The agent's message with buttons under it, as Telegram draws an inline
+ *  keyboard. `reply` is what the person said next, if anything — once there is
+ *  one the buttons are spent, and the one it pressed keeps a tick. */
+function buttonsMessage(call, reply) {
+  const pressed = pressedData(reply) ?? pressedButtons.get(call.id);
+  const spent = reply !== undefined || pressedButtons.has(call.id);
+  const { text, buttons } = call.args;
+  const node = h("div", { class: "chat chat-start" },
+    text ? h("div", { class: "chat-bubble" }, h("div", { class: "msg-body", html: md(text) })) : null,
+    h("div", { class: "msg-buttons" }, buttons.map((row) =>
+      h("div", { class: "msg-buttons-row" }, row.map((button) => {
+        if (button.url) return h("a", { class: "btn btn-sm", href: button.url, target: "_blank", rel: "noopener" }, button.label);
+        const data = button.data ?? button.label;
+        const taken = pressed === data;
+        return h("button", {
+          class: `btn btn-sm${taken ? " is-pressed" : ""}`,
+          type: "button",
+          disabled: spent,
+          onclick: () => pressButton(call, data, node),
+        }, taken ? `✓ ${button.label}` : button.label);
+      })),
+    )),
+  );
+  return node;
+}
+
+/** A press is a message from the person, sent the way the composer sends one. */
+async function pressButton(call, data, node) {
+  const threadId = state.activeThread.id;
+  const text = pressPrompt(data);
+  pressedButtons.set(call.id, data);
+  const spent = buttonsMessage(call);
+  node.replaceWith(spent);
+  const bubble = showOutgoing({ role: "user", text });
+  scrollToBottom();
+  try {
+    const delivered = await api.send("POST", `/threads/${threadId}/message`, { text });
+    bubble.set(delivered.message ?? text);
+  } catch (error) {
+    toast(error.message, true);
+    bubble.drop();
+    pressedButtons.delete(call.id);
+    spent.replaceWith(buttonsMessage(call));
+  }
+}
+
 /* The transcript is three stacked regions inside one scroller:
    #transcript  — the durable rows, rebuilt only when the session file is read
    #pending     — messages that exist but aren't persisted yet
@@ -1218,6 +1268,7 @@ const durableRows = () =>
 function transcriptNode(row) {
   if (row.kind === "day") return daySeparator(row.at);
   if (row.kind === "tool-calls") return toolCallsBlock(row.calls);
+  if (row.kind === "buttons") return buttonsMessage(row.call, row.reply);
   if (row.kind === "error") return turnErrorRow(row.text);
   if (row.kind === "request") return requestChip(row.request);
   return messageBubble(row.message, { grouped: row.grouped, at: row.at });
@@ -1249,7 +1300,7 @@ function renderLive(rebuild = false) {
       const previous = region.lastElementChild;
       // Consecutive calls join one block — the same merged shape the transcript
       // renders after a reload.
-      if (item.kind === "tool" && previous?.classList.contains("tool-calls")) {
+      if (item.kind === "tool" && !isButtonsCall(item) && previous?.classList.contains("tool-calls")) {
         previous.querySelector(".tool-calls-list").append(toolCallRow(item));
         summarizeToolCalls(previous);
       } else region.append(liveNode(item));
@@ -1264,7 +1315,7 @@ function renderLive(rebuild = false) {
 }
 
 function liveNode(item) {
-  if (item.kind === "tool") return toolCallsBlock([item]);
+  if (item.kind === "tool") return isButtonsCall(item) ? buttonsMessage(item) : toolCallsBlock([item]);
   if (item.kind === "request") {
     return state.showRequests ? requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 }) : h("div", { hidden: true });
   }

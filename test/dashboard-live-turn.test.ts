@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { elapsed, liveStatus, shownLive, stateIcon, transcriptRows } from "../src/dashboard/public/live-turn.js";
+import { elapsed, liveStatus, pressedData, pressPrompt, shownLive, stateIcon, transcriptRows } from "../src/dashboard/public/live-turn.js";
+import { splitEnvelope } from "../src/dashboard/public/message-display.js";
 
 /* The bug these exist for: a message sent while a turn was running rendered
    above everything that turn had streamed. The transcript region sits above the
@@ -175,4 +176,55 @@ test("state is the icon, before anyone reads the text", () => {
   assert.equal(stateIcon("idle"), "○");
   // Waiting on something is not the same as merely not started.
   assert.equal(stateIcon("waiting"), "⏸");
+});
+
+/* Buttons a dashboard turn offers: the dashboard tool's call is the message, so
+   it is drawn as one rather than listed with the work. */
+
+const offer = (id: string) => ({
+  id,
+  name: "dashboard",
+  summary: "",
+  args: { text: "Ship it?", buttons: [[{ label: "Yes", data: "yes" }, { label: "No" }]] },
+});
+
+test("buttons are a message of their own, between the calls around them", () => {
+  const t = Date.parse("2026-08-29T12:00:00.000Z");
+  const rows = transcriptRows({
+    timeline: [{ kind: "tool-calls", calls: [{ id: "c1", name: "Read", summary: "" }, offer("b1"), { id: "c2", name: "Bash", summary: "" }], timestamp: iso(t) }],
+  });
+  assert.deepEqual(rows.map((row) => row.kind), ["day", "tool-calls", "buttons", "tool-calls"]);
+  assert.equal(rows[2].call.id, "b1");
+});
+
+test("buttons stay open until the person says something after them", () => {
+  const t = Date.parse("2026-08-29T12:00:00.000Z");
+  const timeline = [
+    { kind: "message", role: "user", text: "deploy?", timestamp: iso(t) },
+    { kind: "tool-calls", calls: [offer("b1")], timestamp: iso(t + 1_000) },
+  ];
+  assert.equal(transcriptRows({ timeline }).find((row) => row.kind === "buttons").reply, undefined);
+
+  const pressed = [...timeline, { kind: "message", role: "user", text: pressPrompt("yes"), timestamp: iso(t + 2_000) }];
+  assert.equal(pressedData(transcriptRows({ timeline: pressed }).find((row) => row.kind === "buttons").reply), "yes");
+
+  // A typed answer spends them too, with no button taken.
+  const typed = [...timeline, { kind: "message", role: "user", text: "wait", timestamp: iso(t + 2_000) }];
+  const reply = transcriptRows({ timeline: typed }).find((row) => row.kind === "buttons").reply;
+  assert.equal(reply, "wait");
+  assert.equal(pressedData(reply), undefined);
+});
+
+test("a press the running turn is holding already spends the buttons", () => {
+  const t = Date.parse("2026-08-29T12:00:00.000Z");
+  const rows = transcriptRows({
+    timeline: [{ kind: "tool-calls", calls: [offer("b1")], timestamp: iso(t) }],
+    live: [{ kind: "message", role: "user", text: pressPrompt("yes"), at: t + 5_000 }],
+    liveStartedAt: t + 5_000,
+  });
+  assert.equal(pressedData(rows.find((row) => row.kind === "buttons").reply), "yes");
+});
+
+test("a press reads as a caption over the data, not as a line of prose", () => {
+  assert.deepEqual(splitEnvelope(pressPrompt("yes")), { envelope: ["inline button pressed"], text: "yes" });
 });

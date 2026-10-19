@@ -1989,7 +1989,11 @@ video.msg-media { max-width: 22rem; }
   .recorder-label { display: none; }
   .attach-chip { max-width: 100%; }
   .jump-bottom { bottom: 5rem; }
-  .new-thread { padding: 0.75rem; align-items: flex-start; }
+  /* The launcher is the screen the app opens on, so its box sits where a
+     conversation's does: at the bottom, under the thumb, with the ‹ alone on top.
+     The pane already stops at the keyboard, so the box rides up with it. */
+  .new-thread { padding: 0.75rem; align-items: stretch; }
+  .new-thread-head { margin-bottom: auto; }
   .new-thread-text { min-height: 4.5rem; }
   .new-thread-actions .composer-hint { display: none; }
   /* Attachments cap at 22rem, which is wider than the phone — the bubble then

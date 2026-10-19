@@ -2608,6 +2608,12 @@ async function viewThreads() {
     }
   } else {
     newThreadDialog();
+    // A phone shows one half at a time, and it used to open on the list, a tap
+    // away from the box. Opening the app is the same "came here to say
+    // something" as on a desktop, so it lands on the launcher; coming back to
+    // Threads from another tab is looking for a thread, and gets the list. No
+    // history entry, as with a deep link: the ‹ and the swipe close it the same.
+    if (firstScreen) showPane();
   }
 }
 
@@ -3894,6 +3900,8 @@ async function withLoading(work, { swap = false } = {}) {
 /* ---------- router ---------- */
 
 const routes = { threads: viewThreads, workspaces: viewWorkspaces, models: viewModels, providers: viewModels, usage: viewUsage, settings: viewSettings, channels: viewWorkspaces };
+/** Whether the route being rendered is the one the page was opened on. */
+let firstScreen = true;
 
 async function render() {
   const name = (location.hash.replace("#/", "") || "threads").split("/")[0];
@@ -3917,6 +3925,7 @@ async function render() {
       keep("overview", state.overview);
       applyPairingBadge();
       await route();
+      firstScreen = false;
     }, { swap: true });
   } catch (error) {
     view.replaceChildren(loadFailure(error));

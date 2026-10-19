@@ -22,6 +22,7 @@ import { displayTitle } from "../threads/title.ts";
 import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
 import { logger } from "../log.ts";
+import { dashboardTool } from "./tool.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
@@ -297,7 +298,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
    * Whether the composer may run a turn in this thread.
    *
    * A thread belongs to the conversation it was born in. The dashboard's turns
-   * are not channel turns: they carry no channel tool and nothing delivers them,
+   * are not channel turns: they carry no channel's tool and nothing delivers them,
    * so a reply typed into a Telegram thread from here lands in the transcript
    * and never reaches the chat — a question and an answer that the person on the
    * other end cannot see, in the middle of a conversation they are still
@@ -783,10 +784,12 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         sessionKey,
         text: message,
         images: images.length ? images : undefined,
+        // The CLI prints the answer and is gone: nobody is left to press a button.
+        customTools: source === "dashboard" ? [dashboardTool] : undefined,
         runtime: {
           channel: source,
           conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
-          capabilities: ["rich markdown"],
+          capabilities: source === "dashboard" ? ["rich markdown", "buttons — via the dashboard tool"] : ["rich markdown"],
         },
         workspaceHint: gateway.threads.current(sessionKey)?.workspace,
       });

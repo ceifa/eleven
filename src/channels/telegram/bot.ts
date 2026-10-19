@@ -391,7 +391,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     // Fire-and-forget: holding the prep lane for the whole turn would block
     // (and un-steer) every message behind it.
     if (data.startsWith(FAILOVER_PREFIX)) return void retryOnFallback(data, target);
-    void runTurn(target, `[inline button pressed] ${data}`, []);
+    // The marker on a line of its own is the dashboard's press prompt too, and
+    // what lets the transcript draw it as a caption instead of as prose.
+    void runTurn(target, `[inline button pressed]\n${data}`, []);
   }
 
   /** The person took one of the two ways out a failed turn offered: pick the

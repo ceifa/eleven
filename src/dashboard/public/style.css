@@ -846,6 +846,16 @@ dialog.modal::backdrop { background: oklch(0% 0 0 / 0.6); }
   font-size: 0.68rem;
   color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
 }
+/* Buttons the agent offered, under its message the way Telegram hangs an
+   inline keyboard: rows of equal keys, as wide as the bubble can get. */
+.msg-buttons { display: flex; flex-direction: column; gap: 0.35rem; width: min(26rem, 82%); margin-top: 0.35rem; }
+.msg-buttons-row { display: flex; gap: 0.35rem; }
+.msg-buttons-row > .btn { flex: 1; min-width: 0; white-space: normal; }
+/* Spent keys fade; the one taken stays legible, it is the record of the answer. */
+.msg-buttons .btn.is-pressed:disabled { opacity: 0.85; }
+/* A link leaves the page instead of answering — the arrow says so, as in Telegram. */
+.msg-buttons a.btn { text-decoration: none; }
+.msg-buttons a.btn::after { content: "↗"; opacity: 0.6; }
 
 /* The panels a turn's producers publish. A board, not a chat row: it is scanned,
    so status is encoded in the icon's shape and color before anyone reads a

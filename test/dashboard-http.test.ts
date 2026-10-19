@@ -58,7 +58,7 @@ interface Spy {
   discarded: string[];
   fresh: { id: string; sessionKey: string; workspace: string };
   /** Every turn the dashboard asked the gateway to run. */
-  handled: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[] }[];
+  handled: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[]; customTools?: { name: string }[] }[];
   /** A thread that lives in a Telegram topic — the composer is not its home. */
   topic: { id: string; sessionKey: string; workspace: string };
 }
@@ -124,7 +124,7 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
   };
   const gateway = {
     on: () => {},
-    handle: async (incoming: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[] }) => {
+    handle: async (incoming: Spy["handled"][number]) => {
       spy.handled.push(incoming);
       return undefined;
     },
@@ -420,7 +420,7 @@ test("a workspace's skills come with its detail read — what the thread's skill
 
 test("a thread that belongs to a channel refuses a turn typed here", async () => {
   await withDashboard(async (base, _thread, spy) => {
-    // A dashboard turn carries no channel tool and nothing delivers it: run one
+    // Nothing delivers a dashboard turn to the chat: run one
     // in a Telegram thread and the reply lands in the transcript and never
     // reaches the chat — invisible to the person still reading the conversation
     // on the other end. It also ran on the workspace's models and prompt rather
@@ -437,6 +437,13 @@ test("the dashboard's own thread still takes one", async () => {
     const response = await post(`${base}/api/threads/${thread.id}/message`, { text: "hello" });
     assert.equal(response.status, 202);
     assert.deepEqual(spy.handled.map((turn) => turn.text), ["hello"]);
+  });
+});
+
+test("a turn typed here can offer buttons to click", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    await post(`${base}/api/threads/${thread.id}/message`, { text: "pick one" });
+    assert.deepEqual(spy.handled[0].customTools?.map((tool) => tool.name), ["dashboard"]);
   });
 });
 

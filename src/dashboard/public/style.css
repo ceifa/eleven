@@ -1952,17 +1952,19 @@ video.msg-media { max-width: 22rem; }
      both land on the list, where the sections are. And these must stay one
      condition — a bar hidden while the layout still subtracts its height leaves
      a dead 3.25rem band at the top of the conversation.
+     The launcher keeps the tab bar: it is the screen the app opens on, and the
+     sections have to be reachable from where you land.
      :root:has() is how a variable at the top reacts to a class four levels
      under it; a browser without :has() drops both rules and keeps the bar. */
-  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); --tabbar: 0px; }
+  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); }
+  :root:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) { --tabbar: 0px; }
   body:has(.threads-layout.pane-open) .topbar { display: none; }
-  body:has(.threads-layout.pane-open) .tabbar { display: none; }
+  body:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) .tabbar { display: none; }
   /* The toolbar was riding on the view's gutter, which the list no longer has. */
   .threads-toolbar, .threads-filters { padding-inline: 0.75rem; }
   /* The pane now reaches the bottom of the screen, so the room the home
      indicator needs stops being the view's to leave and becomes the composer's. */
   .threads-layout.pane-open .composer { padding-bottom: calc(0.7rem + var(--safe-b)); }
-  .threads-layout.pane-open .new-thread { padding-bottom: calc(0.75rem + var(--safe-b)); }
   /* The list stops at the tab bar, and the tab bar keeps the home indicator's strip. */
   .thread-scroll { padding: 0 0 0.5rem; }
   /* Denser rows: at this width the card's own 1rem gutter is a fifth of the
@@ -2522,12 +2524,13 @@ video.msg-media { max-width: 22rem; }
     display: flex;
     position: absolute;
     inset: 0;
-    padding: 3.25rem 0 calc(3.3rem + var(--safe-b));
+    /* the tab bar's room, less whatever of it the layout already stops short of */
+    padding: 3.25rem 0 calc(3.3rem + var(--safe-b) - var(--tabbar));
     transform: translateX(calc((var(--back) - 1) * 28%));
     filter: brightness(calc(0.55 + var(--back) * 0.45));
   }
   body.swiping-back:has(.threads-layout.pane-open) .topbar,
-  body.swiping-back:has(.threads-layout.pane-open) .tabbar {
+  body.swiping-back:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) .tabbar {
     display: flex;
     height: calc(3.3rem + var(--safe-b)); /* --tabbar reads 0 while the pane is open */
     transform: translateX(calc((var(--back) - 1) * 28%));

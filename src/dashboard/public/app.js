@@ -1058,6 +1058,14 @@ function closePaneMobile() {
   if (history.state?.pane) return history.back(); // popstate below drops the class
   setPane(false);
 }
+// The launcher keeps the tab bar, and its route already is #/threads: the link
+// alone changes nothing, so the tap on Threads is what goes back to the list.
+document.querySelector('.tabbar a[data-view="threads"]').addEventListener("click", (event) => {
+  if (!threadsLayout()?.classList.contains("pane-open")) return;
+  event.preventDefault();
+  closePaneMobile();
+});
+
 // Mobile-only ‹ that returns from the conversation/compose pane to the list.
 const backButton = () =>
   h("button", { class: "btn btn-ghost btn-sm mobile-only px-2", "aria-label": "Back to threads", onclick: closePaneMobile },

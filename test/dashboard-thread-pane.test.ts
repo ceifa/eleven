@@ -139,3 +139,15 @@ test("the document is put back when a phone leaves it scrolled under the tab bar
     /window\.addEventListener\("pageshow", homeDocument\)/,
   ]) assert.match(app, hook);
 });
+
+test("a phone opened cold lands on the launcher, and the Threads tab still lands on the list", () => {
+  // The phone shows the list or the pane, never both, and it used to open on
+  // the list: the box a session lands on was a tap away from every launch.
+  const view = functionBody(app, "async function viewThreads()");
+  const idle = view.slice(view.lastIndexOf("} else {"));
+  assert.match(idle, /newThreadDialog\(\);\s*[\s\S]*if \(firstScreen\) showPane\(\);/);
+  // Only the screen the page was opened on: coming back to Threads from another
+  // tab is looking for a thread.
+  const render = functionBody(app, "async function render()");
+  assert.match(render, /await route\(\);\s*firstScreen = false;/);
+});

@@ -297,7 +297,7 @@ test("the phone layout subtracts the chrome it actually has", () => {
   assert.match(mobile, /--tabbar: calc\([^;]*var\(--safe-b\)\);/);
   assert.match(mobile, /\.tabbar \{[^}]*height: var\(--tabbar\);[^}]*padding: [^;]*var\(--safe-b\)/);
   assert.ok(layout[1].includes("var(--tabbar)"), ".threads-layout must stop at the tab bar");
-  assert.match(mobile, /:root:has\(\.threads-layout\.pane-open\) \{[^}]*--tabbar: 0px;/);
+  assert.match(mobile, /:root:has\(\.threads-layout\.pane-open > #thread-pane:not\(\.is-composing\)\) \{[^}]*--tabbar: 0px;/);
   assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 
   // …and --keyboard only ever holds a number if app.js measures it. iOS slides
@@ -337,6 +337,24 @@ test("an open conversation stops paying for the bar it no longer shows", () => {
   // list — the sections live there, in the tab bar that goes away with the bar.
   assert.match(app, /"aria-label": "Back to threads"/);
   assert.match(app, /class: "thread-head"[\s\S]{0,80}backButton\(\)/);
+});
+
+test("the launcher keeps the tab bar it opens on", () => {
+  const css = read("style.css");
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+
+  // The app lands on the launcher, so a launcher without the tab bar is a first
+  // screen with no way to the other sections. The bar and the room the layout
+  // leaves for it go on one condition, or the box sits under the bar.
+  const hide = mobile.match(/body:has\(([^\n{}]*)\) \.tabbar \{ display: none; \}/);
+  assert.ok(hide, "the mobile block should hide the tab bar over an open conversation");
+  assert.match(hide[1], /:not\(\.is-composing\)/);
+  assert.ok(mobile.includes(`:root:has(${hide[1]}) { --tabbar: 0px; }`), "--tabbar has to drop on the same condition the bar hides on");
+
+  // On the launcher the route already is #/threads, so the Threads link alone
+  // would do nothing: the tap has to close the pane itself.
+  assert.match(app, /\.tabbar a\[data-view="threads"\]'\)\.addEventListener\("click"[\s\S]{0,160}closePaneMobile\(\);/);
 });
 
 /** Split a CSS shorthand into its sides, keeping calc(…) whole. */

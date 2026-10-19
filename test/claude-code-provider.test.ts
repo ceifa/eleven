@@ -885,6 +885,38 @@ test("the child is told the shell its Bash tool actually runs", async () => {
   }
 });
 
+test("Claude children inherit the user bus without inheriting unrelated daemon variables", async () => {
+  const piSessionId = "dddddddd-4444-4111-8111-111111111111";
+  const values = {
+    XDG_RUNTIME_DIR: "/run/user/9000",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/9000/bus",
+    ELEVEN_TEST_PRIVATE_TOKEN: "must-stay-in-the-daemon",
+  };
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  let captured: { options: { env?: Record<string, string> } } | undefined;
+  registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages, (input) => { captured = input as never; }),
+      deleteSession: (async () => {}) as never,
+      state: fakeState(),
+    });
+    const context: Context = { systemPrompt: "eleven prompt", messages: [user("work")], tools: [] };
+    for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
+
+    assert.equal(captured?.options.env?.XDG_RUNTIME_DIR, values.XDG_RUNTIME_DIR);
+    assert.equal(captured?.options.env?.DBUS_SESSION_BUS_ADDRESS, values.DBUS_SESSION_BUS_ADDRESS);
+    assert.equal(captured?.options.env?.ELEVEN_TEST_PRIVATE_TOKEN, undefined);
+  } finally {
+    unregisterClaudeSession(piSessionId);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test("claudeShell keeps a shell Claude Code can run and replaces one it cannot", () => {
   const has = (...paths: string[]) => (path: string) => paths.includes(path);
   assert.equal(claudeShell("/usr/bin/zsh", has()), "/usr/bin/zsh");

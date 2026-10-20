@@ -783,16 +783,14 @@ export class Runner {
       cwd: request.workspacePath,
       agentDir,
       settingsManager,
-      // Global extensions stay off (they target pi's TUI); workspaces may ship
-      // their own gateway-safe extensions in .pi/extensions.
-      noExtensions: true,
+      // Extensions load as under `pi -p`: global ones, the workspace's
+      // .pi/extensions, and packages from both settings files. The print-mode
+      // binding below is what tells them no terminal is attached.
       noPromptTemplates: true,
       noThemes: true,
-      additionalExtensionPaths: workspaceExtensionFiles(request.workspacePath),
       additionalSkillPaths: workspaceResources(request.workspacePath).skillDirs,
       systemPrompt,
-      // Inline extensions still load with noExtensions — pi's sanctioned hook
-      // points (never touch streamFn).
+      // pi's sanctioned hook points (never touch streamFn).
       extensionFactories: this.hooks.onProviderRequest
         ? [{
             name: "eleven-request-log",
@@ -834,7 +832,7 @@ export class Runner {
     // tool call) — deliver them all at once, not one per boundary.
     session.setSteeringMode("all");
 
-    // Workspace extension tools are Eleven-owned capabilities
+    // Extension tools are Eleven-owned capabilities
     // just like channel tools. Keep Claude builtins native, but expose every
     // Eleven-owned tool through the isolated MCP bridge with its bound executor.
     // Deriving this from the session registry instead would sweep up the pi
@@ -1054,14 +1052,3 @@ function isDirectory(path: string): boolean {
 
 /** A workspace can ship pi extensions (pi's own project convention). pi wants
  * entry-point files here, not the directory. */
-function workspaceExtensionFiles(workspacePath: string): string[] {
-  const dir = join(workspacePath, ".pi", "extensions");
-  try {
-    return readdirSync(dir)
-      .filter((f) => f.endsWith(".ts") || f.endsWith(".js") || f.endsWith(".mjs"))
-      .map((f) => join(dir, f));
-  } catch {
-    return [];
-  }
-}
-

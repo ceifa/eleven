@@ -1,7 +1,9 @@
 import {
+  createAgentSessionServices,
   getAgentDir,
   ModelRuntime,
   ProjectTrustStore,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { logger } from "../log.ts";
@@ -23,6 +25,26 @@ export const modelRuntime = await ModelRuntime.create();
 // Claude Code is an ambient local runtime: it uses the official Agent SDK and
 // the login managed by `claude auth login`, never Pi's Anthropic OAuth/API path.
 modelRuntime.registerNativeProvider(claudeCodeProvider);
+await registerExtensionProviders();
+
+/**
+ * A provider a global pi extension brings (`pi install npm:pi-provider-kiro`)
+ * only exists once the extension runs, and a session loads its extensions
+ * after its model was already picked. So the catalog loads them first, as pi
+ * does at startup. Project trust is off: the catalog is shared by every
+ * workspace, so a workspace's own providers stay out of it.
+ */
+async function registerExtensionProviders() {
+  const { resourceLoader, diagnostics } = await createAgentSessionServices({
+    cwd: agentDir,
+    agentDir,
+    modelRuntime,
+    settingsManager: SettingsManager.create(agentDir, agentDir, { projectTrusted: false }),
+    resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true },
+  });
+  for (const { path, error } of resourceLoader.getExtensions().errors) log.warn(`extension ${path} failed to load: ${error}`);
+  for (const { message } of diagnostics) log.warn(message);
+}
 
 /** How often the daemon re-checks provider catalogs. pi throttles the actual
  * network calls to once per four hours per provider, so this is cheap. */

@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { startDaemon } from "./daemon.ts";
-import { runDoctor } from "./doctor.ts";
 import { controlService, installService, serviceInstalled } from "./service.ts";
 import { runClientCommand } from "./cli-client.ts";
 
@@ -28,13 +26,15 @@ if (!clientHandled) switch (command) {
       controlService(command);
       break;
     }
-    await startDaemon();
+    // Imported on demand: loading the model catalog runs every global pi
+    // extension, which the client commands above never need.
+    await (await import("./daemon.ts")).startDaemon();
     break;
   case "init":
     process.exitCode = installService() ? 0 : 1;
     break;
   case "doctor":
-    process.exitCode = (await runDoctor()) ? 0 : 1;
+    process.exitCode = (await (await import("./doctor.ts")).runDoctor()) ? 0 : 1;
     break;
   default:
     console.log(`eleven — a featherweight personal AI gateway

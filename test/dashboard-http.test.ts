@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { startDashboard } from "../src/dashboard/server.ts";
+import { TurnFailure } from "../src/agent/runner.ts";
+import { continuePrompt } from "../src/channels/telegram/failover.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "dashboard", "public");
 
@@ -58,13 +60,16 @@ interface Spy {
   discarded: string[];
   fresh: { id: string; sessionKey: string; workspace: string };
   /** Every turn the dashboard asked the gateway to run. */
-  handled: { sessionKey: string; text: string; modelScopes?: unknown[]; appends?: string[]; customTools?: { name: string }[] }[];
+  handled: { sessionKey: string; text: string; models?: unknown[]; modelScopes?: unknown[]; appends?: string[]; customTools?: { name: string }[] }[];
   /** A thread that lives in a Telegram topic — the composer is not its home. */
   topic: { id: string; sessionKey: string; workspace: string };
 }
 
 /** Enough of a daemon for the HTTP layer: one workspace, one thread, no bots. */
-async function withDashboard(run: (base: string, thread: { id: string; sessionFile: string }, spy: Spy) => Promise<void>) {
+async function withDashboard(
+  run: (base: string, thread: { id: string; sessionFile: string }, spy: Spy) => Promise<void>,
+  options: { autoFailover?: boolean; handle?: (incoming: Spy["handled"][number], attempt: number) => Promise<unknown> } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "eleven-dashboard-http-"));
   const sessionFile = join(dir, "session.jsonl");
   writeFileSync(sessionFile, "");
@@ -108,7 +113,7 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
   const channel = { type: "telegram", name: "main", token: "t", groups: { "-1001": groupScope } };
   const config = {
     raw: { workspaces: { agent: { path: dir } }, dashboard: { host: "127.0.0.1", port } },
-    resolved: { workspaces: { agent: { path: dir, channels: [channel] } }, dashboard: { host: "127.0.0.1", port }, models: [] },
+    resolved: { workspaces: { agent: { path: dir, channels: [channel] } }, dashboard: { host: "127.0.0.1", port }, models: [], autoFailover: options.autoFailover },
     channels: () => [{ workspace: "agent", channel }],
     turnModels: () => [],
     configuredModelRefs: () => [],
@@ -126,7 +131,7 @@ async function withDashboard(run: (base: string, thread: { id: string; sessionFi
     on: () => {},
     handle: async (incoming: Spy["handled"][number]) => {
       spy.handled.push(incoming);
-      return undefined;
+      return options.handle?.(incoming, spy.handled.length);
     },
     threads: {
       list: () => [thread, topicThread],
@@ -465,4 +470,47 @@ test("the overview lists workspaces by name — the pages that edit one read /co
     const overview = JSON.parse((await get(`${base}/api/overview`)).body.toString());
     assert.deepEqual(overview.workspaces, ["agent"]);
   });
+});
+
+/** A CLI turn that dies on its lead model after running tools, then answers on the next. */
+function quotaSpentMidTurn(attempt: number) {
+  if (attempt > 1) return Promise.resolve({ text: "done", model: "claude-code/opus", status: "completed", sessionFile: "" });
+  const failure = new TurnFailure("provider error on claude-code/opus: usage limit reached", "claude-code/opus", [{ model: "claude-code/opus", account: "wiv" }]);
+  failure.hiddenToolCalls = [{ id: "1", name: "Bash", args: { command: "git status" } }];
+  return Promise.reject(failure);
+}
+
+async function cliRun(base: string, id: string) {
+  for (;;) {
+    const run = JSON.parse((await get(`${base}/api/threads/${id}/run`)).body.toString());
+    if (run.status !== "running") return run;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("with auto-failover on, a CLI turn that died after its tools ran continues on the untried tail", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    assert.equal((await post(`${base}/api/threads`, { workspace: "agent", text: "run the cron", source: "cli" })).status, 201);
+
+    const run = await cliRun(base, spy.fresh.id);
+
+    // A cron has nobody to press Continue: the retry is the run's answer.
+    assert.equal(run.status, "done");
+    assert.equal(run.result.text, "done");
+    assert.equal(spy.handled.length, 2);
+    assert.deepEqual(spy.handled[1].models, [{ model: "claude-code/opus", account: "wiv" }]);
+    assert.equal(spy.handled[1].text, continuePrompt([{ name: "Bash", args: { command: "git status" } }]));
+  }, { autoFailover: true, handle: (_incoming, attempt) => quotaSpentMidTurn(attempt) });
+});
+
+test("with auto-failover off, a CLI turn that died after its tools ran just fails", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    await post(`${base}/api/threads`, { workspace: "agent", text: "run the cron", source: "cli" });
+
+    const run = await cliRun(base, spy.fresh.id);
+
+    assert.equal(run.status, "error");
+    assert.match(run.error, /usage limit reached/);
+    assert.equal(spy.handled.length, 1);
+  }, { handle: (_incoming, attempt) => quotaSpentMidTurn(attempt) });
 });

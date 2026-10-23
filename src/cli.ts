@@ -47,7 +47,8 @@ usage:
   eleven restart                       restart the daemon
   eleven init                          install and start the background service
   eleven doctor                        check config, providers, channels and workspaces
-  eleven login <provider> <account>    sign another login of a provider in, for models that name it
+  eleven login [provider] [account]    sign another login of a provider in, for models that name it
+                                       (asks for whatever is left out)
 
   eleven status [--json]               show live gateway health
   eleven workspaces [name] [--json]    list workspaces or show resolved detail

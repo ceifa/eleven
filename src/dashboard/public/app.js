@@ -3339,7 +3339,7 @@ async function loadUsage() {
     }
     for (const report of logins) {
       if (report.unsupported) continue;
-      if (report.account) slot.append(h("div", { class: "text-xs dim-label mt-1" }, `account ${report.account}`));
+      if (logins.length > 1) slot.append(h("div", { class: "text-xs dim-label mt-1" }, loginLabel(report.provider, report.account)));
       if (report.error) {
         slot.append(h("div", { class: "text-xs text-error opacity-60" }, `usage unavailable — ${report.error}`));
         continue;
@@ -3402,13 +3402,33 @@ function sequenceOps(withModels, { emptyMeansInherit = false } = {}) {
       owner.models.splice(index, 1);
       if (emptyMeansInherit && !owner.models.length) delete owner.models;
     }, true),
-    add: (ref) => withModels((owner) => { owner.models = [...(owner.models ?? []), { model: ref }]; }, true),
+    add: (ref, account) => withModels((owner) => { owner.models = [...(owner.models ?? []), { model: ref, ...(account && { account }) }]; }, true),
   };
 }
 
 /** One step of a sequence: a card hanging on the wire. `ops` routes edits to
  * whichever sequence this card belongs to (global or a scope's). */
-function modelCard(entry, index, total, ops, opts = {}) {
+/** How a login reads in the UI: the account name and, when the provider says,
+ * who it is signed in as. No account is the machine's own login. */
+function loginLabel(provider, account) {
+  const authEntry = (state.auth ?? []).find((a) => a.provider === provider);
+  const who = account ? authEntry?.accounts?.find((a) => a.name === account)?.label : authEntry?.machineLabel;
+  return `${account ?? "this machine's login"}${who ? ` · ${who}` : ""}`;
+}
+
+/** The logins a sequence entry for `ref` can still run on: the same model on a
+ * login another entry already has is that entry's candidate, not a fallback.
+ * "" is the machine's own login. */
+function freeLogins(ref, models, except) {
+  const provider = ref.split("/")[0];
+  const authEntry = (state.auth ?? []).find((a) => a.provider === provider);
+  const taken = new Set(models.filter((m, i) => i !== except && m.model === ref).map((m) => m.account ?? ""));
+  const logins = [...(authEntry?.configured !== false ? [""] : []), ...(authEntry?.accounts ?? []).map((a) => a.name)];
+  return logins.filter((login) => !taken.has(login));
+}
+
+function modelCard(entry, index, models, ops, opts = {}) {
+  const total = models.length;
   const meta = (state.catalog ?? []).find((m) => m.ref === entry.model);
   const canReason = meta ? meta.reasoning : true;
   const supported = meta?.tools ?? ALL_TOOLS();
@@ -3442,9 +3462,7 @@ function modelCard(entry, index, total, ops, opts = {}) {
               : h("div", { class: "text-sm opacity-50", style: "padding:0.3rem 0" }, "not a reasoning model"),
             canReason ? "Thinking effort while this model drives a turn." : undefined),
         ),
-        labeled("Account", h("input", { class: "input input-sm w-full font-mono", value: entry.account ?? "", placeholder: "this machine's login",
-            onchange: (e) => ops.patch(index, (m) => { m.account = e.target.value.trim() || undefined; }, true) }),
-          `Run on another login of this provider, signed in with: eleven login ${provider} <account>. List the model again under a second account to fail over when one runs out.`),
+        accountField(entry, index, models, ops, authEntry),
         labeled("Tools",
           h("div", { class: "flex flex-wrap gap-3 py-1" },
             supported.map((tool) => {
@@ -3471,16 +3489,35 @@ function modelCard(entry, index, total, ops, opts = {}) {
   );
 }
 
+/** Which login an entry runs on — only where the provider has more than the
+ * machine's own, and only logins this model isn't already on elsewhere. */
+function accountField(entry, index, models, ops, authEntry) {
+  const accounts = authEntry?.accounts ?? [];
+  if (!accounts.length && !entry.account) return null;
+  const current = entry.account ?? "";
+  const choices = [...new Set([current, ...freeLogins(entry.model, models, index)])];
+  const signedIn = (login) => !login || accounts.some((a) => a.name === login);
+  return labeled("Account",
+    h("select", { class: "select select-sm w-full", onchange: (e) => ops.patch(index, (m) => { m.account = e.target.value || undefined; }, true) },
+      choices.map((login) => h("option", { value: login, selected: login === current },
+        `${loginLabel(entry.model.split("/")[0], login || undefined)}${signedIn(login) ? "" : " · not signed in"}`))),
+    `Another login of this provider, added with: eleven login ${entry.model.split("/")[0]}. List the model again on a second login to fail over when one runs out.`);
+}
+
 /** A full sequence editor: the chain of cards plus the add-model row. */
 function sequenceEditor(models, ops, opts = {}) {
   const addInput = h("input", { class: "input input-sm w-72 font-mono", list: "models-list",
     placeholder: models.length ? "add a fallback model" : "provider/model-id" });
+  // Adding a model the sequence already runs puts it on the next free login —
+  // the same model on the same login again would be a fallback to itself.
   const add = () => {
     const value = addInput.value.trim();
-    if (value) ops.add(value);
+    if (!value) return;
+    const login = models.some((m) => m.model === value) ? freeLogins(value, models)[0] : undefined;
+    ops.add(value, login || undefined);
   };
   return h("div", { class: "flex flex-col gap-4" },
-    models.length ? h("div", { class: "chain" }, models.map((entry, index) => modelCard(entry, index, models.length, ops, opts))) : null,
+    models.length ? h("div", { class: "chain" }, models.map((entry, index) => modelCard(entry, index, models, ops, opts))) : null,
     h("div", { class: "flex gap-2 items-center stack-mobile", style: "padding-left: 2.4rem" },
       addInput,
       h("button", { class: "btn btn-sm btn-primary", onclick: add }, "Add"),

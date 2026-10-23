@@ -16,7 +16,7 @@ import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
 import { summarizeToolArgs } from "./util.ts";
-import { collectProviderUsage, formatProviderUsage } from "./provider-usage.ts";
+import { collectProviderUsage, formatProviderUsage, usageLogins } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
 import { PanelBoard, type Panel } from "./agent/panels.ts";
 
@@ -406,7 +406,7 @@ export class Gateway extends EventEmitter {
 
   /** Live subscription quotas for every provider configured in eleven. */
   async providerUsage(): Promise<string> {
-    const logins = this.config.configuredLogins();
+    const logins = usageLogins(this.config.configuredLogins());
     if (!logins.length) throw new Error("no providers configured");
     const reports = await collectProviderUsage(logins);
     return reports

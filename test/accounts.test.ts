@@ -14,7 +14,8 @@ process.env.ELEVEN_CONFIG_DIR = join(scratch, "config");
 process.env.CLAUDE_CONFIG_DIR = join(scratch, "claude");
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
-const { accountCredentials, accountDir, runOnAccount } = await import("../src/accounts.ts");
+const { accountCredentials, accountDir, claudeEmail, runOnAccount, signedInAccounts } = await import("../src/accounts.ts");
+const { usageLogins } = await import("../src/provider-usage.ts");
 const {
   CLAUDE_CODE_MODELS, claudeAccountDir, createClaudeCodeProvider, registerClaudeSession, unregisterClaudeSession,
 } = await import("../src/agent/claude-code.ts");
@@ -200,4 +201,35 @@ test("a failover onto another account says which one", () => {
   const labels = keyboard?.inline_keyboard[0]?.map((button) => button.text);
 
   assert.deepEqual(labels, ["▶ Continue on gpt-6 (spare)", "↻ Restart on gpt-6 (spare)"]);
+});
+
+test("the accounts on disk list every login signed in under them, Claude Code by its email", () => {
+  const root = join(scratch, "accounts-listed");
+  mkdirSync(join(root, "wiv", "claude"), { recursive: true });
+  writeFileSync(join(root, "wiv", "claude", ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "me@wiv.dev" } }));
+  mkdirSync(join(root, "spare"), { recursive: true });
+  writeFileSync(join(root, "spare", "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth" } }));
+  // Logged out: the dir is there, the login is not.
+  mkdirSync(join(root, "gone", "claude"), { recursive: true });
+  writeFileSync(join(root, "gone", "claude", ".claude.json"), JSON.stringify({}));
+
+  assert.deepEqual(signedInAccounts(root), [
+    { account: "spare", provider: "openai-codex" },
+    { account: "wiv", provider: "claude-code", label: "me@wiv.dev" },
+  ]);
+  assert.equal(claudeEmail(join(root, "wiv", "claude")), "me@wiv.dev");
+});
+
+test("usage covers every signed-in account of a provider in use, not only the ones an entry names", () => {
+  mkdirSync(join(accountDir("usage-a"), "claude"), { recursive: true });
+  writeFileSync(join(accountDir("usage-a"), "claude", ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "a@x.dev" } }));
+
+  const logins = usageLogins([{ provider: "claude-code" }, { provider: "kiro" }]);
+
+  assert.deepEqual(logins.filter((login) => login.provider === "claude-code"), [
+    { provider: "claude-code" },
+    { provider: "claude-code", account: "usage-a" },
+  ]);
+  // A provider nobody runs stays out, signed in or not.
+  assert.ok(!logins.some((login) => login.provider === "fake-accounts"));
 });

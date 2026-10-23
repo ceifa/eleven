@@ -35,7 +35,8 @@ import {
   type ToolCallsEntryData,
   type TurnErrorEntryData,
 } from "../threads/reader.ts";
-import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
+import { DEFAULT_REASONING, entryKey, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
+import { runOnAccount } from "../accounts.ts";
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
@@ -529,7 +530,9 @@ export class Runner {
     if (missing.length) log.warn(`unknown models skipped: ${missing.join(", ")}`);
     if (!models.length) throw new Error(`no usable model among: ${request.models.map((entry) => entry.model).join(", ")}`);
 
-    const warm = await this.acquireSession(threadId, request, models[0]);
+    // Credentials resolve on the candidate's own account wherever pi touches
+    // them: picking the model checks auth, prompting resolves it.
+    const warm = await runOnAccount(models[0].entry.account, () => this.acquireSession(threadId, request, models[0]));
     const { session, sessionManager, activeModel } = warm;
     // A restart of a failed turn drops that attempt's branch first, so this turn
     // opens on the transcript the failed one started from.
@@ -630,7 +633,7 @@ export class Runner {
         attemptHadToolActivity = false;
         hiddenToolCalls = [];
         if (index > 0) {
-          log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
+          log.warn(`falling over to ${entryKey(entry)} for ${threadId}`);
           // A rewind drops the failed attempt's branch, and human input the
           // runtime was handed mid-attempt lives on that branch and nowhere
           // else. Re-prompting on top duplicates the request; rewinding would
@@ -640,7 +643,7 @@ export class Runner {
           // don't let it leak into this turn's result.
           collected.length = 0;
           events.onFailover?.();
-          await session.setModel(model);
+          await runOnAccount(entry.account, () => session.setModel(model));
           // Each candidate runs with its own reasoning level and tool allowlist.
           session.setThinkingLevel(entry.reasoning ?? DEFAULT_REASONING);
           warm.applyToolPolicy(entry.tools);
@@ -649,7 +652,8 @@ export class Runner {
         lastStopReason = undefined;
         lastErrorMessage = undefined;
         try {
-          await runWithClaudeSession(session.sessionId, () => session.prompt(request.text, { images: request.images }));
+          await runOnAccount(entry.account, () =>
+            runWithClaudeSession(session.sessionId, () => session.prompt(request.text, { images: request.images })));
         } catch (error) {
           lastError = error;
           log.error(`turn failed on ${modelRef(model)}: ${error}`);

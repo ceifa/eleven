@@ -140,6 +140,18 @@ export interface ModelEntry {
   /** Capability allowlist while this model drives a turn; omit for everything
    * its runtime supports. Always intersected with the workspace's own tools. */
   tools?: WorkspaceTool[];
+  /** The named login this entry runs on, instead of the machine's own
+   * (`eleven login <provider> <account>`). Listing a model twice under two
+   * accounts is how a spent subscription fails over to another one. */
+  account?: string;
+}
+
+/** An account names a directory under eleven's state dir. */
+export const ACCOUNT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
+
+/** Identity of an entry within a plan: the same model on another account is another candidate. */
+export function entryKey(entry: ModelEntry): string {
+  return entry.account ? `${entry.model}@${entry.account}` : entry.model;
 }
 
 export interface ElevenConfig {
@@ -240,8 +252,8 @@ export class ConfigStore extends EventEmitter {
     const plan: ModelEntry[] = [];
     const seen = new Set<string>();
     const push = (entry: ModelEntry) => {
-      if (!entry.model || seen.has(entry.model)) return;
-      seen.add(entry.model);
+      if (!entry.model || seen.has(entryKey(entry))) return;
+      seen.add(entryKey(entry));
       plan.push(entry);
     };
     if (threadModel) push(sequence.find((entry) => entry.model === threadModel) ?? { model: threadModel });
@@ -249,23 +261,38 @@ export class ConfigStore extends EventEmitter {
     return plan;
   }
 
-  /** Every model reference the config mentions (doctor validates all of them). */
-  configuredModelRefs(): string[] {
+  /** Every model entry the config mentions, across all scopes. */
+  configuredModels(): ModelEntry[] {
     const { models, workspaces } = this.resolved;
-    const scopeRefs = (scope: ModelScope) => (scope.models ?? []).map((entry) => entry.model);
-    const refs = [
-      ...models.map((entry) => entry.model),
+    const scopeModels = (scope: ModelScope) => scope.models ?? [];
+    return [
+      ...models,
       ...Object.values(workspaces).flatMap((w) => [
-        ...scopeRefs(w),
+        ...scopeModels(w),
         ...(w.channels ?? []).flatMap((channel) =>
           [...Object.values(channel.groups ?? {}), ...Object.values(channel.users ?? {})].flatMap((scope) => [
-            ...scopeRefs(scope),
-            ...Object.values(scope.topics ?? {}).flatMap((topic) => scopeRefs(topic)),
+            ...scopeModels(scope),
+            ...Object.values(scope.topics ?? {}).flatMap((topic) => scopeModels(topic)),
           ]),
         ),
       ]),
     ];
-    return [...new Set(refs.filter(Boolean))];
+  }
+
+  /** Every model reference the config mentions (doctor validates all of them). */
+  configuredModelRefs(): string[] {
+    return [...new Set(this.configuredModels().map((entry) => entry.model).filter(Boolean))];
+  }
+
+  /** Every login the config runs on, once per provider and account; an
+   * absent account is the machine's own. */
+  configuredLogins(): { provider: string; account?: string }[] {
+    const logins = new Map<string, { provider: string; account?: string }>();
+    for (const { model, account } of this.configuredModels()) {
+      const provider = model?.split("/", 1)[0];
+      if (provider) logins.set(`${provider}@${account ?? ""}`, { provider, ...(account && { account }) });
+    }
+    return [...logins.values()];
   }
 }
 
@@ -319,6 +346,9 @@ function validateSequence(entries: ModelEntry[] | undefined, where: string) {
       throw new Error(`${label}: unknown reasoning level "${entry.reasoning}"`);
     }
     validateTools(entry.tools, label);
+    if (entry.account !== undefined && (typeof entry.account !== "string" || !ACCOUNT_NAME.test(entry.account))) {
+      throw new Error(`${label}: invalid account name "${entry.account}"`);
+    }
   });
 }
 

@@ -36,6 +36,9 @@ if (!clientHandled) switch (command) {
   case "doctor":
     process.exitCode = (await (await import("./doctor.ts")).runDoctor()) ? 0 : 1;
     break;
+  case "login":
+    process.exitCode = await (await import("./login.ts")).login(args[0], args[1]);
+    break;
   default:
     console.log(`eleven — a featherweight personal AI gateway
 
@@ -44,6 +47,8 @@ usage:
   eleven restart                       restart the daemon
   eleven init                          install and start the background service
   eleven doctor                        check config, providers, channels and workspaces
+  eleven login [provider] [account]    sign another login of a provider in, for models that name it
+                                       (asks for whatever is left out)
 
   eleven status [--json]               show live gateway health
   eleven workspaces [name] [--json]    list workspaces or show resolved detail

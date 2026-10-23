@@ -28,10 +28,12 @@ import {
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { z } from "zod";
 import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.ts";
+import { accountDir, currentAccount } from "../accounts.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
@@ -1068,9 +1070,38 @@ export function claudeShell(shell: string | undefined, exists: (path: string) =>
   return ["zsh", "bash"].flatMap((name) => SHELL_DIRS.map((dir) => `${dir}/${name}`)).find(exists);
 }
 
+/** Where Claude Code keeps the machine's own login and every transcript. */
+function claudeHome(): string {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+}
+
+/**
+ * The Claude Code config dir of an account: `CLAUDE_CONFIG_DIR=<it> claude auth
+ * login` signs it in. A full login rather than a `setup-token` token, because
+ * that one lacks the profile scope the usage windows are read with.
+ *
+ * Its `projects` links to the machine's own: transcripts live there, and a
+ * turn that fails over to another account resumes the hidden Claude session
+ * the last one left. A dir of its own would strand them on the old account.
+ */
+export function claudeAccountDir(account: string, root?: string, home = claudeHome()): string {
+  const dir = join(accountDir(account, root), "claude");
+  const projects = join(dir, "projects");
+  mkdirSync(join(home, "projects"), { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const existing = lstatSync(projects, { throwIfNoEntry: false });
+  if (!existing) symlinkSync(join(home, "projects"), projects);
+  else if (!existing.isSymbolicLink()) {
+    throw new Error(`${projects} is a real directory, so account "${account}" cannot resume another account's sessions — remove it`);
+  }
+  return dir;
+}
+
 /** Do not hand Telegram/provider tokens from Eleven's daemon environment to
- * the child. Claude's local login lives under HOME/CLAUDE_CONFIG_DIR. */
+ * the child. Claude's local login lives under HOME/CLAUDE_CONFIG_DIR, or under
+ * the account's own dir when the turn runs on one. */
 function claudeChildEnv(): Record<string, string | undefined> {
+  const account = currentAccount();
   const keys = [
     "HOME", "PATH", "SHELL", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
     "LANG", "LC_ALL", "TZ", "TERM",
@@ -1082,6 +1113,7 @@ function claudeChildEnv(): Record<string, string | undefined> {
   const shell = claudeShell(process.env.SHELL);
   return {
     ...Object.fromEntries(keys.map((key) => [key, process.env[key]])),
+    ...(account && { CLAUDE_CONFIG_DIR: claudeAccountDir(account) }),
     ...(shell && { SHELL: shell, CLAUDE_CODE_SHELL: shell }),
     ENABLE_CLAUDEAI_MCP_SERVERS: "false",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
@@ -1120,7 +1152,8 @@ export interface ClaudeAuthProbe {
   detail?: string;
 }
 
-let authCache: { value: ClaudeAuthProbe; at: number } | undefined;
+/** Per account: each one is a login of its own. */
+const authCache = new Map<string | undefined, { value: ClaudeAuthProbe; at: number }>();
 const AUTH_CACHE_MS = 60_000;
 
 /** Read the same subscription windows as Claude Code's /usage dialog without
@@ -1162,7 +1195,8 @@ export async function fetchClaudeCodeRateLimits(): Promise<SDKControlGetUsageRes
 
 /** Initialize the bundled official runtime without sending a model prompt. */
 export async function probeClaudeCodeAuth(queryFn: typeof sdkQuery = sdkQuery): Promise<ClaudeAuthProbe> {
-  if (queryFn === sdkQuery && authCache && Date.now() - authCache.at < AUTH_CACHE_MS) return authCache.value;
+  const cached = authCache.get(currentAccount());
+  if (queryFn === sdkQuery && cached && Date.now() - cached.at < AUTH_CACHE_MS) return cached.value;
   const abort = new AbortController();
   let release!: () => void;
   const parked = new Promise<void>((resolve) => (release = resolve));
@@ -1207,6 +1241,6 @@ export async function probeClaudeCodeAuth(queryFn: typeof sdkQuery = sdkQuery): 
     abort.abort();
     try { sdk.close(); } catch { /* already closed */ }
   }
-  if (queryFn === sdkQuery) authCache = { value, at: Date.now() };
+  if (queryFn === sdkQuery) authCache.set(currentAccount(), { value, at: Date.now() });
   return value;
 }

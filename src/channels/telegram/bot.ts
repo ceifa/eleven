@@ -568,7 +568,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         ? failovers.resolve(sessionKey, { target, text, images }, error, deps.autoFailover())
         : undefined;
       autoRetry = next?.retry;
-      const continuing = autoRetry ? ` — continuing on ${modelName(autoRetry.models[0]!.model)}` : "";
+      const continuing = autoRetry ? ` — continuing on ${modelName(autoRetry.models[0]!)}` : "";
       // The failure is now a footnote to a turn that is still going: it still
       // belongs in the chat, but it doesn't deserve a notification of its own.
       await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}${continuing}`, {

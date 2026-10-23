@@ -36,6 +36,9 @@ if (!clientHandled) switch (command) {
   case "doctor":
     process.exitCode = (await (await import("./doctor.ts")).runDoctor()) ? 0 : 1;
     break;
+  case "claude-login":
+    process.exitCode = await (await import("./claude-login.ts")).claudeLogin(args[0]);
+    break;
   default:
     console.log(`eleven — a featherweight personal AI gateway
 
@@ -44,6 +47,7 @@ usage:
   eleven restart                       restart the daemon
   eleven init                          install and start the background service
   eleven doctor                        check config, providers, channels and workspaces
+  eleven claude-login <account>        sign a Claude account in for models that name it
 
   eleven status [--json]               show live gateway health
   eleven workspaces [name] [--json]    list workspaces or show resolved detail

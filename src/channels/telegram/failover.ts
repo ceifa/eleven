@@ -76,9 +76,11 @@ export function continuePrompt(hidden: { name: string; args?: Record<string, unk
   ].join("\n");
 }
 
-/** The provider prefix is noise on a button. */
-export function modelName(ref: string): string {
-  return ref.split("/").pop() || ref;
+/** The provider prefix is noise on a button; the account is not, once the
+ * same model runs on two of them. */
+export function modelName(entry: ModelEntry): string {
+  const name = entry.model.split("/").pop() || entry.model;
+  return entry.account ? `${name} (${entry.account})` : name;
 }
 
 /**
@@ -133,7 +135,7 @@ export class FailoverOffers<T> {
     });
     // Insertion-ordered: the oldest offer is the first to go.
     if (this.offers.size > MAX_OFFERS) this.offers.delete(this.offers.keys().next().value!);
-    const on = modelName(next.model);
+    const on = modelName(next);
     return {
       inline_keyboard: [[
         { text: `▶ Continue on ${on}`, callback_data: `${FAILOVER_PREFIX}${id}:continue` },

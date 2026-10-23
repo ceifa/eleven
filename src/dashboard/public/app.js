@@ -3437,6 +3437,11 @@ function modelCard(entry, index, total, ops, opts = {}) {
               : h("div", { class: "text-sm opacity-50", style: "padding:0.3rem 0" }, "not a reasoning model"),
             canReason ? "Thinking effort while this model drives a turn." : undefined),
         ),
+        provider === "claude-code"
+          ? labeled("Account", h("input", { class: "input input-sm w-full font-mono", value: entry.account ?? "", placeholder: "this machine's login",
+              onchange: (e) => ops.patch(index, (m) => { m.account = e.target.value.trim() || undefined; }, true) }),
+              "Run on another Claude login, signed in with: eleven claude-login <account>. List the model again under a second account to fail over when one runs out.")
+          : null,
         labeled("Tools",
           h("div", { class: "flex flex-wrap gap-3 py-1" },
             supported.map((tool) => {

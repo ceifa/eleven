@@ -79,7 +79,12 @@ or a sent message — so the failure comes with two buttons instead: **Continue*
 picks the dead turn up where it stopped, **Restart** drops that attempt and runs
 the request again from nothing. Either way the rest of the sequence takes over.
 `autoFailover` (a toggle on the Models page) skips that question: the next model
-picks the turn up on its own, exactly as **Continue** would. Any scope — workspace, group, topic —
+picks the turn up on its own, exactly as **Continue** would. A Claude Code entry
+may name an `account`: `{ "model": "claude-code/opus", "account": "spare" }` runs
+on a login of its own, signed in once with `eleven claude-login spare`. List the
+same model under two accounts and a spent subscription fails over to the other
+one; both share one transcript store, so the second account resumes where the
+first stopped. Any scope — workspace, group, topic —
 may carry its own `models` sequence, and the most specific one replaces the
 inherited sequence outright. `tools` narrows capabilities (`read`, `bash`,
 `edit`, `write`, and `web`/`agent` on the Claude Code runtime); a workspace's

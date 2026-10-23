@@ -66,12 +66,18 @@ export interface ProviderUsage {
   facts?: { label: string; value: string }[];
 }
 
+/** Which logins a provider's quota is read for. Only Claude Code runs more
+ * than one; undefined is the machine's own. */
+export interface UsageAccounts {
+  claude?: (string | undefined)[];
+}
+
 /** Quota fetchers by provider — the single source of which providers report
  * subscription usage. */
-const USAGE_FETCHERS: Record<string, () => Promise<ProviderUsage>> = {
+const USAGE_FETCHERS: Record<string, (accounts: UsageAccounts) => Promise<ProviderUsage>> = {
   "openai-codex": () => fetchCodexUsage("openai-codex"),
   "github-copilot": () => fetchCopilotUsage("github-copilot"),
-  "claude-code": () => fetchClaudeUsage(),
+  "claude-code": (accounts) => fetchClaudeUsage(accounts.claude),
   kiro: () => fetchKiroUsage(),
 };
 
@@ -79,10 +85,10 @@ const USAGE_FETCHERS: Record<string, () => Promise<ProviderUsage>> = {
 export const USAGE_PROVIDERS = Object.keys(USAGE_FETCHERS);
 
 /** Fetch the subscription quota of one provider. */
-export async function fetchUsageForProvider(provider: string): Promise<ProviderUsage> {
+export async function fetchUsageForProvider(provider: string, accounts: UsageAccounts = {}): Promise<ProviderUsage> {
   const fetcher = USAGE_FETCHERS[provider];
   if (!fetcher) throw new Error(`subscription usage is not available for ${provider}`);
-  return fetcher();
+  return fetcher(accounts);
 }
 
 /** Fetch the subscription quota for the provider behind a model reference. */
@@ -100,11 +106,11 @@ export interface ProviderUsageReport {
 
 /** Collect quota reports for a set of providers, one entry per provider, never
  * throwing — consumers decide how to present errors and unsupported ones. */
-export async function collectProviderUsage(providers: string[]): Promise<ProviderUsageReport[]> {
+export async function collectProviderUsage(providers: string[], accounts: UsageAccounts = {}): Promise<ProviderUsageReport[]> {
   return Promise.all(providers.map(async (provider) => {
     if (!(provider in USAGE_FETCHERS)) return { provider, unsupported: true };
     try {
-      return { provider, usage: await fetchUsageForProvider(provider) };
+      return { provider, usage: await fetchUsageForProvider(provider, accounts) };
     } catch (error) {
       return { provider, error: error instanceof Error ? error.message : String(error) };
     }
@@ -128,10 +134,31 @@ async function providerToken(provider: string, label: string): Promise<string> {
   return token;
 }
 
-async function fetchClaudeUsage(): Promise<ProviderUsage> {
+/** One card for every Claude login: each window says which account it is,
+ * and an account that cannot be read says so without hiding the others. */
+async function fetchClaudeUsage(accounts: (string | undefined)[] = [undefined]): Promise<ProviderUsage> {
+  if (accounts.length <= 1) return fetchClaudeAccountUsage(accounts[0]);
+  const results = await Promise.allSettled(accounts.map((account) => fetchClaudeAccountUsage(account)));
+  const usage: ProviderUsage = { provider: "Claude Code", windows: [], facts: [] };
+  const plans = new Set<string>();
+  results.forEach((result, index) => {
+    const name = accounts[index] ?? "default";
+    if (result.status === "rejected") {
+      usage.facts!.push({ label: name, value: result.reason instanceof Error ? result.reason.message : String(result.reason) });
+      return;
+    }
+    if (result.value.plan) plans.add(result.value.plan);
+    for (const window of result.value.windows) usage.windows.push({ ...window, label: `${name} · ${window.label}` });
+  });
+  if (!usage.windows.length) throw new Error(usage.facts!.map((fact) => `${fact.label}: ${fact.value}`).join("; "));
+  if (plans.size) usage.plan = [...plans].join(", ");
+  return usage;
+}
+
+async function fetchClaudeAccountUsage(account: string | undefined): Promise<ProviderUsage> {
   let data: Awaited<ReturnType<typeof fetchClaudeCodeRateLimits>>;
   try {
-    data = await fetchClaudeCodeRateLimits();
+    data = await fetchClaudeCodeRateLimits(account);
   } catch (error) {
     throw new Error(`Claude Code usage lookup failed: ${error instanceof Error ? error.message : error}`);
   }
@@ -148,7 +175,9 @@ async function fetchClaudeUsage(): Promise<ProviderUsage> {
   add("Opus weekly", limits?.seven_day_opus);
   add("Sonnet weekly", limits?.seven_day_sonnet);
   for (const scoped of limits?.model_scoped ?? []) add(scoped.display_name, scoped);
-  if (!windows.length && !data.subscription_type) throw new Error("Claude Code did not report subscription limits");
+  if (!windows.length && !data.subscription_type) {
+    throw new Error(account ? `not signed in — run \`eleven claude-login ${account}\`` : "Claude Code did not report subscription limits");
+  }
   return {
     provider: "Claude Code",
     plan: data.subscription_type ? titleCase(data.subscription_type) : undefined,

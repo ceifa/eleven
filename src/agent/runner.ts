@@ -23,6 +23,7 @@ import {
   setClaudeProseListener,
   setClaudePanelListener,
   setClaudeToolListener,
+  setClaudeAccount,
   setClaudeWorkspaceTools,
   steerClaudeSession,
   unregisterClaudeSession,
@@ -35,7 +36,7 @@ import {
   type ToolCallsEntryData,
   type TurnErrorEntryData,
 } from "../threads/reader.ts";
-import { DEFAULT_REASONING, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
+import { DEFAULT_REASONING, entryKey, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
@@ -288,8 +289,8 @@ interface WarmSession {
   customTools?: ToolDefinition[];
   /** Read by the request-log extension at call time, so it survives failover. */
   activeModel: { current: string };
-  /** Narrow the live session to one candidate's tool allowlist. */
-  applyToolPolicy: (entryTools?: WorkspaceTool[]) => void;
+  /** Put the live session on one candidate's tool allowlist and Claude login. */
+  applyEntry: (entry: ModelEntry) => void;
   lastUsedAt: number;
 }
 
@@ -630,7 +631,7 @@ export class Runner {
         attemptHadToolActivity = false;
         hiddenToolCalls = [];
         if (index > 0) {
-          log.warn(`falling over to ${modelRef(model)} for ${threadId}`);
+          log.warn(`falling over to ${entryKey(entry)} for ${threadId}`);
           // A rewind drops the failed attempt's branch, and human input the
           // runtime was handed mid-attempt lives on that branch and nowhere
           // else. Re-prompting on top duplicates the request; rewinding would
@@ -641,9 +642,9 @@ export class Runner {
           collected.length = 0;
           events.onFailover?.();
           await session.setModel(model);
-          // Each candidate runs with its own reasoning level and tool allowlist.
+          // Each candidate runs with its own reasoning level, tool allowlist and account.
           session.setThinkingLevel(entry.reasoning ?? DEFAULT_REASONING);
-          warm.applyToolPolicy(entry.tools);
+          warm.applyEntry(entry);
           activeModel.current = modelRef(model);
         }
         lastStopReason = undefined;
@@ -743,7 +744,7 @@ export class Runner {
   ): Promise<WarmSession> {
     const systemPrompt = buildSystemPrompt(request.runtime, request.prompt);
     // Model candidates (and their reasoning/tool settings) are deliberately
-    // absent: setModel/setThinkingLevel/applyToolPolicy below reconcile the
+    // absent: setModel/setThinkingLevel/applyEntry below reconcile the
     // live session, so editing the sequence never discards a warm session.
     const signature = JSON.stringify([
       request.sessionDir,
@@ -766,7 +767,7 @@ export class Runner {
       const { session } = cached;
       if (!session.model || modelRef(session.model) !== modelRef(initial.model)) await session.setModel(initial.model);
       session.setThinkingLevel(initial.entry.reasoning ?? DEFAULT_REASONING);
-      cached.applyToolPolicy(initial.entry.tools);
+      cached.applyEntry(initial.entry);
       cached.activeModel.current = modelRef(initial.model);
       return cached;
     }
@@ -853,12 +854,13 @@ export class Runner {
     // Close over just this field: the closure lives as long as the warm
     // session, and capturing `request` would pin the turn's text and images.
     const workspaceTools = request.tools;
-    const applyToolPolicy = (entryTools?: WorkspaceTool[]) => {
-      const policy = intersectTools(workspaceTools, entryTools);
+    const applyEntry = (entry: ModelEntry) => {
+      const policy = intersectTools(workspaceTools, entry.tools);
       session.setActiveToolsByName(activeToolNames(piActive, customNames, policy));
       setClaudeWorkspaceTools(session.sessionId, policy);
+      setClaudeAccount(session.sessionId, entry.account);
     };
-    applyToolPolicy(initial.entry.tools);
+    applyEntry(initial.entry);
 
     const warm: WarmSession = {
       session,
@@ -866,7 +868,7 @@ export class Runner {
       signature,
       customTools: request.customTools,
       activeModel,
-      applyToolPolicy,
+      applyEntry,
       lastUsedAt: Date.now(),
     };
     this.warm.set(threadId, warm);

@@ -408,7 +408,7 @@ export class Gateway extends EventEmitter {
   async providerUsage(): Promise<string> {
     const providers = [...new Set(this.config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
     if (!providers.length) throw new Error("no providers configured");
-    const reports = await collectProviderUsage(providers);
+    const reports = await collectProviderUsage(providers, { claude: this.config.configuredClaudeAccounts() });
     return reports
       .map((report) => report.usage
         ? formatProviderUsage(report.usage)

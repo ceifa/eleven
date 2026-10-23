@@ -8,7 +8,7 @@ import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig } from "../config.ts";
-import { collectProviderUsage } from "../provider-usage.ts";
+import { collectProviderUsage, usageLogins } from "../provider-usage.ts";
 import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import { listWorkspaceSkills } from "../agent/runner.ts";
@@ -21,6 +21,8 @@ import { conversationIdentity } from "../threads/conversation.ts";
 import { displayTitle } from "../threads/title.ts";
 import { queryMatcher, searchTranscript, type TranscriptMatch } from "../threads/search.ts";
 import { findModel, modelRuntime } from "../agent/pi.ts";
+import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code.ts";
+import { claudeEmail, signedInAccounts } from "../accounts.ts";
 import { logger } from "../log.ts";
 import { dashboardTool } from "./tool.ts";
 
@@ -711,7 +713,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // Subscription quotas for every provider the sequences reference. Network
       // calls behind it are slow — the UI fetches this after first paint.
       if (method === "GET" && path === "/usage") {
-        return send(200, await collectProviderUsage(config.configuredLogins()));
+        return send(200, await collectProviderUsage(usageLogins(config.configuredLogins())));
       }
       // The other half of the question the endpoint above answers: not what a
       // provider has left, but what was spent getting there — which is the only
@@ -744,9 +746,17 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           config.resolved.models.map((entry) => entry.model.split("/")[0]).filter(Boolean),
         );
         for (const model of await modelRuntime.getAvailable()) configured.add(model.provider);
+        // The other logins a model entry can pick, by account name.
+        const accounts = signedInAccounts();
+        for (const login of accounts) configured.add(login.provider);
         return send(
           200,
-          [...configured].sort().map((provider) => ({ provider, ...authStatus(provider) })),
+          [...configured].sort().map((provider) => ({
+            provider,
+            ...authStatus(provider),
+            ...(provider === CLAUDE_CODE_PROVIDER && { machineLabel: claudeEmail() }),
+            accounts: accounts.filter((login) => login.provider === provider).map(({ account, label }) => ({ name: account, label })),
+          })),
         );
       }
       return send(404, { error: "not found" });

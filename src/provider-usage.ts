@@ -1,5 +1,5 @@
 import { credentials, modelRuntime } from "./agent/pi.ts";
-import { currentAccount, runOnAccount } from "./accounts.ts";
+import { currentAccount, runOnAccount, signedInAccounts } from "./accounts.ts";
 import { fetchClaudeCodeRateLimits } from "./agent/claude-code.ts";
 import { logger } from "./log.ts";
 
@@ -114,6 +114,22 @@ export async function collectProviderUsage(logins: { provider: string; account?:
       return { ...login, error: error instanceof Error ? error.message : String(error) };
     }
   })));
+}
+
+/** The logins a quota report covers: the ones the config runs on, plus every
+ * account signed in to a provider it uses — a spare login has a quota worth
+ * watching before any entry points at it. */
+export function usageLogins(configured: { provider: string; account?: string }[]): { provider: string; account?: string }[] {
+  const providers = [...new Set(configured.map((login) => login.provider))];
+  const accounts = signedInAccounts();
+  const logins = providers.flatMap((provider) => [
+    ...configured.filter((login) => login.provider === provider && !login.account),
+    ...[...new Set([
+      ...configured.filter((login) => login.provider === provider && login.account).map((login) => login.account!),
+      ...accounts.filter((login) => login.provider === provider).map((login) => login.account),
+    ])].map((account) => ({ provider, account })),
+  ]);
+  return logins;
 }
 
 /** How to sign the login the running operation is on (back) in. */

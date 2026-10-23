@@ -6,6 +6,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { accountCredentials } from "../accounts.ts";
 import { logger } from "../log.ts";
 import { claudeCodeProvider } from "./claude-code.ts";
 
@@ -21,7 +22,8 @@ export const agentDir = getAgentDir();
  * default so plain CLI commands don't wait on the network; the daemon calls
  * `refreshModelCatalogs()` after it is up.
  */
-export const modelRuntime = await ModelRuntime.create();
+export const credentials = accountCredentials();
+export const modelRuntime = await ModelRuntime.create({ credentials });
 // Claude Code is an ambient local runtime: it uses the official Agent SDK and
 // the login managed by `claude auth login`, never Pi's Anthropic OAuth/API path.
 modelRuntime.registerNativeProvider(claudeCodeProvider);

@@ -406,13 +406,13 @@ export class Gateway extends EventEmitter {
 
   /** Live subscription quotas for every provider configured in eleven. */
   async providerUsage(): Promise<string> {
-    const providers = [...new Set(this.config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
-    if (!providers.length) throw new Error("no providers configured");
-    const reports = await collectProviderUsage(providers, { claude: this.config.configuredClaudeAccounts() });
+    const logins = this.config.configuredLogins();
+    if (!logins.length) throw new Error("no providers configured");
+    const reports = await collectProviderUsage(logins);
     return reports
       .map((report) => report.usage
         ? formatProviderUsage(report.usage)
-        : `**${report.provider}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
+        : `**${report.provider}${report.account ? ` (${report.account})` : ""}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
       .join("\n\n");
   }
 

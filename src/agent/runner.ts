@@ -23,7 +23,6 @@ import {
   setClaudeProseListener,
   setClaudePanelListener,
   setClaudeToolListener,
-  setClaudeAccount,
   setClaudeWorkspaceTools,
   steerClaudeSession,
   unregisterClaudeSession,
@@ -37,6 +36,7 @@ import {
   type TurnErrorEntryData,
 } from "../threads/reader.ts";
 import { DEFAULT_REASONING, entryKey, PI_BUILTIN_TOOLS, type ModelEntry, type WorkspaceTool } from "../config.ts";
+import { runOnAccount } from "../accounts.ts";
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
@@ -289,8 +289,8 @@ interface WarmSession {
   customTools?: ToolDefinition[];
   /** Read by the request-log extension at call time, so it survives failover. */
   activeModel: { current: string };
-  /** Put the live session on one candidate's tool allowlist and Claude login. */
-  applyEntry: (entry: ModelEntry) => void;
+  /** Narrow the live session to one candidate's tool allowlist. */
+  applyToolPolicy: (entryTools?: WorkspaceTool[]) => void;
   lastUsedAt: number;
 }
 
@@ -530,7 +530,9 @@ export class Runner {
     if (missing.length) log.warn(`unknown models skipped: ${missing.join(", ")}`);
     if (!models.length) throw new Error(`no usable model among: ${request.models.map((entry) => entry.model).join(", ")}`);
 
-    const warm = await this.acquireSession(threadId, request, models[0]);
+    // Credentials resolve on the candidate's own account wherever pi touches
+    // them: picking the model checks auth, prompting resolves it.
+    const warm = await runOnAccount(models[0].entry.account, () => this.acquireSession(threadId, request, models[0]));
     const { session, sessionManager, activeModel } = warm;
     // A restart of a failed turn drops that attempt's branch first, so this turn
     // opens on the transcript the failed one started from.
@@ -641,16 +643,17 @@ export class Runner {
           // don't let it leak into this turn's result.
           collected.length = 0;
           events.onFailover?.();
-          await session.setModel(model);
-          // Each candidate runs with its own reasoning level, tool allowlist and account.
+          await runOnAccount(entry.account, () => session.setModel(model));
+          // Each candidate runs with its own reasoning level and tool allowlist.
           session.setThinkingLevel(entry.reasoning ?? DEFAULT_REASONING);
-          warm.applyEntry(entry);
+          warm.applyToolPolicy(entry.tools);
           activeModel.current = modelRef(model);
         }
         lastStopReason = undefined;
         lastErrorMessage = undefined;
         try {
-          await runWithClaudeSession(session.sessionId, () => session.prompt(request.text, { images: request.images }));
+          await runOnAccount(entry.account, () =>
+            runWithClaudeSession(session.sessionId, () => session.prompt(request.text, { images: request.images })));
         } catch (error) {
           lastError = error;
           log.error(`turn failed on ${modelRef(model)}: ${error}`);
@@ -744,7 +747,7 @@ export class Runner {
   ): Promise<WarmSession> {
     const systemPrompt = buildSystemPrompt(request.runtime, request.prompt);
     // Model candidates (and their reasoning/tool settings) are deliberately
-    // absent: setModel/setThinkingLevel/applyEntry below reconcile the
+    // absent: setModel/setThinkingLevel/applyToolPolicy below reconcile the
     // live session, so editing the sequence never discards a warm session.
     const signature = JSON.stringify([
       request.sessionDir,
@@ -767,7 +770,7 @@ export class Runner {
       const { session } = cached;
       if (!session.model || modelRef(session.model) !== modelRef(initial.model)) await session.setModel(initial.model);
       session.setThinkingLevel(initial.entry.reasoning ?? DEFAULT_REASONING);
-      cached.applyEntry(initial.entry);
+      cached.applyToolPolicy(initial.entry.tools);
       cached.activeModel.current = modelRef(initial.model);
       return cached;
     }
@@ -854,13 +857,12 @@ export class Runner {
     // Close over just this field: the closure lives as long as the warm
     // session, and capturing `request` would pin the turn's text and images.
     const workspaceTools = request.tools;
-    const applyEntry = (entry: ModelEntry) => {
-      const policy = intersectTools(workspaceTools, entry.tools);
+    const applyToolPolicy = (entryTools?: WorkspaceTool[]) => {
+      const policy = intersectTools(workspaceTools, entryTools);
       session.setActiveToolsByName(activeToolNames(piActive, customNames, policy));
       setClaudeWorkspaceTools(session.sessionId, policy);
-      setClaudeAccount(session.sessionId, entry.account);
     };
-    applyEntry(initial.entry);
+    applyToolPolicy(initial.entry.tools);
 
     const warm: WarmSession = {
       session,
@@ -868,7 +870,7 @@ export class Runner {
       signature,
       customTools: request.customTools,
       activeModel,
-      applyEntry,
+      applyToolPolicy,
       lastUsedAt: Date.now(),
     };
     this.warm.set(threadId, warm);

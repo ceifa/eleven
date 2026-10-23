@@ -3324,10 +3324,11 @@ async function loadUsage() {
   }
   const { reports } = usageCache;
   for (const slot of document.querySelectorAll("[data-usage-provider]")) {
-    const report = reports.find((r) => r.provider === slot.dataset.usageProvider);
+    // One report per login: the machine's own, then each named account.
+    const logins = reports.filter((r) => r.provider === slot.dataset.usageProvider);
     slot.replaceChildren();
-    if (!report) continue;
-    if (report.unsupported) {
+    if (!logins.length) continue;
+    if (logins.every((r) => r.unsupported)) {
       // A provider billed per use has no quota to report, and saying so is only
       // worth the room where the provider itself is the subject. Anywhere the
       // slot is marked optional (the Usage page's strip), the row just goes.
@@ -3336,17 +3337,21 @@ async function loadUsage() {
       else slot.append(h("div", { class: "text-xs opacity-40" }, "this provider doesn't report subscription usage"));
       continue;
     }
-    if (report.error) {
-      slot.append(h("div", { class: "text-xs text-error opacity-60" }, `usage unavailable — ${report.error}`));
-      continue;
+    for (const report of logins) {
+      if (report.unsupported) continue;
+      if (report.account) slot.append(h("div", { class: "text-xs dim-label mt-1" }, `account ${report.account}`));
+      if (report.error) {
+        slot.append(h("div", { class: "text-xs text-error opacity-60" }, `usage unavailable — ${report.error}`));
+        continue;
+      }
+      const { usage } = report;
+      for (const window of usage.windows) slot.append(usageMeter(window));
+      if (usage.credits !== undefined) slot.append(h("div", { class: "text-xs opacity-60" }, `${usage.credits.toLocaleString()} credits left`));
+      for (const fact of usage.facts ?? []) slot.append(h("div", { class: "text-xs opacity-60" }, `${fact.label}: ${fact.value}`));
+      // The plan lands in the card header, next to the provider's name.
+      const plan = document.querySelector(`[data-usage-plan="${report.provider}"]`);
+      if (plan && usage.plan && !report.account) plan.textContent = `${usage.provider} · ${usage.plan}`;
     }
-    const { usage } = report;
-    for (const window of usage.windows) slot.append(usageMeter(window));
-    if (usage.credits !== undefined) slot.append(h("div", { class: "text-xs opacity-60" }, `${usage.credits.toLocaleString()} credits left`));
-    for (const fact of usage.facts ?? []) slot.append(h("div", { class: "text-xs opacity-60" }, `${fact.label}: ${fact.value}`));
-    // The plan lands in the card header, next to the provider's name.
-    const plan = document.querySelector(`[data-usage-plan="${report.provider}"]`);
-    if (plan && usage.plan) plan.textContent = `${usage.provider} · ${usage.plan}`;
   }
   // A strip whose every row turned out to have no quota is a heading over
   // nothing: it goes too.
@@ -3437,11 +3442,9 @@ function modelCard(entry, index, total, ops, opts = {}) {
               : h("div", { class: "text-sm opacity-50", style: "padding:0.3rem 0" }, "not a reasoning model"),
             canReason ? "Thinking effort while this model drives a turn." : undefined),
         ),
-        provider === "claude-code"
-          ? labeled("Account", h("input", { class: "input input-sm w-full font-mono", value: entry.account ?? "", placeholder: "this machine's login",
-              onchange: (e) => ops.patch(index, (m) => { m.account = e.target.value.trim() || undefined; }, true) }),
-              "Run on another Claude login, signed in with: eleven claude-login <account>. List the model again under a second account to fail over when one runs out.")
-          : null,
+        labeled("Account", h("input", { class: "input input-sm w-full font-mono", value: entry.account ?? "", placeholder: "this machine's login",
+            onchange: (e) => ops.patch(index, (m) => { m.account = e.target.value.trim() || undefined; }, true) }),
+          `Run on another login of this provider, signed in with: eleven login ${provider} <account>. List the model again under a second account to fail over when one runs out.`),
         labeled("Tools",
           h("div", { class: "flex flex-wrap gap-3 py-1" },
             supported.map((tool) => {

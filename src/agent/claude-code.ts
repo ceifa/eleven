@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.ts";
-import { CLAUDE_ACCOUNTS_DIR } from "../paths.ts";
+import { accountDir, currentAccount } from "../accounts.ts";
 import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
@@ -130,8 +130,6 @@ export interface ClaudeSessionRegistration {
   excludeNativeTools?: readonly string[];
   /** Executable, request-bound tools (Telegram today), never Pi's builtin tools. */
   customTools: AgentTool[];
-  /** Named login the next turn runs on (see claudeAccountDir); undefined is the machine's own. */
-  account?: string;
 }
 
 interface RegisteredSession extends ClaudeSessionRegistration {
@@ -246,13 +244,6 @@ export function unregisterClaudeSession(sessionId: string): void {
 export function setClaudeWorkspaceTools(sessionId: string, tools: WorkspaceTool[] | undefined): void {
   const session = sessions.get(sessionId);
   if (session) session.workspaceTools = tools;
-}
-
-/** Switch the login of a live registration — the runner applies each model
- * candidate's own account before prompting it. */
-export function setClaudeAccount(sessionId: string, account: string | undefined): void {
-  const session = sessions.get(sessionId);
-  if (session) session.account = account;
 }
 
 /** Delete every hidden Claude transcript owned by one Pi session. */
@@ -709,7 +700,7 @@ async function consumeClaudeQuery(
       },
       abortController,
       includePartialMessages: false,
-      env: claudeChildEnv(registration.account),
+      env: claudeChildEnv(),
       stderr: (line) => log.warn(line.trim()),
     };
 
@@ -1085,16 +1076,16 @@ function claudeHome(): string {
 }
 
 /**
- * The config dir of a named login: `CLAUDE_CONFIG_DIR=<it> claude auth login`
- * signs an account in. A full login rather than a `setup-token` token, because
+ * The Claude Code config dir of an account: `CLAUDE_CONFIG_DIR=<it> claude auth
+ * login` signs it in. A full login rather than a `setup-token` token, because
  * that one lacks the profile scope the usage windows are read with.
  *
  * Its `projects` links to the machine's own: transcripts live there, and a
  * turn that fails over to another account resumes the hidden Claude session
  * the last one left. A dir of its own would strand them on the old account.
  */
-export function claudeAccountDir(account: string, root = CLAUDE_ACCOUNTS_DIR, home = claudeHome()): string {
-  const dir = join(root, account);
+export function claudeAccountDir(account: string, root?: string, home = claudeHome()): string {
+  const dir = join(accountDir(account, root), "claude");
   const projects = join(dir, "projects");
   mkdirSync(join(home, "projects"), { recursive: true });
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -1108,8 +1099,9 @@ export function claudeAccountDir(account: string, root = CLAUDE_ACCOUNTS_DIR, ho
 
 /** Do not hand Telegram/provider tokens from Eleven's daemon environment to
  * the child. Claude's local login lives under HOME/CLAUDE_CONFIG_DIR, or under
- * the account's own dir when the turn names one. */
-function claudeChildEnv(account?: string): Record<string, string | undefined> {
+ * the account's own dir when the turn runs on one. */
+function claudeChildEnv(): Record<string, string | undefined> {
+  const account = currentAccount();
   const keys = [
     "HOME", "PATH", "SHELL", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
     "LANG", "LC_ALL", "TZ", "TERM",
@@ -1160,13 +1152,14 @@ export interface ClaudeAuthProbe {
   detail?: string;
 }
 
-let authCache: { value: ClaudeAuthProbe; at: number } | undefined;
+/** Per account: each one is a login of its own. */
+const authCache = new Map<string | undefined, { value: ClaudeAuthProbe; at: number }>();
 const AUTH_CACHE_MS = 60_000;
 
 /** Read the same subscription windows as Claude Code's /usage dialog without
  * issuing a model request. The SDK marks the shape experimental, so the caller
  * intentionally consumes only its small stable-looking rate-limit subset. */
-export async function fetchClaudeCodeRateLimits(account?: string): Promise<SDKControlGetUsageResponse> {
+export async function fetchClaudeCodeRateLimits(): Promise<SDKControlGetUsageResponse> {
   const abort = new AbortController();
   let release!: () => void;
   const parked = new Promise<void>((resolve) => (release = resolve));
@@ -1177,7 +1170,7 @@ export async function fetchClaudeCodeRateLimits(account?: string): Promise<SDKCo
       cwd: process.cwd(), tools: [], mcpServers: {}, strictMcpConfig: true,
       settingSources: [], skills: [], plugins: [], persistSession: false,
       abortController: abort,
-      env: claudeChildEnv(account),
+      env: claudeChildEnv(),
       stderr: () => {},
     },
   });
@@ -1202,7 +1195,8 @@ export async function fetchClaudeCodeRateLimits(account?: string): Promise<SDKCo
 
 /** Initialize the bundled official runtime without sending a model prompt. */
 export async function probeClaudeCodeAuth(queryFn: typeof sdkQuery = sdkQuery): Promise<ClaudeAuthProbe> {
-  if (queryFn === sdkQuery && authCache && Date.now() - authCache.at < AUTH_CACHE_MS) return authCache.value;
+  const cached = authCache.get(currentAccount());
+  if (queryFn === sdkQuery && cached && Date.now() - cached.at < AUTH_CACHE_MS) return cached.value;
   const abort = new AbortController();
   let release!: () => void;
   const parked = new Promise<void>((resolve) => (release = resolve));
@@ -1247,6 +1241,6 @@ export async function probeClaudeCodeAuth(queryFn: typeof sdkQuery = sdkQuery): 
     abort.abort();
     try { sdk.close(); } catch { /* already closed */ }
   }
-  if (queryFn === sdkQuery) authCache = { value, at: Date.now() };
+  if (queryFn === sdkQuery) authCache.set(currentAccount(), { value, at: Date.now() });
   return value;
 }

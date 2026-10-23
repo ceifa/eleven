@@ -1,5 +1,5 @@
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
-import { modelRuntime } from "./agent/pi.ts";
+import { credentials, modelRuntime } from "./agent/pi.ts";
+import { currentAccount, runOnAccount } from "./accounts.ts";
 import { fetchClaudeCodeRateLimits } from "./agent/claude-code.ts";
 import { logger } from "./log.ts";
 
@@ -66,18 +66,12 @@ export interface ProviderUsage {
   facts?: { label: string; value: string }[];
 }
 
-/** Which logins a provider's quota is read for. Only Claude Code runs more
- * than one; undefined is the machine's own. */
-export interface UsageAccounts {
-  claude?: (string | undefined)[];
-}
-
 /** Quota fetchers by provider — the single source of which providers report
  * subscription usage. */
-const USAGE_FETCHERS: Record<string, (accounts: UsageAccounts) => Promise<ProviderUsage>> = {
+const USAGE_FETCHERS: Record<string, () => Promise<ProviderUsage>> = {
   "openai-codex": () => fetchCodexUsage("openai-codex"),
   "github-copilot": () => fetchCopilotUsage("github-copilot"),
-  "claude-code": (accounts) => fetchClaudeUsage(accounts.claude),
+  "claude-code": () => fetchClaudeUsage(),
   kiro: () => fetchKiroUsage(),
 };
 
@@ -85,10 +79,10 @@ const USAGE_FETCHERS: Record<string, (accounts: UsageAccounts) => Promise<Provid
 export const USAGE_PROVIDERS = Object.keys(USAGE_FETCHERS);
 
 /** Fetch the subscription quota of one provider. */
-export async function fetchUsageForProvider(provider: string, accounts: UsageAccounts = {}): Promise<ProviderUsage> {
+export async function fetchUsageForProvider(provider: string): Promise<ProviderUsage> {
   const fetcher = USAGE_FETCHERS[provider];
   if (!fetcher) throw new Error(`subscription usage is not available for ${provider}`);
-  return fetcher(accounts);
+  return fetcher();
 }
 
 /** Fetch the subscription quota for the provider behind a model reference. */
@@ -98,23 +92,34 @@ export async function fetchProviderUsage(modelRef: string): Promise<ProviderUsag
 
 export interface ProviderUsageReport {
   provider: string;
+  /** The named login this report is for; absent for the machine's own. */
+  account?: string;
   usage?: ProviderUsage;
   error?: string;
   /** This provider has no usage API eleven can read. */
   unsupported?: boolean;
 }
 
-/** Collect quota reports for a set of providers, one entry per provider, never
- * throwing — consumers decide how to present errors and unsupported ones. */
-export async function collectProviderUsage(providers: string[], accounts: UsageAccounts = {}): Promise<ProviderUsageReport[]> {
-  return Promise.all(providers.map(async (provider) => {
-    if (!(provider in USAGE_FETCHERS)) return { provider, unsupported: true };
+/** Collect quota reports for a set of logins, one entry per provider and
+ * account, never throwing — consumers decide how to present errors and
+ * unsupported ones. */
+export async function collectProviderUsage(logins: { provider: string; account?: string }[]): Promise<ProviderUsageReport[]> {
+  return Promise.all(logins.map(({ provider, account }) => runOnAccount(account, async (): Promise<ProviderUsageReport> => {
+    const login = { provider, ...(account && { account }) };
+    if (!(provider in USAGE_FETCHERS)) return { ...login, unsupported: true };
     try {
-      return { provider, usage: await fetchUsageForProvider(provider, accounts) };
+      const usage = await fetchUsageForProvider(provider);
+      return { ...login, usage: account ? { ...usage, provider: `${usage.provider} (${account})` } : usage };
     } catch (error) {
-      return { provider, error: error instanceof Error ? error.message : String(error) };
+      return { ...login, error: error instanceof Error ? error.message : String(error) };
     }
-  }));
+  })));
+}
+
+/** How to sign the login the running operation is on (back) in. */
+function loginHint(provider: string): string {
+  const account = currentAccount();
+  return account ? `run \`eleven login ${provider} ${account}\`` : "run `pi` and `/login`";
 }
 
 /**
@@ -128,37 +133,16 @@ async function providerToken(provider: string, label: string): Promise<string> {
     token = (await modelRuntime.getAuth(provider))?.auth.apiKey;
   } catch (error) {
     log.warn(`${provider} auth failed: ${error instanceof Error ? error.message : error}`);
-    throw new Error(`${label} login is not usable — run \`pi\` and \`/login\``);
+    throw new Error(`${label} login is not usable — ${loginHint(provider)}`);
   }
-  if (!token) throw new Error(`${provider} is not authenticated`);
+  if (!token) throw new Error(`${provider} is not authenticated — ${loginHint(provider)}`);
   return token;
 }
 
-/** One card for every Claude login: each window says which account it is,
- * and an account that cannot be read says so without hiding the others. */
-async function fetchClaudeUsage(accounts: (string | undefined)[] = [undefined]): Promise<ProviderUsage> {
-  if (accounts.length <= 1) return fetchClaudeAccountUsage(accounts[0]);
-  const results = await Promise.allSettled(accounts.map((account) => fetchClaudeAccountUsage(account)));
-  const usage: ProviderUsage = { provider: "Claude Code", windows: [], facts: [] };
-  const plans = new Set<string>();
-  results.forEach((result, index) => {
-    const name = accounts[index] ?? "default";
-    if (result.status === "rejected") {
-      usage.facts!.push({ label: name, value: result.reason instanceof Error ? result.reason.message : String(result.reason) });
-      return;
-    }
-    if (result.value.plan) plans.add(result.value.plan);
-    for (const window of result.value.windows) usage.windows.push({ ...window, label: `${name} · ${window.label}` });
-  });
-  if (!usage.windows.length) throw new Error(usage.facts!.map((fact) => `${fact.label}: ${fact.value}`).join("; "));
-  if (plans.size) usage.plan = [...plans].join(", ");
-  return usage;
-}
-
-async function fetchClaudeAccountUsage(account: string | undefined): Promise<ProviderUsage> {
+async function fetchClaudeUsage(): Promise<ProviderUsage> {
   let data: Awaited<ReturnType<typeof fetchClaudeCodeRateLimits>>;
   try {
-    data = await fetchClaudeCodeRateLimits(account);
+    data = await fetchClaudeCodeRateLimits();
   } catch (error) {
     throw new Error(`Claude Code usage lookup failed: ${error instanceof Error ? error.message : error}`);
   }
@@ -176,7 +160,7 @@ async function fetchClaudeAccountUsage(account: string | undefined): Promise<Pro
   add("Sonnet weekly", limits?.seven_day_sonnet);
   for (const scoped of limits?.model_scoped ?? []) add(scoped.display_name, scoped);
   if (!windows.length && !data.subscription_type) {
-    throw new Error(account ? `not signed in — run \`eleven claude-login ${account}\`` : "Claude Code did not report subscription limits");
+    throw new Error(currentAccount() ? `not signed in — ${loginHint("claude-code")}` : "Claude Code did not report subscription limits");
   }
   return {
     provider: "Claude Code",
@@ -191,7 +175,7 @@ async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
   // getAuth may refresh OAuth and update the stored credential, so read the
   // account id afterwards. ChatGPT team accounts need this header for the
   // correct subscription quota.
-  const credential = readStoredCredential(provider);
+  const credential = await credentials.read(provider);
   const accountId = credential?.type === "oauth" && typeof credential.accountId === "string"
     ? credential.accountId
     : undefined;
@@ -214,7 +198,7 @@ async function fetchCodexUsage(provider: string): Promise<ProviderUsage> {
   }
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
-      throw new Error("OpenAI login expired — run `pi` and `/login`");
+      throw new Error(`OpenAI login expired — ${loginHint(provider)}`);
     }
     throw new Error(`OpenAI usage request returned HTTP ${response.status}`);
   }
@@ -249,7 +233,7 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   // OAuth token (`refresh`). The account endpoint expects the latter. Calling
   // getAuth first validates/refreshes the credential under Pi's file lock.
   await providerToken(provider, "GitHub Copilot");
-  const credential = readStoredCredential(provider);
+  const credential = await credentials.read(provider);
   const token = credential?.type === "oauth" && typeof credential.refresh === "string"
     ? credential.refresh
     : undefined;
@@ -273,7 +257,7 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
   }
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
-      throw new Error("GitHub Copilot login expired — run `pi` and `/login`");
+      throw new Error(`GitHub Copilot login expired — ${loginHint(provider)}`);
     }
     throw new Error(`GitHub Copilot usage request returned HTTP ${response.status}`);
   }
@@ -323,7 +307,7 @@ async function fetchKiroUsage(): Promise<ProviderUsage> {
     { fetchUsage?: (credential: unknown) => Promise<KiroUsageResponse> } | undefined;
   if (!oauth?.fetchUsage) throw new Error("the installed pi-provider-kiro does not report usage");
   await providerToken("kiro", "Kiro");
-  const credential = readStoredCredential("kiro");
+  const credential = await credentials.read("kiro");
   if (credential?.type !== "oauth") throw new Error("Kiro OAuth credentials are unavailable");
 
   let data: KiroUsageResponse;

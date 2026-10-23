@@ -140,14 +140,14 @@ export interface ModelEntry {
   /** Capability allowlist while this model drives a turn; omit for everything
    * its runtime supports. Always intersected with the workspace's own tools. */
   tools?: WorkspaceTool[];
-  /** Claude Code only: the named login this entry runs on, instead of the
-   * machine's own. Listing a model twice under two accounts is how a spent
-   * subscription fails over to another one. */
+  /** The named login this entry runs on, instead of the machine's own
+   * (`eleven login <provider> <account>`). Listing a model twice under two
+   * accounts is how a spent subscription fails over to another one. */
   account?: string;
 }
 
 /** An account names a directory under eleven's state dir. */
-export const CLAUDE_ACCOUNT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
+export const ACCOUNT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
 
 /** Identity of an entry within a plan: the same model on another account is another candidate. */
 export function entryKey(entry: ModelEntry): string {
@@ -284,10 +284,15 @@ export class ConfigStore extends EventEmitter {
     return [...new Set(this.configuredModels().map((entry) => entry.model).filter(Boolean))];
   }
 
-  /** The Claude Code logins the config runs on; undefined is the machine's own. */
-  configuredClaudeAccounts(): (string | undefined)[] {
-    const claude = this.configuredModels().filter((entry) => entry.model?.startsWith("claude-code/"));
-    return [...new Set(claude.map((entry) => entry.account))];
+  /** Every login the config runs on, once per provider and account; an
+   * absent account is the machine's own. */
+  configuredLogins(): { provider: string; account?: string }[] {
+    const logins = new Map<string, { provider: string; account?: string }>();
+    for (const { model, account } of this.configuredModels()) {
+      const provider = model?.split("/", 1)[0];
+      if (provider) logins.set(`${provider}@${account ?? ""}`, { provider, ...(account && { account }) });
+    }
+    return [...logins.values()];
   }
 }
 
@@ -341,11 +346,8 @@ function validateSequence(entries: ModelEntry[] | undefined, where: string) {
       throw new Error(`${label}: unknown reasoning level "${entry.reasoning}"`);
     }
     validateTools(entry.tools, label);
-    if (entry.account !== undefined) {
-      if (!entry.model.startsWith("claude-code/")) throw new Error(`${label}: account only applies to claude-code models`);
-      if (typeof entry.account !== "string" || !CLAUDE_ACCOUNT_NAME.test(entry.account)) {
-        throw new Error(`${label}: invalid account name "${entry.account}"`);
-      }
+    if (entry.account !== undefined && (typeof entry.account !== "string" || !ACCOUNT_NAME.test(entry.account))) {
+      throw new Error(`${label}: invalid account name "${entry.account}"`);
     }
   });
 }

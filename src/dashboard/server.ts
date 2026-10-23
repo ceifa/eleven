@@ -711,8 +711,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // Subscription quotas for every provider the sequences reference. Network
       // calls behind it are slow — the UI fetches this after first paint.
       if (method === "GET" && path === "/usage") {
-        const providers = [...new Set(config.configuredModelRefs().map((ref) => ref.split("/", 1)[0]))];
-        return send(200, await collectProviderUsage(providers, { claude: config.configuredClaudeAccounts() }));
+        return send(200, await collectProviderUsage(config.configuredLogins()));
       }
       // The other half of the question the endpoint above answers: not what a
       // provider has left, but what was spent getting there — which is the only

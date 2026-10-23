@@ -7,11 +7,12 @@ import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig } from "../config.ts";
+import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, entryKey, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig, type ModelEntry } from "../config.ts";
 import { collectProviderUsage, usageLogins } from "../provider-usage.ts";
 import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
-import { listWorkspaceSkills } from "../agent/runner.ts";
+import { listWorkspaceSkills, TurnFailure } from "../agent/runner.ts";
+import { continuePrompt } from "../channels/telegram/failover.ts";
 import type { Gateway } from "../gateway.ts";
 import type { TelegramChannel } from "../channels/telegram/index.ts";
 import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
@@ -787,24 +788,39 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   }
 
   async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli", images: ImageContent[] = []) {
+    let text = message;
+    let models: ModelEntry[] | undefined;
     // turn-done/turn-error reach the UI via the gateway's own events.
-    try {
-      return await gateway.handle({
-        sessionKey,
-        text: message,
-        images: images.length ? images : undefined,
-        // The CLI prints the answer and is gone: nobody is left to press a button.
-        customTools: source === "dashboard" ? [dashboardTool] : undefined,
-        runtime: {
-          channel: source,
-          conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
-          capabilities: source === "dashboard" ? ["rich markdown", "buttons — via the dashboard tool"] : ["rich markdown"],
-        },
-        workspaceHint: gateway.threads.current(sessionKey)?.workspace,
-      });
-    } catch (error) {
-      log.warn(`${source} turn failed: ${error}`);
-      throw error;
+    for (;;) {
+      try {
+        return await gateway.handle({
+          sessionKey,
+          text,
+          images: !models && images.length ? images : undefined,
+          models,
+          // The CLI prints the answer and is gone: nobody is left to press a button.
+          customTools: source === "dashboard" ? [dashboardTool] : undefined,
+          runtime: {
+            channel: source,
+            conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
+            capabilities: source === "dashboard" ? ["rich markdown", "buttons — via the dashboard tool"] : ["rich markdown"],
+          },
+          workspaceHint: gateway.threads.current(sessionKey)?.workspace,
+        });
+      } catch (error) {
+        // The runner stops instead of failing over once an attempt ran tools — a
+        // quota spent mid-turn, the way a long cron run dies. With auto-failover
+        // on, pick the turn up on the untried tail, as a Telegram turn does; the
+        // tail is strictly shorter each time, so this ends.
+        if (config.resolved.autoFailover === true && error instanceof TurnFailure && error.remaining.length) {
+          log.warn(`${source} turn failed on ${error.failedModel}, continuing on ${entryKey(error.remaining[0]!)}: ${error.message}`);
+          models = error.remaining;
+          text = continuePrompt(error.hiddenToolCalls);
+          continue;
+        }
+        log.warn(`${source} turn failed: ${error}`);
+        throw error;
+      }
     }
   }
 

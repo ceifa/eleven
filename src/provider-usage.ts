@@ -27,6 +27,11 @@ type CodexUsageResponse = {
   };
 };
 
+type KiroUsageResponse = {
+  subscriptionTitle?: unknown;
+  usageBuckets?: { label?: unknown; resourceType?: unknown; used?: unknown; limit?: unknown; resetAt?: unknown }[];
+};
+
 type CopilotQuota = {
   percent_remaining?: unknown;
   unlimited?: unknown;
@@ -67,6 +72,7 @@ const USAGE_FETCHERS: Record<string, () => Promise<ProviderUsage>> = {
   "openai-codex": () => fetchCodexUsage("openai-codex"),
   "github-copilot": () => fetchCopilotUsage("github-copilot"),
   "claude-code": () => fetchClaudeUsage(),
+  kiro: () => fetchKiroUsage(),
 };
 
 /** Providers whose subscription quota eleven knows how to read. */
@@ -279,6 +285,43 @@ async function fetchCopilotUsage(provider: string): Promise<ProviderUsage> {
     ? titleCase(data.copilot_plan)
     : undefined;
   return { provider: "GitHub Copilot", plan, windows, facts };
+}
+
+/** Kiro comes from pi-provider-kiro, which hangs its quota reader on the
+ * provider's OAuth config — outside pi's types, hence the narrow cast. */
+async function fetchKiroUsage(): Promise<ProviderUsage> {
+  const oauth = modelRuntime.getRegisteredProviderConfig("kiro")?.oauth as
+    { fetchUsage?: (credential: unknown) => Promise<KiroUsageResponse> } | undefined;
+  if (!oauth?.fetchUsage) throw new Error("the installed pi-provider-kiro does not report usage");
+  await providerToken("kiro", "Kiro");
+  const credential = readStoredCredential("kiro");
+  if (credential?.type !== "oauth") throw new Error("Kiro OAuth credentials are unavailable");
+
+  let data: KiroUsageResponse;
+  try {
+    data = await oauth.fetchUsage(credential);
+  } catch (error) {
+    throw new Error(`Kiro usage request failed: ${error instanceof Error ? error.message : error}`);
+  }
+  const windows: UsageWindow[] = [];
+  let credits: number | undefined;
+  for (const bucket of data.usageBuckets ?? []) {
+    const used = finiteNumber(bucket.used);
+    const limit = finiteNumber(bucket.limit);
+    if (used === undefined || limit === undefined || limit <= 0) continue;
+    const reset = typeof bucket.resetAt === "string" ? Date.parse(bucket.resetAt) : Number.NaN;
+    windows.push({
+      label: typeof bucket.label === "string" && bucket.label ? bucket.label : "Usage",
+      usedPercent: Math.min(100, Math.max(0, used / limit * 100)),
+      ...(Number.isFinite(reset) ? { resetAt: reset } : {}),
+    });
+    if (bucket.resourceType === "CREDIT") credits = Math.max(0, limit - used);
+  }
+  if (!windows.length) throw new Error("Kiro did not report any subscription limits");
+  const plan = typeof data.subscriptionTitle === "string" && data.subscriptionTitle.trim()
+    ? titleCase(data.subscriptionTitle.toLowerCase())
+    : undefined;
+  return { provider: "Kiro", plan, windows, ...(credits !== undefined ? { credits } : {}) };
 }
 
 export function formatProviderUsage(usage: ProviderUsage, now = Date.now()): string {

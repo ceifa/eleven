@@ -37,7 +37,7 @@ import { discordChunks } from "./markdown.ts";
 import { disableComponents, sendMessage } from "./send.ts";
 import { DiscordTurnStatus, STOP_BUTTON_ID } from "./status.ts";
 import { discordSessionKey, parseDiscordSessionKey } from "./session-key.ts";
-import { discordTool } from "./tool.ts";
+import { discordTool, type DiscordThreadRequest } from "./tool.ts";
 
 // Message Content is privileged: it has to be switched on for the bot in the
 // Developer Portal, or the gateway refuses the connection (close 4014).
@@ -63,6 +63,7 @@ interface Target {
 
 /** A server channel or thread, as far as naming and replying need to know it. */
 interface ChannelInfo {
+  type: ChannelType;
   /** As the server shows it: `#general` for a channel, bare for a category or a thread. */
   title?: string;
   guildId?: string;
@@ -130,7 +131,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     let entry = lruTouch(chatTools, key);
     if (!entry) {
       const sent = new Set<string>();
-      entry = { tool: discordTool(rest, channelId, (text) => sent.add(text)), sent };
+      entry = { tool: discordTool(rest, channelId, (text) => sent.add(text), (request) => createThread(channelId, request)), sent };
       chatTools.set(key, entry);
       if (chatTools.size > MAX_CHAT_TOOLS) chatTools.delete(chatTools.keys().next().value!);
     }
@@ -218,6 +219,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (channel.type === ChannelType.DM || channel.type === ChannelType.GroupDM) return;
     const bare = channel.type === ChannelType.GuildCategory || THREADS.has(channel.type);
     channels.set(channel.id, {
+      type: channel.type,
       title: channel.name ? (bare ? channel.name : `#${channel.name}`) : undefined,
       guildId: channel.guild_id,
       parentId: channel.parent_id ?? undefined,
@@ -236,6 +238,54 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     } catch (error) {
       log.debug(`channel ${channelId} unavailable: ${error}`);
       return undefined;
+    }
+  }
+
+  async function createThread(channelId: string, request: DiscordThreadRequest): Promise<string> {
+    const origin = await channelInfo(channelId);
+    if (!origin?.guildId) throw new Error("threads need a server channel, not a DM");
+    if (origin.type === ChannelType.PrivateThread) throw new Error("cannot fan out a private thread into public conversations");
+    const parentId = THREADS.has(origin.type) ? origin.parentId : channelId;
+    const parent = parentId && await channelInfo(parentId);
+    const forum = parent && (parent.type === ChannelType.GuildForum || parent.type === ChannelType.GuildMedia);
+    if (!parentId || !parent || (!forum && parent.type !== ChannelType.GuildText)) {
+      throw new Error("create threads in a text channel or a forum post");
+    }
+    if (!deps.botConfig()?.groups?.[origin.guildId]) throw new Error("server is no longer allowed");
+    if (!request.message.trim()) throw new Error("thread needs an opening message");
+    const chunks = forum ? discordChunks(request.message) : [];
+    const thread = await rest.request<APIChannel>("POST", `/channels/${parentId}/threads`, {
+      body: {
+        name: request.name.trim(),
+        auto_archive_duration: 10080,
+        ...(forum
+          ? { message: { content: chunks[0], allowed_mentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds } }
+          : { type: ChannelType.PublicThread }),
+      },
+      creates: true,
+    });
+    const url = `https://discord.com/channels/${origin.guildId}/${thread.id}`;
+    try {
+      rememberChannel({ ...thread, guild_id: origin.guildId, parent_id: parentId });
+      await maintainGroupRegistry(origin.guildId, thread.id);
+      const target = { channelId: thread.id, guildId: origin.guildId };
+      const key = sessionKeyFor(target);
+      const conversation = deps.gateway.newThread(key, deps.workspace());
+      const delivery = await deps.gateway.deliverOutbound(conversation.id, request.message, async () => {
+        if (forum) {
+          for (const content of chunks.slice(1)) await sendMessage(rest, thread.id, content);
+        } else {
+          await sendMessage(rest, thread.id, request.message);
+        }
+      });
+      if (!delivery.recorded) return `Thread created: ${url}. NOT started: ${delivery.warning}. Do not create it again.`;
+      if (request.start) {
+        void runTurn(target, "[Task delegated from another conversation]\nCarry out the task in the opening message above. Work only on this subject; ask any necessary questions here.", [])
+          .catch((error) => log.error(`delegated turn in ${key} failed: ${error}`));
+      }
+      return `Thread created: ${url}\nsession_key: ${key}\n${request.start ? "Agent started independently; answers will arrive in that thread." : "Opening context recorded; waiting for a user message."}`;
+    } catch (error) {
+      return `Thread created: ${url}, but setup failed: ${error}. NOT started. Do not create it again; recover this thread instead.`;
     }
   }
 

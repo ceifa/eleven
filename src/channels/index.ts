@@ -59,7 +59,7 @@ export class Channels {
     return this.list.flatMap((channel) => channel.status());
   }
 
-  sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
+  async sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
     const owner = this.owner(sessionKey);
     if (!owner) throw new Error("thread has no channel to deliver to");
     return owner.sendToSession(sessionKey, text);

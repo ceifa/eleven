@@ -28,13 +28,13 @@ import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
 import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
-import { TurnStatus } from "../turn-status.ts";
 import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
 import { DiscordGateway } from "./gateway.ts";
 import { collectInboundMedia } from "./media.ts";
-import { DiscordRest, isNoop } from "./rest.ts";
-import { discordChunks, escapeMarkdown } from "./markdown.ts";
+import { DiscordRest } from "./rest.ts";
+import { discordChunks } from "./markdown.ts";
 import { disableComponents, sendMessage } from "./send.ts";
+import { DiscordTurnStatus, STOP_BUTTON_ID } from "./status.ts";
 import { discordSessionKey, parseDiscordSessionKey } from "./session-key.ts";
 import { discordTool } from "./tool.ts";
 
@@ -43,12 +43,9 @@ import { discordTool } from "./tool.ts";
 const INTENTS = GatewayIntentBits.Guilds | GatewayIntentBits.GuildMessages | GatewayIntentBits.DirectMessages | GatewayIntentBits.MessageContent;
 const ACK_REACTION = "👀";
 const MAX_CHAT_TOOLS = 128;
-// Discord allows about five writes per five seconds in a channel.
-const STATUS_THROTTLE_MS = 1_200;
 // The heartbeat runs every ~41 s; two missed acks is a dead connection.
 const HEALTHY_ACK_MS = 100_000;
 const CDN = "https://cdn.discordapp.com";
-const MAX_MESSAGE = 2_000;
 
 /** Where a turn lands, distilled from a live event or a bare session key (a
  * wake-up after restart has nothing else to read from). */
@@ -426,6 +423,16 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
 
     if (interaction.type === InteractionType.MessageComponent) {
       const data = interaction.data.custom_id;
+      if (data === STOP_BUTTON_ID) {
+        // The card redraws itself as stopped once the turn winds down; the
+        // press only needs acknowledging.
+        await respond({ type: InteractionResponseType.DeferredMessageUpdate });
+        const sessionKey = sessionKeyFor(target);
+        log.info(`stop pressed in ${sessionKey}`);
+        discardBurst(sessionKey);
+        await deps.gateway.interrupt(sessionKey);
+        return;
+      }
       // A pressed row has done its job: grey it out so the same action can't
       // be fired twice (and so the chat records which option was taken). This
       // is also the answer Discord waits for.
@@ -474,7 +481,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry) {
     const sessionKey = sessionKeyFor(target);
     const { channelId } = target;
-    void rest.request("POST", `/channels/${channelId}/typing`).catch(() => {});
     const { tool, sent } = toolFor(sessionKey, channelId);
 
     // Whatever owns this conversation: the person in a DM, the server in a
@@ -508,7 +514,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
         },
       },
       sent,
-      status: turnStatus(channelId, target.triggerMessageId),
+      status: new DiscordTurnStatus(rest, channelId, target.triggerMessageId),
       send: (markdown, options) => sendMessage(rest, channelId, markdown, {
         replyTo: options.reply ? target.triggerMessageId : undefined,
         buttons: options.buttons,
@@ -523,31 +529,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     // handling (including, if it comes to it, the next failover — the plan it
     // carries is strictly shorter, so the chain ends).
     if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
-  }
-
-  /** The turn's status card as a quiet Discord message. Its text is plain:
-   *  a path like `my_file_name` must not come out in italics. */
-  function turnStatus(channelId: string, replyTo?: string): TurnStatus {
-    let messageId: string | undefined;
-    const tolerate = (error: unknown) => {
-      if (!isNoop(error)) throw error;
-    };
-    return new TurnStatus({
-      post: async (content) => {
-        const message = await rest.request<APIMessage>("POST", `/channels/${channelId}/messages`, {
-          creates: true,
-          body: {
-            content: plain(content),
-            flags: MessageFlags.SuppressNotifications | MessageFlags.SuppressEmbeds,
-            allowed_mentions: { parse: [] },
-            message_reference: replyTo ? { message_id: replyTo, fail_if_not_exists: false } : undefined,
-          },
-        });
-        messageId = message.id;
-      },
-      edit: (content) => rest.request("PATCH", `/channels/${channelId}/messages/${messageId}`, { body: { content: plain(content) } }).then(() => {}, tolerate),
-      remove: () => rest.request("DELETE", `/channels/${channelId}/messages/${messageId}`).then(() => {}, tolerate),
-    }, { throttleMs: STATUS_THROTTLE_MS, rateKey: `discord:${channelId}` });
   }
 
   function describeConversation(target: Target, config: ChannelConfig | undefined): string {
@@ -627,13 +608,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   }
 
   return handle;
-}
-
-/** Status text as Discord shows it: escaped, and within a message's 2000
- *  characters (a long plan can render past that). */
-function plain(text: string): string {
-  const escaped = escapeMarkdown(text);
-  return escaped.length <= MAX_MESSAGE ? escaped : `${escaped.slice(0, MAX_MESSAGE - 1)}…`;
 }
 
 /** Whether a server message is talking to the bot: a mention of it or of the

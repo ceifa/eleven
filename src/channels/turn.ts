@@ -93,7 +93,7 @@ export interface ChatTurn<R> {
   /** Texts any route already delivered to this conversation — shared with the
    *  channel tool, cleared when the turn ends. */
   sent: Set<string>;
-  status: TurnStatus;
+  status: Pick<TurnStatus<unknown>, "start" | "panels" | "tool" | "retry" | "finish" | "cancel">;
   send(text: string, options: ChatSendOptions): Promise<unknown>;
   failovers: FailoverOffers<R>;
   /** What a failover button needs to run this turn again. */

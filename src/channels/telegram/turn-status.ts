@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import type { ReplyParameters } from "@grammyjs/types";
-import { TurnStatus } from "../turn-status.ts";
+import { plainStatus, TurnStatus } from "../turn-status.ts";
 import { isNoop, withRetry } from "./retry.ts";
 
 // A DM tolerates roughly one message per second; a group is flood-limited at
@@ -57,6 +57,7 @@ export class TelegramTurnStatus extends TurnStatus {
         }
       },
     }, {
+      render: plainStatus,
       throttleMs: options.throttleMs ?? (group ? GROUP_THROTTLE_MS : THROTTLE_MS),
       rateKey: group ? `telegram:${chatId}` : undefined,
       toolRenderDelayMs: options.toolRenderDelayMs,

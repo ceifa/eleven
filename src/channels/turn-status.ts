@@ -13,7 +13,7 @@ const IDLE_FIRST_RENDER_DELAY_MS = 12_000;
 // Refresh the elapsed time in the running header between events; only show it
 // once the turn stops feeling instant.
 const ELAPSED_TICK_MS = 10_000;
-const ELAPSED_MIN_MS = 10_000;
+export const ELAPSED_MIN_MS = 10_000;
 const MAX_PANEL_ROWS = 12;
 const MAX_TEXT = 4_000;
 
@@ -38,15 +38,27 @@ export interface RetryStatus {
   errorMessage: string;
 }
 
+/** What a status card shows at one moment. `running` is set until the turn has
+ *  an outcome. */
+export interface StatusView {
+  panels: readonly Panel[];
+  outcome?: TurnOutcome;
+  running?: RunningStatus;
+  retry?: RetryStatus;
+}
+
 /** The one message a status card lives in, as a channel posts, edits and
  * deletes it. The surface remembers what it posted. */
-export interface StatusSurface {
-  post(text: string): Promise<void>;
-  edit(text: string): Promise<void>;
+export interface StatusSurface<R> {
+  post(card: R): Promise<void>;
+  edit(card: R): Promise<void>;
   remove(): Promise<void>;
 }
 
-export interface TurnStatusOptions {
+export interface TurnStatusOptions<R> {
+  /** The card for a view in the channel's own terms; undefined when there is
+   *  nothing worth showing. */
+  render: (view: StatusView) => R | undefined;
   /** Spacing between edits — what the chat tolerates. */
   throttleMs: number;
   /** Chats whose cards share one edit budget, because their flood limit is
@@ -62,7 +74,7 @@ export interface TurnStatusOptions {
  * currently running, and provider retries. Panels and retries are a durable
  * record of the turn; a message that only ever showed tool status is deleted
  * when the turn ends — the reply (or failure notice) that follows supersedes it. */
-export class TurnStatus {
+export class TurnStatus<R = string> {
   private readonly board = new PanelBoard();
   /** Tools whose own rows are on screen — their argument preview adds nothing. */
   private readonly reporting = new Set<string>();
@@ -73,19 +85,21 @@ export class TurnStatus {
   private timer: NodeJS.Timeout | undefined;
   private ticker: NodeJS.Timeout | undefined;
   private lastSentAt = 0;
-  private lastText = "";
-  private pendingText: string | undefined;
+  private lastKey = "";
+  private pending: { card: R; key: string } | undefined;
   private draining: Promise<void> | undefined;
   private outcome: TurnOutcome | undefined;
   private dead = false;
-  private readonly surface: StatusSurface;
+  private readonly surface: StatusSurface<R>;
+  private readonly render: (view: StatusView) => R | undefined;
   private readonly throttleMs: number;
   private readonly rateKey: string | undefined;
   private readonly toolRenderDelayMs: number;
   private readonly idleRenderDelayMs: number;
 
-  constructor(surface: StatusSurface, options: TurnStatusOptions) {
+  constructor(surface: StatusSurface<R>, options: TurnStatusOptions<R>) {
     this.surface = surface;
+    this.render = options.render;
     this.throttleMs = options.throttleMs;
     this.rateKey = options.rateKey;
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
@@ -196,9 +210,10 @@ export class TurnStatus {
     const running = this.outcome
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
-    const text = renderTurnStatus(this.board.panels, this.outcome, running, this.currentRetry);
-    if (!text || text === this.lastText || text === this.pendingText || this.dead) return this.draining ?? Promise.resolve();
-    this.pendingText = text; // latest wins while the chat is slow
+    const card = this.render({ panels: this.board.panels, outcome: this.outcome, running, retry: this.currentRetry });
+    const key = typeof card === "string" ? card : JSON.stringify(card);
+    if (card === undefined || key === this.lastKey || key === this.pending?.key || this.dead) return this.draining ?? Promise.resolve();
+    this.pending = { card, key }; // latest wins while the chat is slow
     if (!this.draining) {
       this.draining = this.drain().finally(() => { this.draining = undefined; });
     }
@@ -207,18 +222,18 @@ export class TurnStatus {
 
   private async drain(): Promise<void> {
     try {
-      while (this.pendingText !== undefined && !this.dead) {
-        const text = this.pendingText;
-        this.pendingText = undefined;
+      while (this.pending && !this.dead) {
+        const { card, key } = this.pending;
+        this.pending = undefined;
         // Wait out whichever came last: this card's own edit or another turn's
         // in the same group.
         const floor = Math.max(this.lastSentAt, (this.rateKey && lastEditAt.get(this.rateKey)) || 0);
         const wait = floor ? Math.max(0, floor + this.throttleMs - Date.now()) : 0;
         if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
         if (this.dead) return;
-        if (!this.posted) await this.post(text);
-        else await this.repost(text);
-        this.lastText = text;
+        if (!this.posted) await this.post(card);
+        else await this.surface.edit(card);
+        this.lastKey = key;
         this.lastSentAt = Date.now();
         if (this.rateKey) lastEditAt.set(this.rateKey, this.lastSentAt);
       }
@@ -230,8 +245,8 @@ export class TurnStatus {
   }
 
   /** First render: post the message. */
-  private async post(text: string): Promise<void> {
-    await this.surface.post(text);
+  private async post(card: R): Promise<void> {
+    await this.surface.post(card);
     this.posted = true;
     // From here on the running header shows elapsed time — keep it honest
     // between events. queueRender directly: the tick always exceeds the
@@ -241,11 +256,11 @@ export class TurnStatus {
     }, ELAPSED_TICK_MS);
     this.ticker.unref();
   }
+}
 
-  /** Later renders: edit the message in place. */
-  private repost(text: string): Promise<void> {
-    return this.surface.edit(text);
-  }
+/** The card as plain text, for chats that draw nothing richer. */
+export function plainStatus(view: StatusView): string | undefined {
+  return renderTurnStatus(view.panels, view.outcome, view.running, view.retry) || undefined;
 }
 
 export function renderTurnStatus(
@@ -270,37 +285,46 @@ export function renderTurnStatus(
   // A bare running header is the whole point of an event-less turn: it says the
   // message arrived. Only a call with nothing at all to report renders empty.
   if (!panels.length) return outcome || running || retry ? head : "";
-  const text = [head, ...panels.map(renderPanel)].join("\n\n");
+  const text = [head, ...panels.map((panel) => renderPanel(panel))].join("\n\n");
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
 }
+
+/** How a panel's own words are written: as they are, or escaped and dressed
+ *  for a chat that reads markdown. */
+export interface PanelStyle {
+  title: (title: string) => string;
+  text: (text: string) => string;
+}
+
+const PLAIN: PanelStyle = { title: (title) => title, text: (text) => text };
 
 /** Over the limit, finished rows give way first, oldest first, and are counted
  *  on one line: cutting the tail instead hid the work still in play behind
  *  "… N more" while a page of old ✅ stayed on screen. */
-function renderPanel(panel: Panel): string {
-  const title = panel.icon ? `${panel.icon} ${panel.title}` : panel.title;
+export function renderPanel(panel: Panel, style: PanelStyle = PLAIN): string {
+  const title = style.title(panel.icon ? `${panel.icon} ${panel.title}` : panel.title);
   const more = panel.more ?? 0;
   if (panel.rows.length > MAX_PANEL_ROWS) {
     let hide = panel.rows.length - MAX_PANEL_ROWS + 1;
     const shown = panel.rows.filter((row) => row.state !== "done" || hide-- <= 0);
     const done = panel.rows.length - shown.length;
-    if (done) return renderRows(`${title}\n✅ ${done} done`, shown, MAX_PANEL_ROWS - 1, more);
+    if (done) return renderRows(`${title}\n✅ ${done} done`, shown, MAX_PANEL_ROWS - 1, more, style);
   }
-  return renderRows(title, panel.rows, MAX_PANEL_ROWS, more);
+  return renderRows(title, panel.rows, MAX_PANEL_ROWS, more, style);
 }
 
 /** `more` is what the producer left out, on top of what this cap hides: a
  *  count of the rows that arrived would understate a 40-agent fan-out as
  *  "… 2 more". */
-function renderRows(title: string, rows: readonly PanelRow[], limit: number, more: number): string {
-  const visible = rows.slice(0, limit).map(renderRow);
+function renderRows(title: string, rows: readonly PanelRow[], limit: number, more: number, style: PanelStyle): string {
+  const visible = rows.slice(0, limit).map((row) => renderRow(row, style));
   const hidden = Math.max(0, rows.length - limit) + more;
   if (hidden > 0) visible.push(`… ${hidden} more`);
   return `${title}\n${visible.join("\n")}`;
 }
 
-function renderRow(row: PanelRow): string {
-  return `${STATE_ICONS[row.state]} ${compact(row.text)}${row.note ? ` · ${compact(row.note, 90)}` : ""}`;
+function renderRow(row: PanelRow, style: PanelStyle): string {
+  return `${STATE_ICONS[row.state]} ${style.text(compact(row.text))}${row.note ? ` · ${style.text(compact(row.note, 90))}` : ""}`;
 }
 
 const STATE_ICONS: Record<PanelRowState, string> = {
@@ -312,12 +336,12 @@ const STATE_ICONS: Record<PanelRowState, string> = {
   stopped: "⏹",
 };
 
-function compact(value: string, limit = 120): string {
+export function compact(value: string, limit = 120): string {
   const text = value.replaceAll(/\s+/g, " ").trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1).trimEnd()}…`;
 }
 
-function formatDuration(milliseconds: number): string {
+export function formatDuration(milliseconds: number): string {
   if (milliseconds < 1_000) return `${Math.max(0, Math.round(milliseconds))}ms`;
   const seconds = Math.round(milliseconds / 1_000);
   if (seconds < 60) return `${seconds}s`;

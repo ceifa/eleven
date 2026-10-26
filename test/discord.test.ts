@@ -12,6 +12,7 @@ import { DiscordGateway } from "../src/channels/discord/gateway.ts";
 import { discordChunks, toDiscordMarkdown } from "../src/channels/discord/markdown.ts";
 import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
 import { components, disableComponents } from "../src/channels/discord/send.ts";
+import { renderDiscordCard, STOP_BUTTON_ID } from "../src/channels/discord/status.ts";
 import { discordSessionKey, parseDiscordSessionKey } from "../src/channels/discord/session-key.ts";
 import { conversationModelScopes, parseSessionKey } from "../src/channels/session-key.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
@@ -134,6 +135,22 @@ test("mentioning the role Discord made for the bot is mentioning the bot", () =>
   assert.equal(addressesBot(message, "9", new Set(["777"])), true);
   assert.equal(addressesBot(message, "9", new Set()), false);
   assert.equal(addressesBot({ ...message, mention_roles: [], referenced_message: { author: { id: "9" } } as never }, "9", new Set()), true);
+});
+
+test("the status card says how the turn is going in its colour, and can stop it while it runs", () => {
+  const panels = [{ title: "Plan", rows: [{ text: "edit my_file_name", state: "active" as const }] }];
+  const running = renderDiscordCard({ panels, running: { tool: { name: "bash", summary: "ls *.ts" }, elapsedMs: 75_000 } })!;
+  const [container, row] = running.components as [{ accent_color: number; components: { content?: string }[] }, { components: { custom_id: string }[] }];
+  assert.equal(container.accent_color, 0x5865f2);
+  assert.equal(container.components[0]!.content, "⚙️ **Working**\n-# 1m15s · 🔧 bash · ls \\*.ts");
+  // Tool output is text, not markup: an underscore in a path stays an underscore.
+  assert.equal(container.components[2]!.content, "**Plan**\n⏳ edit my\\_file\\_name");
+  assert.equal(row.components[0]!.custom_id, STOP_BUTTON_ID);
+
+  const done = renderDiscordCard({ panels, outcome: "completed" })!;
+  assert.equal(done.components.length, 1, "a finished turn has nothing left to stop");
+  assert.equal((done.components[0] as { accent_color: number }).accent_color, 0x57f287);
+  assert.equal(renderDiscordCard({ panels: [] }), undefined);
 });
 
 /** A socket the gateway can drive and the test can speak through. */

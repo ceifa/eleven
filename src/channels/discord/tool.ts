@@ -10,6 +10,7 @@ const threadParameters = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 100, description: "Short title for the separate conversation" }),
   message: Type.String({ minLength: 1, description: "Self-contained task and context; the parent's history is NOT copied" }),
   start: Type.Optional(Type.Boolean({ description: "Start an independent agent turn immediately (default false)" })),
+  persistent: Type.Optional(Type.Boolean({ description: "Keep this conversation's agent context across idle periods until explicitly archived (default false)" })),
 });
 export type DiscordThreadRequest = Static<typeof threadParameters>;
 

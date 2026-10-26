@@ -23,6 +23,7 @@ import { logger } from "../../log.ts";
 import { keyedLane, lruTouch } from "../../util.ts";
 import { capped } from "../avatars.ts";
 import type { BotDeps } from "../bots.ts";
+import type { ChannelDestination, CreatedConversation } from "../index.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
@@ -83,6 +84,11 @@ export interface BotHandle {
   discardBurst(sessionKey: string): boolean;
   /** Deliver literal text to a conversation, by session key. */
   send(sessionKey: string, markdown: string): Promise<void>;
+  openThread(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation>;
+  prompt(sessionKey: string, text: string): Promise<void>;
+  archive(sessionKey: string): Promise<void>;
+  destinations(): Promise<ChannelDestination[]>;
+  describe(sessionKey: string): Promise<ChannelDestination>;
   welcome(request: PairingRequest): Promise<void>;
   /** The picture of a person (DM) or a server, as stored bytes. */
   picture(kind: "user" | "guild", id: string): Promise<Buffer | undefined>;
@@ -115,6 +121,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     wake,
     discardBurst,
     send,
+    openThread,
+    prompt,
+    archive,
+    destinations,
+    describe,
     welcome,
     picture,
     stop,
@@ -131,7 +142,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     let entry = lruTouch(chatTools, key);
     if (!entry) {
       const sent = new Set<string>();
-      entry = { tool: discordTool(rest, channelId, (text) => sent.add(text), (request) => createThread(channelId, request)), sent };
+      entry = { tool: discordTool(rest, channelId, (text) => sent.add(text), async (request) => {
+        const created = await createThread(channelId, request);
+        if (created.warning) return `Thread created: ${created.url}. NOT started: ${created.warning}. Do not create it again.`;
+        return `Thread created: ${created.url}\nsession_key: ${created.sessionKey}\n${request.start ? "Agent started independently; answers will arrive in that thread." : "Opening context recorded; waiting for a user message."}`;
+      }), sent };
       chatTools.set(key, entry);
       if (chatTools.size > MAX_CHAT_TOOLS) chatTools.delete(chatTools.keys().next().value!);
     }
@@ -145,6 +160,8 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   const lanes = new Map<string, Promise<unknown>>();
   const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
   const alreadyHandled = createSeenMessages();
+  const archiveTimer = setInterval(() => void flushArchives(), 60_000);
+  archiveTimer.unref();
 
   function discardBurst(sessionKey: string): boolean {
     return bursts.discard(sessionKey);
@@ -153,6 +170,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   gateway.on("ready", (ready) => {
     self = ready.user;
     log.info(`@${self.username} connected`);
+    void flushArchives();
     if (!commandsSynced) {
       commandsSynced = true;
       void syncCommands(ready.application.id).catch((error) => {
@@ -241,7 +259,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     }
   }
 
-  async function createThread(channelId: string, request: DiscordThreadRequest): Promise<string> {
+  async function createThread(channelId: string, request: DiscordThreadRequest): Promise<CreatedConversation> {
     const origin = await channelInfo(channelId);
     if (!origin?.guildId) throw new Error("threads need a server channel, not a DM");
     if (origin.type === ChannelType.PrivateThread) throw new Error("cannot fan out a private thread into public conversations");
@@ -264,13 +282,15 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       },
       creates: true,
     });
-    const url = `https://discord.com/channels/${origin.guildId}/${thread.id}`;
+    const target = { channelId: thread.id, guildId: origin.guildId };
+    const sessionKey = sessionKeyFor(target);
+    const created: CreatedConversation = { sessionKey, url: `https://discord.com/channels/${origin.guildId}/${thread.id}`, recorded: false };
     try {
       rememberChannel({ ...thread, guild_id: origin.guildId, parent_id: parentId });
       await maintainGroupRegistry(origin.guildId, thread.id);
-      const target = { channelId: thread.id, guildId: origin.guildId };
-      const key = sessionKeyFor(target);
-      const conversation = deps.gateway.newThread(key, deps.workspace());
+      const conversation = deps.gateway.newThread(sessionKey, deps.workspace());
+      created.threadId = conversation.id;
+      if (request.persistent) deps.gateway.threads.update(conversation.id, { persistent: true });
       const delivery = await deps.gateway.deliverOutbound(conversation.id, request.message, async () => {
         if (forum) {
           for (const content of chunks.slice(1)) await sendMessage(rest, thread.id, content);
@@ -278,14 +298,16 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
           await sendMessage(rest, thread.id, request.message);
         }
       });
-      if (!delivery.recorded) return `Thread created: ${url}. NOT started: ${delivery.warning}. Do not create it again.`;
+      created.recorded = delivery.recorded;
+      created.warning = delivery.warning;
+      if (!delivery.recorded) return created;
       if (request.start) {
         void runTurn(target, "[Task delegated from another conversation]\nCarry out the task in the opening message above. Work only on this subject; ask any necessary questions here.", [])
-          .catch((error) => log.error(`delegated turn in ${key} failed: ${error}`));
+          .catch((error) => log.error(`delegated turn in ${sessionKey} failed: ${error}`));
       }
-      return `Thread created: ${url}\nsession_key: ${key}\n${request.start ? "Agent started independently; answers will arrive in that thread." : "Opening context recorded; waiting for a user message."}`;
+      return created;
     } catch (error) {
-      return `Thread created: ${url}, but setup failed: ${error}. NOT started. Do not create it again; recover this thread instead.`;
+      return { ...created, warning: `setup failed: ${error}` };
     }
   }
 
@@ -605,6 +627,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     // handling (including, if it comes to it, the next failover — the plan it
     // carries is strictly shorter, so the chain ends).
     if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
+    else if (deps.gateway.threads.current(sessionKey)?.archiveRequested) {
+      await archive(sessionKey).catch((error) => log.warn(`archive remains pending in ${sessionKey}: ${error}`));
+    }
   }
 
   function describeConversation(target: Target, config: ChannelConfig | undefined): string {
@@ -625,6 +650,75 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (!parsed || parsed.channel !== name) return undefined;
     if (parsed.guildId) return { channelId: parsed.channelId!, guildId: parsed.guildId };
     return { channelId: await dmChannel(parsed.userId!), userId: parsed.userId };
+  }
+
+  function destination(channel: APIChannel & { guild_id?: string; name?: string | null; parent_id?: string | null }, guildId: string): ChannelDestination {
+    const key = (id: string) => sessionKeyFor({ channelId: id, guildId });
+    return {
+      sessionKey: key(channel.id),
+      title: channel.name ?? channel.id,
+      kind: channel.type === ChannelType.GuildCategory ? "category"
+        : channel.type === ChannelType.GuildForum || channel.type === ChannelType.GuildMedia ? "forum"
+        : THREADS.has(channel.type) ? "thread" : "channel",
+      parent: channel.parent_id ? key(channel.parent_id) : undefined,
+      groupTitle: deps.botConfig()?.groups?.[guildId]?.title ?? guilds.get(guildId)?.name,
+    };
+  }
+
+  async function destinations(): Promise<ChannelDestination[]> {
+    const result: ChannelDestination[] = [];
+    for (const guildId of Object.keys(deps.botConfig()?.groups ?? {})) {
+      const list = await rest.get<APIChannel[]>(`/guilds/${guildId}/channels`);
+      for (const channel of list) result.push(destination(channel, guildId));
+    }
+    return result;
+  }
+
+  async function describe(sessionKey: string): Promise<ChannelDestination> {
+    const parsed = parseDiscordSessionKey(sessionKey);
+    if (!parsed?.guildId || parsed.channel !== name || !deps.botConfig()?.groups?.[parsed.guildId]) throw new Error("server is not allowed");
+    const channel = await rest.get<APIChannel & { guild_id?: string }>(`/channels/${parsed.channelId}`);
+    if (channel.guild_id !== parsed.guildId) throw new Error("channel does not belong to this server");
+    rememberChannel(channel);
+    return destination(channel, parsed.guildId);
+  }
+
+  async function serverTarget(sessionKey: string): Promise<Target> {
+    const target = await targetOf(sessionKey);
+    if (!target?.guildId || !deps.botConfig()?.groups?.[target.guildId]) throw new Error("server is not allowed");
+    const info = await channelInfo(target.channelId);
+    if (info?.guildId !== target.guildId) throw new Error("channel does not belong to this server");
+    return target;
+  }
+
+  async function openThread(sessionKey: string, name: string, text: string, persistent = false) {
+    const target = await serverTarget(sessionKey);
+    return createThread(target.channelId, { name, message: text, persistent });
+  }
+
+  async function prompt(sessionKey: string, text: string) {
+    const target = await serverTarget(sessionKey);
+    const current = deps.gateway.threads.current(sessionKey);
+    if (current?.archiveRequested) deps.gateway.threads.update(current.id, { archiveRequested: false });
+    await maintainGroupRegistry(target.guildId!, target.channelId);
+    void runTurn(target, text, []).catch((error) => log.error(`remote turn in ${sessionKey} failed: ${error}`));
+  }
+
+  async function archive(sessionKey: string) {
+    const target = await serverTarget(sessionKey);
+    if (!THREADS.has(channels.get(target.channelId)!.type)) throw new Error("only threads can be archived");
+    const thread = deps.gateway.threads.current(sessionKey);
+    if (thread && !thread.archiveRequested) deps.gateway.threads.update(thread.id, { archiveRequested: true });
+    if (thread && deps.gateway.isThreadRunning(thread.id)) return;
+    await rest.request("PATCH", `/channels/${target.channelId}`, { body: { archived: true } });
+    if (thread) deps.gateway.threads.update(thread.id, { persistent: false, archiveRequested: false });
+  }
+
+  async function flushArchives() {
+    for (const thread of deps.gateway.threads.list()) {
+      if (!thread.archiveRequested || !deps.gateway.threads.isCurrent(thread.id) || parseDiscordSessionKey(thread.sessionKey)?.channel !== name) continue;
+      await archive(thread.sessionKey).catch((error) => log.warn(`archive remains pending in ${thread.sessionKey}: ${error}`));
+    }
   }
 
   async function dmChannel(userId: string): Promise<string> {
@@ -681,6 +775,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
 
   async function stop() {
     bursts.flushAll();
+    clearInterval(archiveTimer);
     gateway.stop();
   }
 

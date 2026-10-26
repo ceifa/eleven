@@ -61,3 +61,22 @@ test("prune keeps a current thread that is still inside the idle window", () => 
     cleanup();
   }
 });
+
+test("a persistent current conversation survives idle expiry and retention, but not explicit rotation", () => {
+  const { store: threads, cleanup } = store();
+  try {
+    const key = "discord:home:1:30";
+    const original = threads.rotate(key, "agent");
+    threads.update(original.id, { persistent: true, lastActivityAt: Date.now() - 43 * DAY });
+    assert.equal(threads.resolve(key, "agent", 7 * DAY).id, original.id);
+    assert.deepEqual(threads.prune(30 * DAY, 7 * DAY), []);
+    const next = threads.rotate(key, "agent", original);
+    assert.notEqual(next.id, original.id);
+    assert.equal(next.persistent, true);
+    assert.deepEqual(threads.prune(30 * DAY, 7 * DAY).map((t) => t.id), [original.id]);
+    threads.update(next.id, { persistent: false, lastActivityAt: Date.now() - 43 * DAY });
+    assert.deepEqual(threads.prune(30 * DAY, 7 * DAY).map((t) => t.id), [next.id]);
+  } finally {
+    cleanup();
+  }
+});

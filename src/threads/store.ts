@@ -11,6 +11,10 @@ export interface ThreadEntry {
   sessionFile?: string;
   /** Per-conversation overrides that survive /new. */
   model?: string;
+  /** Keep the current context through idle expiry and retention until released. */
+  persistent?: boolean;
+  /** An archival request survives a restart until the platform confirms it. */
+  archiveRequested?: boolean;
   title?: string;
   createdAt: number;
   lastActivityAt: number;
@@ -40,7 +44,7 @@ export class ThreadStore {
   /**
    * Drop stale threads past the retention window (gc.ts deletes their files).
    * Being the current thread of a conversation only protects a thread while it
-   * is still resumable: once it is past `idleMs` the next message rotates it
+   * is still resumable, unless explicitly persistent: past `idleMs` the next message rotates it
    * away anyway, so pinning it would keep dead transcripts around forever.
    */
   prune(maxAgeMs: number, idleMs: number): ThreadEntry[] {
@@ -50,7 +54,7 @@ export class ThreadStore {
     const dropped: ThreadEntry[] = [];
     for (const [id, thread] of Object.entries(this.data.threads)) {
       if (thread.lastActivityAt >= cutoff) continue;
-      if (live.has(id) && now - thread.lastActivityAt <= idleMs) continue;
+      if (live.has(id) && (thread.persistent || now - thread.lastActivityAt <= idleMs)) continue;
       dropped.push(thread);
       delete this.data.threads[id];
       // Unpin the conversation so its next message rotates a fresh thread.
@@ -64,7 +68,7 @@ export class ThreadStore {
   resolve(sessionKey: string, workspace: string, idleMs: number): ThreadEntry {
     const currentId = this.data.current[sessionKey];
     const current = currentId ? this.data.threads[currentId] : undefined;
-    if (current && Date.now() - current.lastActivityAt <= idleMs) return current;
+    if (current && (current.persistent || Date.now() - current.lastActivityAt <= idleMs)) return current;
     return this.rotate(sessionKey, workspace, current);
   }
 
@@ -75,6 +79,7 @@ export class ThreadStore {
       sessionKey,
       workspace,
       model: previous?.model,
+      persistent: previous?.persistent,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
     };

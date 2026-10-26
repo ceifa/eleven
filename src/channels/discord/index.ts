@@ -41,6 +41,32 @@ export class DiscordChannel implements Channel {
     return { channel: "discord", bot: target.channel, chatId: target.guildId ?? target.userId!, topic: target.channelId };
   }
 
+  private requiredOwner(sessionKey: string): BotHandle {
+    const handle = this.owner(sessionKey);
+    if (!handle) throw new Error("Discord channel is not running");
+    return handle;
+  }
+
+  openThread(sessionKey: string, name: string, text: string, persistent = false) {
+    return this.requiredOwner(sessionKey).openThread(sessionKey, name, text, persistent);
+  }
+
+  async destinations() {
+    return (await Promise.all([...this.pool.bots.values()].map(({ handle }) => handle.destinations()))).flat();
+  }
+
+  describe(sessionKey: string) {
+    return this.requiredOwner(sessionKey).describe(sessionKey);
+  }
+
+  prompt(sessionKey: string, text: string) {
+    return this.requiredOwner(sessionKey).prompt(sessionKey, text);
+  }
+
+  archive(sessionKey: string) {
+    return this.requiredOwner(sessionKey).archive(sessionKey);
+  }
+
   discardPending(sessionKey: string): boolean {
     return this.owner(sessionKey)?.discardBurst(sessionKey) ?? false;
   }

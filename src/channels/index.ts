@@ -17,6 +17,22 @@ export interface DeliveryTarget {
   topic?: number | string;
 }
 
+export interface ChannelDestination {
+  sessionKey: string;
+  title: string;
+  kind: "category" | "forum" | "thread" | "channel";
+  parent?: string;
+  groupTitle?: string;
+}
+
+export interface CreatedConversation {
+  sessionKey: string;
+  url: string;
+  threadId?: string;
+  recorded: boolean;
+  warning?: string;
+}
+
 /** What the daemon and the dashboard need from a chat platform. Everything
  *  addressed by session key is only ever handed keys of the channel's own type. */
 export interface Channel {
@@ -24,6 +40,11 @@ export interface Channel {
   status(): ChannelStatus[];
   /** Deliver literal operator-authored prose to the conversation. */
   sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget>;
+  openThread?(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation>;
+  prompt?(sessionKey: string, text: string): Promise<void>;
+  archive?(sessionKey: string): Promise<void>;
+  destinations?(): Promise<ChannelDestination[]>;
+  describe?(sessionKey: string): Promise<ChannelDestination>;
   /** Drop input a conversation has buffered but not yet turned into a turn.
    *  Part of stopping from outside the chat: aborting the running turn alone
    *  would leave a pending burst free to start the next one. */
@@ -63,6 +84,34 @@ export class Channels {
     const owner = this.owner(sessionKey);
     if (!owner) throw new Error("thread has no channel to deliver to");
     return owner.sendToSession(sessionKey, text);
+  }
+
+  async destinations(): Promise<ChannelDestination[]> {
+    return (await Promise.all(this.list.map((channel) => channel.destinations?.() ?? []))).flat();
+  }
+
+  async describe(sessionKey: string): Promise<ChannelDestination> {
+    const owner = this.owner(sessionKey);
+    if (!owner?.describe) throw new Error("this channel cannot describe destinations");
+    return owner.describe(sessionKey);
+  }
+
+  async openThread(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation> {
+    const owner = this.owner(sessionKey);
+    if (!owner?.openThread) throw new Error("this channel cannot open threads");
+    return owner.openThread(sessionKey, name, text, persistent);
+  }
+
+  async prompt(sessionKey: string, text: string): Promise<void> {
+    const owner = this.owner(sessionKey);
+    if (!owner?.prompt) throw new Error("this channel cannot start remote turns");
+    await owner.prompt(sessionKey, text);
+  }
+
+  async archive(sessionKey: string): Promise<void> {
+    const owner = this.owner(sessionKey);
+    if (!owner?.archive) throw new Error("this channel cannot archive conversations");
+    await owner.archive(sessionKey);
   }
 
   discardPending(sessionKey: string): boolean {

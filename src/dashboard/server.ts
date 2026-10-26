@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
+import { z } from "zod";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, entryKey, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig, type ModelEntry } from "../config.ts";
 import { collectProviderUsage, usageLogins } from "../provider-usage.ts";
@@ -603,6 +604,30 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
         // Other open dashboards drop the thread from their list too.
         broadcast({ type: "thread-deleted", threadId: id, workspace });
         return send(200, { ok: true });
+      }
+      if (method === "GET" && path === "/channels/destinations") return send(200, await channels.destinations());
+      if (method === "GET" && path === "/channels/destination") {
+        const sessionKey = z.string().min(1).parse(url.searchParams.get("sessionKey"));
+        return send(200, await channels.describe(sessionKey));
+      }
+      if (method === "POST" && path === "/channels/thread") {
+        const request = z.object({
+          sessionKey: z.string().min(1),
+          name: z.string().trim().min(1).max(100),
+          persistent: z.boolean().optional(),
+          text: z.string().trim().min(1).max(MAX_OUTBOUND_MESSAGE_CHARS),
+        }).parse(await body(req));
+        return send(201, await channels.openThread(request.sessionKey, request.name, request.text, request.persistent));
+      }
+      if (method === "POST" && path.match(/^\/threads\/[^/]+\/(prompt|archive)$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        if (!gateway.threads.isCurrent(thread.id)) throw new ApiError(409, "thread is old; use the current conversation");
+        if (path.endsWith("/archive")) await channels.archive(thread.sessionKey);
+        else {
+          const { text } = z.object({ text: z.string().trim().min(1).max(MAX_OUTBOUND_MESSAGE_CHARS) }).parse(await body(req));
+          await channels.prompt(thread.sessionKey, text);
+        }
+        return send(202, { ok: true, threadId: thread.id });
       }
       if (method === "POST" && path === "/threads") {
         const request = (await body(req)) as { workspace: string; text: string; source?: string; attachments?: unknown };

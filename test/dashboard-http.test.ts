@@ -55,6 +55,7 @@ function post(url: string, body: unknown = {}) {
 /** What the fakes below recorded, so a test can assert on side effects that
  *  never leave the daemon (a rotation, an abort, a dropped input burst). */
 interface Spy {
+  channelOps: { action: string; sessionKey: string; name?: string; text?: string; persistent?: boolean }[];
   rotated: { sessionKey: string; workspace?: string }[];
   interrupted: string[];
   discarded: string[];
@@ -120,6 +121,7 @@ async function withDashboard(
     on: () => {},
   };
   const spy: Spy = {
+    channelOps: [],
     rotated: [],
     interrupted: [],
     discarded: [],
@@ -147,6 +149,14 @@ async function withDashboard(
     newThread: (sessionKey: string, workspace?: string) => (spy.rotated.push({ sessionKey, workspace }), spy.fresh),
   };
   const telegram = {
+    destinations: async () => [{ sessionKey: "discord:home:1:20", kind: "forum", title: "inbox" }],
+    describe: async (sessionKey: string) => ({ sessionKey, kind: "thread", title: "Decision", parent: "discord:home:1:20" }),
+    openThread: async (sessionKey: string, name: string, text: string, persistent?: boolean) => {
+      spy.channelOps.push({ action: "open", sessionKey, name, text, persistent });
+      return { sessionKey: "discord:home:1:30", threadId: "new-id", url: "https://discord.com/channels/1/30", recorded: true };
+    },
+    prompt: async (sessionKey: string, text: string) => { spy.channelOps.push({ action: "prompt", sessionKey, text }); },
+    archive: async (sessionKey: string) => { spy.channelOps.push({ action: "archive", sessionKey }); },
     status: () => [],
     pairing: { list: () => [], on: () => {} },
     discardPending: (sessionKey: string) => (spy.discarded.push(sessionKey), true),
@@ -513,4 +523,41 @@ test("with auto-failover off, a CLI turn that died after its tools ran just fail
     assert.match(run.error, /usage limit reached/);
     assert.equal(spy.handled.length, 1);
   }, { handle: (_incoming, attempt) => quotaSpentMidTurn(attempt) });
+});
+
+
+test("channel control creates a recorded conversation and routes work and archival through its adapter", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    const opened = await post(`${base}/api/channels/thread`, { sessionKey: "discord:home:1:20", name: "Decision", text: "Context", persistent: true });
+    assert.equal(opened.status, 201);
+    assert.equal(JSON.parse(opened.body).sessionKey, "discord:home:1:30");
+    assert.deepEqual(spy.channelOps[0], { action: "open", sessionKey: "discord:home:1:20", name: "Decision", text: "Context", persistent: true });
+    assert.equal((await post(`${base}/api/threads/${thread.id}/prompt`, { text: "Continue this item" })).status, 202);
+    assert.equal((await post(`${base}/api/threads/${thread.id}/archive`)).status, 202);
+    assert.deepEqual(spy.channelOps.slice(1).map((op) => op.action), ["prompt", "archive"]);
+    assert.equal(spy.handled.length, 0, "does not use a dashboard turn that loses channel tools and delivery");
+  });
+});
+
+test("channel creation validates before dispatch and remote turns reject an old generation", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    assert.equal((await post(`${base}/api/channels/thread`, { sessionKey: "x", name: "", text: "Context" })).status, 400);
+    assert.equal(spy.channelOps.length, 0);
+    await post(`${base}/api/threads/${thread.id}/new`);
+    assert.equal((await post(`${base}/api/threads/${thread.id}/prompt`, { text: "Do not run" })).status, 409);
+    assert.equal(spy.channelOps.length, 0);
+  });
+});
+
+
+test("channel metadata can be discovered and looked up without a bot token in the response", async () => {
+  await withDashboard(async (base) => {
+    const list = await get(`${base}/api/channels/destinations`);
+    assert.equal(list.status, 200);
+    assert.equal(JSON.parse(list.body.toString())[0].kind, "forum");
+    const detail = await get(`${base}/api/channels/destination?sessionKey=${encodeURIComponent("discord:home:1:30")}`);
+    assert.equal(detail.status, 200);
+    assert.equal(JSON.parse(detail.body.toString()).parent, "discord:home:1:20");
+    assert.equal((await get(`${base}/api/channels/destination`)).status, 400);
+  });
 });

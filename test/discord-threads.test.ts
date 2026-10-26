@@ -50,6 +50,8 @@ function harness(t: TestContext, parentType = ChannelType.GuildText) {
     calls.push({ method, path, body: options.body });
     if (method === "GET" && path === "/channels/20") return { id: "20", type: parentType, guild_id: "1", name: "work", parent_id: "10" };
     if (method === "GET" && path === "/channels/10") return { id: "10", type: ChannelType.GuildCategory, guild_id: "1", name: "Work" };
+    if (method === "GET" && path === "/guilds/1/channels") return [{ id: "20", type: parentType, guild_id: "1", name: "inbox", parent_id: "10" }];
+    if (method === "GET" && path === "/channels/30") return { id: "30", type: ChannelType.PublicThread, guild_id: "1", name: "Decision", parent_id: "20" };
     if (method === "POST" && path.endsWith("/threads")) return { id: String(nextId++), type: ChannelType.PublicThread, parent_id: "20", name: options.body.name };
     if (failSeed && method === "POST" && path.endsWith("/messages")) throw new Error("seed unavailable");
     return { id: "message" };
@@ -199,4 +201,68 @@ test("a transcript warning keeps the created URL and prevents delegation", async
   assert.match(result, /Thread created: https:\/\/discord.com\/channels\/1\/30/);
   assert.match(result, /NOT started: disk unavailable/);
   assert.equal(turns.length, 1);
+});
+
+test("control API opens a persistent forum conversation and resumes that exact context", async (t) => {
+  const { bot, gateway, turns } = harness(t, ChannelType.GuildForum);
+  await toolOf(turns);
+  const created = await bot.openThread("discord:home:1:20", "Persistent item", "Opening context", true);
+  assert.equal(created.sessionKey, "discord:home:1:30");
+  assert.equal(created.recorded, true);
+  assert.equal(gateway.threads.get(created.threadId!)?.persistent, true);
+  await bot.prompt(created.sessionKey, "Prepare the next decision");
+  await toolOf(turns, 1);
+  assert.equal(turns[1]!.id, created.threadId);
+  assert.equal(turns[1]!.request.text, "Prepare the next decision");
+});
+
+test("a remote key cannot spoof a channel from a different server", async (t) => {
+  const { bot, turns, calls } = harness(t);
+  await toolOf(turns);
+  await assert.rejects(bot.openThread("discord:home:2:20", "Task", "Context"), /server is not allowed/);
+  assert.equal(calls.filter((call) => call.path.endsWith("/threads")).length, 0);
+});
+
+test("archive releases persistent retention only after the active turn settles", async (t) => {
+  const { bot, gateway, turns, calls } = harness(t, ChannelType.GuildForum);
+  await toolOf(turns);
+  const created = await bot.openThread("discord:home:1:20", "Persistent item", "Opening context", true);
+  let running = true;
+  t.mock.method(gateway, "isThreadRunning", () => running);
+  let finish!: () => void;
+  t.mock.method(gateway.runner, "submit", async () => {
+    await new Promise<void>((resolve) => { finish = resolve; });
+    return undefined;
+  });
+  await bot.prompt(created.sessionKey, "Resolve this item");
+  await bot.archive(created.sessionKey);
+  assert.equal(calls.some((call) => call.method === "PATCH"), false);
+  assert.equal(gateway.threads.get(created.threadId!)?.persistent, true);
+  running = false;
+  finish();
+  for (let i = 0; i < 50 && !calls.some((call) => call.method === "PATCH"); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls.find((call) => call.method === "PATCH")?.body, { archived: true });
+  assert.equal(gateway.threads.get(created.threadId!)?.persistent, false);
+});
+
+test("an unsuccessful archive retains its durable request and protected context for retry", async (t) => {
+  const { bot, gateway, turns } = harness(t, ChannelType.GuildForum);
+  await toolOf(turns);
+  const created = await bot.openThread("discord:home:1:20", "Persistent item", "Opening context", true);
+  const request = t.mock.method(DiscordRest.prototype, "request", async () => { throw new Error("unavailable"); });
+  await assert.rejects(bot.archive(created.sessionKey), /unavailable/);
+  assert.equal(gateway.threads.get(created.threadId!)?.archiveRequested, true);
+  assert.equal(gateway.threads.get(created.threadId!)?.persistent, true);
+  request.mock.restore();
+  await bot.archive(created.sessionKey);
+  assert.equal(gateway.threads.get(created.threadId!)?.archiveRequested, false);
+});
+
+
+test("destination discovery exposes the hierarchy without exposing platform credentials", async (t) => {
+  const { bot, turns } = harness(t, ChannelType.GuildForum);
+  await toolOf(turns);
+  assert.deepEqual(await bot.destinations(), [{ sessionKey: "discord:home:1:20", title: "inbox", kind: "forum", parent: "discord:home:1:10", groupTitle: "Server" }]);
+  assert.deepEqual(await bot.describe("discord:home:1:30"), { sessionKey: "discord:home:1:30", title: "Decision", kind: "thread", parent: "discord:home:1:20", groupTitle: "Server" });
+  await assert.rejects(bot.describe("discord:home:2:30"), /server is not allowed/);
 });

@@ -79,6 +79,10 @@ export interface TopicConfig extends ModelScope {
   iconEmojiId?: string;
   /** Extra instructions appended to this topic's system prompt. */
   appendSystemPrompt?: string;
+  /** The topic this one sits in — a Discord thread's channel, a channel's
+   * category. Its instructions apply here too, and its models unless this
+   * one has its own. Self-heals from live traffic. */
+  parent?: string;
 }
 
 export interface GroupConfig extends ModelScope {

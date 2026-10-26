@@ -175,7 +175,7 @@ const CHANNEL_WORDS = {
     groupsEmpty: "none yet — message the bot in a server to add it",
     group: "server",
     topics: "Channels",
-    topicsInfo: "Every channel and thread is its own thread here and can append its own instructions. They register themselves when someone first speaks in them.",
+    topicsInfo: "Every channel and thread is its own thread here and can append its own instructions. They register themselves when someone first speaks in them, along with the category or channel they sit in — whatever is set on a category reaches every channel in it, and a channel's reaches its threads.",
     topic: "channel",
     dmTopics: false,
     tokenHint: "bot token from the Developer Portal (Message Content intent on)",

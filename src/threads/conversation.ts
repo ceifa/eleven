@@ -1,5 +1,5 @@
 import type { ChannelConfig, ChannelType } from "../config.ts";
-import { parseSessionKey } from "../channels/session-key.ts";
+import { parseSessionKey, topicChain } from "../channels/session-key.ts";
 
 /**
  * How a conversation is named for a human. A session key is precise and
@@ -43,7 +43,7 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   const group = inDm ? undefined : channel?.groups?.[target.owner.id];
   // Whoever holds the topics: the person in a DM, the group in a group.
   const owner = user ?? group;
-  const topic = target.topic === undefined ? undefined : owner?.topics?.[target.topic];
+  const [topic, ...around] = topicChain(owner, target.topic);
   const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || target.owner.id;
   const channelContext = `${PLATFORM[target.type]}${inDm ? " DM" : ""}`;
   if (target.topic === undefined) {
@@ -57,15 +57,14 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
     };
   }
   // Inside a forum the topic is the conversation; the group — or, in a DM with
-  // topic mode, the person — is where it sits. A Discord channel goes by the
-  // name its server shows, hash and all.
-  const topicName = target.type === "discord"
-    ? (topic?.title ? `#${topic.title}` : `channel ${target.topic}`)
-    : topic?.title || `topic ${target.topic}`;
+  // topic mode, the person — is where it sits, along with whatever the topic
+  // is nested in (a Discord channel's category, a thread's channel).
+  const topicName = topic?.title || `${target.type === "discord" ? "channel" : "topic"} ${target.topic}`;
+  const where = [ownerName, ...around.reverse().flatMap((parent) => parent.title ?? [])].join(" › ");
   return {
     name: topicName,
-    context: inDm ? `${channelContext} · ${ownerName}` : ownerName,
-    label: `${channelContext} · ${ownerName} · ${topicName}`,
+    context: inDm ? `${channelContext} · ${where}` : where,
+    label: `${channelContext} · ${where} · ${topicName}`,
     // The emoji's id is the version: a topic that changes its icon names a
     // new picture, and no cache anywhere keeps showing the old one.
     ...(topic?.iconEmojiId && { picture: { kind: "emoji", version: topic.iconEmojiId } as const }),

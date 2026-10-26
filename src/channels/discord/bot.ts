@@ -27,6 +27,7 @@ import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
+import { topicChain } from "../session-key.ts";
 import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
 import { DiscordGateway } from "./gateway.ts";
@@ -62,9 +63,14 @@ interface Target {
 
 /** A server channel or thread, as far as naming and replying need to know it. */
 interface ChannelInfo {
-  name?: string;
+  /** As the server shows it: `#general` for a channel, bare for a category or a thread. */
+  title?: string;
   guildId?: string;
+  /** The category a channel sits in, the channel a thread hangs off. */
+  parentId?: string;
 }
+
+const THREADS = new Set<ChannelType>([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread]);
 
 export interface BotHandle {
   name: string;
@@ -208,9 +214,14 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (role.tags?.bot_id && role.tags.bot_id === self?.id) ownRoles.add(role.id);
   }
 
-  function rememberChannel(channel: Pick<APIChannel, "id" | "type"> & { name?: string | null; guild_id?: string }) {
+  function rememberChannel(channel: Pick<APIChannel, "id" | "type"> & { name?: string | null; guild_id?: string; parent_id?: string | null }) {
     if (channel.type === ChannelType.DM || channel.type === ChannelType.GroupDM) return;
-    channels.set(channel.id, { name: channel.name ?? undefined, guildId: channel.guild_id });
+    const bare = channel.type === ChannelType.GuildCategory || THREADS.has(channel.type);
+    channels.set(channel.id, {
+      title: channel.name ? (bare ? channel.name : `#${channel.name}`) : undefined,
+      guildId: channel.guild_id,
+      parentId: channel.parent_id ?? undefined,
+    });
   }
 
   /** A channel's name, from the gateway's snapshot or — for one created while
@@ -314,8 +325,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       return role ? `@${role}` : raw;
     });
     text = text.replaceAll(/<#(\d+)>/g, (raw, id: string) => {
-      const channel = channels.get(id);
-      return channel?.name ? `#${channel.name}` : raw;
+      return channels.get(id)?.title ?? raw;
     });
     return text.trim();
   }
@@ -338,11 +348,18 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   }
 
   /** Keep the registry in sync with live traffic: the server's name heals on
-   *  any message; its channels and threads register themselves (with their
-   *  names) when they first speak. Saves only when something changed. */
+   *  any message; a channel or thread registers itself the first time it
+   *  speaks, along with what it sits in — a thread's channel, a channel's
+   *  category — so instructions set on those reach it. Names and nesting heal
+   *  the same way. Saves only when something changed. */
   async function maintainGroupRegistry(guildId: string, channelId: string) {
     const guildName = guilds.get(guildId)?.name;
-    const channelName = (await channelInfo(channelId))?.name;
+    const chain: { id: string; info?: ChannelInfo }[] = [];
+    for (let id: string | undefined = channelId; id && chain.length < 3; ) {
+      const info = await channelInfo(id);
+      chain.push({ id, info });
+      id = info?.parentId;
+    }
     deps.updateGroup(guildId, (group) => {
       let changed = false;
       if (guildName && group.title !== guildName) {
@@ -350,14 +367,21 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
         changed = true;
       }
       const topics = (group.topics ??= {});
-      if (!topics[channelId]) {
-        topics[channelId] = {};
-        changed = true;
-      }
-      const topic = topics[channelId];
-      if (channelName && topic.title !== channelName) {
-        topic.title = channelName;
-        changed = true;
+      for (const { id, info } of chain) {
+        if (!topics[id]) {
+          topics[id] = {};
+          changed = true;
+        }
+        const topic = topics[id];
+        if (info?.title && topic.title !== info.title) {
+          topic.title = info.title;
+          changed = true;
+        }
+        if (info && info.parentId !== topic.parent) {
+          if (info.parentId) topic.parent = info.parentId;
+          else delete topic.parent;
+          changed = true;
+        }
       }
       return changed;
     });
@@ -487,9 +511,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     // server — where each channel and thread is a topic of its own.
     const config = deps.botConfig();
     const owner = target.guildId ? config?.groups?.[target.guildId] : config?.users?.[target.userId!];
-    const topic = target.guildId ? owner?.topics?.[channelId] : undefined;
-    // Appends accumulate outermost→innermost: the owner's, then the topic's.
-    const appends = [owner?.appendSystemPrompt, topic?.appendSystemPrompt].filter((a): a is string => !!a);
+    // A thread sits in a channel, a channel in a category: innermost first.
+    const topics = target.guildId ? topicChain(owner, channelId) : [];
+    // Appends accumulate outermost→innermost: the owner's, then each topic's.
+    const appends = [owner, ...[...topics].reverse()].map((scope) => scope?.appendSystemPrompt).filter((a): a is string => !!a);
     const autoRetry = await runChatTurn({
       gateway: deps.gateway,
       sessionKey,
@@ -498,8 +523,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       retry,
       incoming: {
         workspaceHint: deps.workspace(),
-        // Most specific first: a channel's model settings beat its server's.
-        modelScopes: [topic, owner],
+        // Most specific first: a thread's model settings beat its channel's,
+        // which beat its category's and its server's.
+        modelScopes: [...topics, owner],
         appends,
         customTools: [tool],
         runtime: {
@@ -536,9 +562,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       const user = config?.users?.[target.userId!];
       return `DM with ${user?.name || "user"}${user?.username ? ` (@${user.username})` : ""}`;
     }
-    const server = config?.groups?.[target.guildId]?.title ?? guilds.get(target.guildId)?.name ?? target.guildId;
-    const channel = config?.groups?.[target.guildId]?.topics?.[target.channelId]?.title ?? channels.get(target.channelId)?.name;
-    return `server "${server}", channel ${channel ? `#${channel}` : target.channelId}`;
+    const group = config?.groups?.[target.guildId];
+    const server = group?.title ?? guilds.get(target.guildId)?.name ?? target.guildId;
+    const path = topicChain(group, target.channelId).reverse().map((topic) => topic.title).filter(Boolean);
+    return `server "${server}", ${path.length ? path.join(" › ") : `channel ${target.channelId}`}`;
   }
 
   /** A session key back into a target — for a wake-up or a literal send, which

@@ -14,7 +14,7 @@ import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
 import { components, disableComponents } from "../src/channels/discord/send.ts";
 import { renderDiscordCard, STOP_BUTTON_ID } from "../src/channels/discord/status.ts";
 import { discordSessionKey, parseDiscordSessionKey } from "../src/channels/discord/session-key.ts";
-import { conversationModelScopes, parseSessionKey } from "../src/channels/session-key.ts";
+import { conversationModelScopes, parseSessionKey, topicChain } from "../src/channels/session-key.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
 import { logger } from "../src/log.ts";
 
@@ -40,7 +40,7 @@ test("a Discord conversation is named by its channel, then its server, then the 
     name: "home",
     token: "t",
     users: { "11": { name: "Gabriel", username: "ceifa" } },
-    groups: { "22": { title: "Sesh", topics: { "33": { title: "eleven", models: [{ model: "claude-code/sonnet" }] } } } },
+    groups: { "22": { title: "Sesh", topics: { "33": { title: "#eleven", models: [{ model: "claude-code/sonnet" }] } } } },
   }];
   assert.deepEqual(conversationIdentity("discord:home:22:33", channels), { name: "#eleven", context: "Sesh", label: "Discord · Sesh · #eleven" });
   assert.deepEqual(conversationIdentity("discord:home:dm:11", channels), {
@@ -53,7 +53,27 @@ test("a Discord conversation is named by its channel, then its server, then the 
   assert.equal(conversationIdentity("discord:home:22:44", channels).name, "channel 44");
   assert.equal(conversationIdentity("discord:home:99:44", channels).context, "99");
   // A channel's model settings outrank its server's.
-  assert.deepEqual(conversationModelScopes("discord:home:22:33", channels)[0], { title: "eleven", models: [{ model: "claude-code/sonnet" }] });
+  assert.deepEqual(conversationModelScopes("discord:home:22:33", channels)[0], { title: "#eleven", models: [{ model: "claude-code/sonnet" }] });
+});
+
+test("a thread sits in its channel and a channel in its category, and each layer's settings reach in", () => {
+  const category = { title: "Gabriel", models: [{ model: "claude-code/opus" }] };
+  const channel = { title: "#saude", parent: "10" };
+  const thread = { title: "exame de sangue", parent: "20" };
+  const channels = [{
+    type: "discord" as const,
+    name: "home",
+    token: "t",
+    groups: { "1": { title: "cosa nostra", topics: { "10": category, "20": channel, "30": thread, "40": { title: "#saude", parent: "50" }, "50": { title: "Samara" } } } },
+  }];
+  // Two channels share a name in different categories; the context tells them apart.
+  assert.equal(conversationIdentity("discord:home:1:20", channels).label, "Discord · cosa nostra › Gabriel · #saude");
+  assert.equal(conversationIdentity("discord:home:1:40", channels).label, "Discord · cosa nostra › Samara · #saude");
+  assert.equal(conversationIdentity("discord:home:1:30", channels).context, "cosa nostra › Gabriel › #saude");
+  // Nothing set on the thread or the channel: the category's models run it.
+  assert.deepEqual(conversationModelScopes("discord:home:1:30", channels), [thread, channel, category, channels[0]!.groups["1"]]);
+  // A registry edited into a loop still resolves.
+  assert.equal(topicChain({ topics: { a: { parent: "b" }, b: { parent: "a" } } }, "a").length, 4);
 });
 
 test("a table becomes a monospace block with its columns lined up", () => {

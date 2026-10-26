@@ -40,17 +40,34 @@ export function parseSessionKey(sessionKey: string): ConversationTarget | undefi
   return undefined;
 }
 
-/** The registry entries a conversation sits under, if it has them. */
-export function scopesOf(target: ConversationTarget, channel: ChannelConfig | undefined): { owner?: UserConfig | GroupConfig; topic?: TopicConfig } {
+// Discord nests a thread in a channel in a category; nothing goes deeper.
+const MAX_TOPIC_DEPTH = 4;
+
+/** A topic and the ones it sits in, innermost first. A registry edited into a
+ *  loop stops at the depth nothing real reaches. */
+export function topicChain(owner: { topics?: Record<string, TopicConfig> } | undefined, topicId: string | undefined): TopicConfig[] {
+  const chain: TopicConfig[] = [];
+  for (let id = topicId; id !== undefined && chain.length < MAX_TOPIC_DEPTH; ) {
+    const topic = owner?.topics?.[id];
+    if (!topic) break;
+    chain.push(topic);
+    id = topic.parent;
+  }
+  return chain;
+}
+
+/** The registry entries a conversation sits under, if it has them: its owner,
+ *  and its topic with the topics that contain it, innermost first. */
+export function scopesOf(target: ConversationTarget, channel: ChannelConfig | undefined): { owner?: UserConfig | GroupConfig; topics: TopicConfig[] } {
   const owner = target.owner.kind === "user" ? channel?.users?.[target.owner.id] : channel?.groups?.[target.owner.id];
-  return { owner, topic: target.topic === undefined ? undefined : owner?.topics?.[target.topic] };
+  return { owner, topics: topicChain(owner, target.topic) };
 }
 
 /** The model scopes a channel conversation runs under, most specific first
- * (topic, then owner). */
+ * (the topic, the topics around it, then the owner). */
 export function conversationModelScopes(sessionKey: string, channels: ChannelConfig[]): (ModelScope | undefined)[] {
   const target = parseSessionKey(sessionKey);
   if (!target) return [];
-  const { owner, topic } = scopesOf(target, channels.find((channel) => channel.name === target.channel));
-  return [topic, owner];
+  const { owner, topics } = scopesOf(target, channels.find((channel) => channel.name === target.channel));
+  return [...topics, owner];
 }

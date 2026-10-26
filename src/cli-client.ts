@@ -137,8 +137,8 @@ export async function runClientCommand(command: string | undefined, inputArgs: s
       timeoutMs: 5 * 60_000,
     });
     if (json) return printJson(response);
-    const target = response.target as { bot: string; chatId: number; topic?: number };
-    console.log(`sent → telegram/${target.bot} · ${target.chatId}${target.topic === undefined ? "" : ` · topic ${target.topic}`}`);
+    const target = response.target as { channel: string; bot: string; chatId: number | string; topic?: number | string };
+    console.log(`sent → ${target.channel}/${target.bot} · ${target.chatId}${target.topic === undefined ? "" : ` · topic ${target.topic}`}`);
     console.log(`thread: ${String(response.threadId).slice(0, 8)}`);
     if (response.recorded === false) console.warn(`warning: ${response.warning}`);
     return true;

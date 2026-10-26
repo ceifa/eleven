@@ -2,7 +2,10 @@ import { readFileSync, rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigStore } from "./config.ts";
 import { Gateway } from "./gateway.ts";
+import { Channels } from "./channels/index.ts";
+import { PairingStore } from "./channels/pairing.ts";
 import { TelegramChannel } from "./channels/telegram/index.ts";
+import { DiscordChannel } from "./channels/discord/index.ts";
 import { startDashboard } from "./dashboard/server.ts";
 import { refreshModelCatalogs, trustWorkspaces } from "./agent/pi.ts";
 import { PID_FILE } from "./paths.ts";
@@ -87,8 +90,12 @@ export async function startDaemon() {
   config.on("change", () => trustWorkspaces(workspacePaths(config)));
 
   const gateway = new Gateway(config);
-  const telegram = new TelegramChannel(config, gateway);
-  const dashboard = startDashboard(config, gateway, telegram);
+  const pairing = new PairingStore();
+  const channels = new Channels(config, pairing, [
+    new TelegramChannel(config, gateway, pairing),
+    new DiscordChannel(config, gateway, pairing),
+  ]);
+  const dashboard = startDashboard(config, gateway, channels);
   // Off the startup path on purpose: pi resolves models from the bundled
   // catalog immediately, and this only widens it to what the providers list now.
   const stopCatalogRefresh = refreshModelCatalogs();
@@ -101,13 +108,13 @@ export async function startDaemon() {
   const interrupted = gateway.interruptedTurns();
   if (interrupted.length) {
     log.info(`waking ${interrupted.length} interrupted conversation(s)`);
-    telegram.wakeInterrupted(interrupted);
+    channels.wakeInterrupted(interrupted);
   }
 
   const shutdown = async (signal: string) => {
     log.info(`${signal} received, shutting down`);
     stopCatalogRefresh();
-    await Promise.allSettled([telegram.stop(), dashboard.close()]);
+    await Promise.allSettled([channels.stop(), dashboard.close()]);
     rmSync(PID_FILE, { force: true });
     process.exit(0);
   };

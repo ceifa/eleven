@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AvatarCache, imageType, topicEmoji } from "../src/channels/telegram/avatars.ts";
+import { AvatarCache, imageType } from "../src/channels/avatars.ts";
+import { topicEmoji } from "../src/channels/telegram/avatars.ts";
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
 const WEBP = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 ")]);

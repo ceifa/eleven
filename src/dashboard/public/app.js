@@ -148,11 +148,41 @@ function toast(message, isError = false) {
 }
 
 const TELEGRAM_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Telegram"><circle cx="12" cy="12" r="12" fill="#54A9EB"/><path fill="#fff" d="M17.6 7.2 15.7 16.4c-.14.63-.52.78-1.05.49l-2.9-2.14-1.4 1.35c-.16.16-.29.29-.59.29l.21-2.95 5.37-4.85c.23-.2-.05-.32-.36-.11l-6.64 4.18-2.86-.9c-.62-.2-.63-.62.13-.92l11.18-4.31c.52-.19.97.13.8.87z"/></svg>`;
+const DISCORD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Discord"><circle cx="12" cy="12" r="12" fill="#5865F2"/><path fill="#fff" transform="translate(5.4 5.4) scale(.55)" d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>`;
 // Local origins get a glyph too — not for decoration: it keeps every name in
 // the list starting at the same x, however the thread was born.
 const DASHBOARD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Dashboard" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9.5h18"/></svg>`;
 const CLI_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="CLI" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7.5 10 2.4 2.3-2.4 2.3M13 14.6h3.6"/></svg>`;
-const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
+const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, discord: DISCORD_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
+
+/** What each platform calls the parts of the registry, and where its tokens come from. */
+const CHANNEL_WORDS = {
+  telegram: {
+    groups: "Groups",
+    groupsInfo: "Group chats the bot lives in — message it inside a group to register it. Each group (and each forum topic) can append its own instructions to the prompt.",
+    groupsEmpty: "none yet — message the bot in a group to add it",
+    group: "group",
+    topics: "Topics",
+    topicsInfo: "Each topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them — in a forum group, or in the DM of a bot with topic mode enabled.",
+    topic: "topic",
+    dmTopics: true,
+    tokenHint: "bot token from @BotFather",
+    profile: (username) => `https://t.me/${username}`,
+  },
+  discord: {
+    groups: "Servers",
+    groupsInfo: "Servers the bot lives in — message it inside a server to register it. Each server (and each of its channels) can append its own instructions to the prompt.",
+    groupsEmpty: "none yet — message the bot in a server to add it",
+    group: "server",
+    topics: "Channels",
+    topicsInfo: "Every channel and thread is its own thread here and can append its own instructions. They register themselves when someone first speaks in them, along with the category or channel they sit in — whatever is set on a category reaches every channel in it, and a channel's reaches its threads.",
+    topic: "channel",
+    dmTopics: false,
+    tokenHint: "bot token from the Developer Portal (Message Content intent on)",
+    profile: undefined,
+  },
+};
+const wordsFor = (type) => CHANNEL_WORDS[type] ?? CHANNEL_WORDS.telegram;
 
 const SEARCH_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="m10.3 10.3 3.2 3.2"/></svg>`;
 const PLUS_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>`;
@@ -2957,6 +2987,7 @@ function workspaceCard(name, workspace) {
 
 function channelCard(workspaceName, channel, index) {
   const status = state.overview?.bots?.find((b) => b.name === channel.name);
+  const words = wordsFor(channel.type);
   // Shallow-patch this channel against the freshest config (in place, no rebuild).
   const save = (patch) => updateWorkspace(workspaceName, (ws) => {
     ws.channels[index] = { ...ws.channels[index], ...patch };
@@ -2967,9 +2998,11 @@ function channelCard(workspaceName, channel, index) {
         h("span", { class: "shrink-0", html: CHANNEL_ICONS[channel.type] ?? "" }),
         h("span", { class: "font-mono font-semibold truncate min-w-0" }, channel.name),
         status?.username
-          ? h("a", { class: "text-xs link link-hover opacity-60 hide-mobile", href: `https://t.me/${status.username}`, target: "_blank", rel: "noopener" }, `@${status.username}`)
+          ? words.profile
+            ? h("a", { class: "text-xs link link-hover opacity-60 hide-mobile", href: words.profile(status.username), target: "_blank", rel: "noopener" }, `@${status.username}`)
+            : h("span", { class: "text-xs opacity-60 hide-mobile" }, `@${status.username}`)
           : null,
-        h("span", { class: `badge badge-sm shrink-0 ${status?.connected ? "badge-success" : "badge-error"} badge-soft ml-2` }, status?.connected ? "polling" : "offline"),
+        h("span", { class: `badge badge-sm shrink-0 ${status?.connected ? "badge-success" : "badge-error"} badge-soft ml-2` }, status?.connected ? "online" : "offline"),
         h("button", { class: "btn btn-ghost btn-xs ml-auto shrink-0 text-error", onclick: () =>
           updateWorkspace(workspaceName, (ws) => { ws.channels = (ws.channels ?? []).filter((_, i) => i !== index); }, { structural: true }) }, "remove"),
       ),
@@ -2983,17 +3016,16 @@ function channelCard(workspaceName, channel, index) {
       h("div", { class: "flex flex-col gap-2" },
         h("div", { class: "text-xs dim-label flex items-center gap-1.5" }, "Users",
           info("Who can DM this bot. Strangers who message it become pairing requests; names and usernames fill in automatically from traffic.")),
-        ...Object.entries(channel.users ?? {}).map(([id, user]) => userRow(workspaceName, index, id, user)),
+        ...Object.entries(channel.users ?? {}).map(([id, user]) => userRow(workspaceName, index, id, user, words)),
         h("input", { class: "input input-xs w-40 font-mono", placeholder: "add user by id", onchange: (e) => {
           const id = e.target.value.trim();
           if (/^\d+$/.test(id)) updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[index]; ch.users = { ...ch.users, [id]: {} }; }, { structural: true });
         } }),
       ),
       h("div", { class: "flex flex-col gap-2" },
-        h("div", { class: "text-xs dim-label flex items-center gap-1.5" }, "Groups",
-          info("Group chats the bot lives in — message it inside a group to register it. Each group (and each forum topic) can append its own instructions to the prompt.")),
-        ...Object.entries(channel.groups ?? {}).map(([id, group]) => groupRow(workspaceName, index, id, group)),
-        Object.keys(channel.groups ?? {}).length === 0 ? h("span", { class: "text-xs opacity-50" }, "none yet — message the bot in a group to add it") : null,
+        h("div", { class: "text-xs dim-label flex items-center gap-1.5" }, words.groups, info(words.groupsInfo)),
+        ...Object.entries(channel.groups ?? {}).map(([id, group]) => groupRow(workspaceName, index, id, group, words)),
+        Object.keys(channel.groups ?? {}).length === 0 ? h("span", { class: "text-xs opacity-50" }, words.groupsEmpty) : null,
       ),
     ),
   );
@@ -3095,7 +3127,7 @@ function appendField(value, onchange) {
  * Adding/removing a topic changes the rendered rows, so those re-render;
  * editing a topic's title or prompt updates in place.
  */
-function topicsSection(workspaceName, owner, inherited, select) {
+function topicsSection(workspaceName, owner, inherited, select, words) {
   const patchTopic = (topicId, patch, structural = false) =>
     updateWorkspace(workspaceName, (ws) => {
       const target = select(ws);
@@ -3105,14 +3137,13 @@ function topicsSection(workspaceName, owner, inherited, select) {
       target.topics = Object.keys(topics).length ? topics : undefined;
     }, { structural });
   return [
-    h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, "Topics",
-      info("Each topic gets its own thread and can append its own instructions. Topics register themselves when someone first speaks in them — in a forum group, or in the DM of a bot with topic mode enabled.")),
+    h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, words.topics, info(words.topicsInfo)),
     ...Object.entries(owner.topics ?? {}).map(([topicId, topic]) =>
       h("div", { class: "border border-base-300 rounded-box p-3 flex flex-col gap-2" },
         h("div", { class: "topic-head flex items-center gap-2" },
-          h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: "topic name (optional)",
+          h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: `${words.topic} name (optional)`,
             onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
-          h("span", { class: "font-mono text-xs opacity-50" }, `topic ${topicId}`),
+          h("span", { class: "font-mono text-xs opacity-50" }, `${words.topic} ${topicId}`),
           topic.appendSystemPrompt ? h("span", { class: "badge badge-warning badge-xs badge-soft" }, "+prompt") : null,
           modelsBadge(topic),
           h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () => patchTopic(topicId, null, true) }, "remove"),
@@ -3122,14 +3153,14 @@ function topicsSection(workspaceName, owner, inherited, select) {
         appendField(topic.appendSystemPrompt, (v) => patchTopic(topicId, { appendSystemPrompt: v })),
       ),
     ),
-    h("input", { class: "input input-xs w-44 font-mono", placeholder: "add topic by id", onchange: (e) => {
+    h("input", { class: "input input-xs w-44 font-mono", placeholder: `add ${words.topic} by id`, onchange: (e) => {
       const topicId = e.target.value.trim();
       if (/^\d+$/.test(topicId)) patchTopic(topicId, {}, true);
     } }),
   ];
 }
 
-function userRow(workspaceName, chIndex, id, user) {
+function userRow(workspaceName, chIndex, id, user, words) {
   const patchUser = (patch) => updateWorkspace(workspaceName, (ws) => {
     const ch = ws.channels[chIndex];
     ch.users = { ...ch.users, [id]: { ...ch.users?.[id], ...patch } };
@@ -3147,14 +3178,15 @@ function userRow(workspaceName, chIndex, id, user) {
       scopeSequenceField(user, inheritedSequenceFor(workspaceName),
         (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].users[id]), { structural })),
       appendField(user.appendSystemPrompt, (v) => patchUser({ appendSystemPrompt: v })),
-      ...topicsSection(workspaceName, user, inheritedSequenceFor(workspaceName, user, "the DM"), (ws) => ws.channels[chIndex].users[id]),
+      // A Telegram bot with topic mode enabled has topics in its DMs; a Discord DM is one conversation.
+      ...(words.dmTopics ? topicsSection(workspaceName, user, inheritedSequenceFor(workspaceName, user, "the DM"), (ws) => ws.channels[chIndex].users[id], words) : []),
       h("button", { class: "btn btn-ghost btn-xs self-start text-error", onclick: () =>
         updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[chIndex]; const users = { ...ch.users }; delete users[id]; ch.users = users; }, { structural: true }) }, "remove user"),
     ),
   );
 }
 
-function groupRow(workspaceName, chIndex, id, group) {
+function groupRow(workspaceName, chIndex, id, group, words) {
   const patchGroup = (patch, opts) => updateWorkspace(workspaceName, (ws) => {
     const ch = ws.channels[chIndex];
     ch.groups = { ...ch.groups, [id]: { ...ch.groups?.[id], ...patch } };
@@ -3179,21 +3211,22 @@ function groupRow(workspaceName, chIndex, id, group) {
           "require @mention",
         ),
         h("button", { class: "btn btn-ghost btn-xs text-error ml-auto", onclick: () =>
-          updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[chIndex]; const groups = { ...ch.groups }; delete groups[id]; ch.groups = groups; }, { structural: true }) }, "remove group"),
+          updateWorkspace(workspaceName, (ws) => { const ch = ws.channels[chIndex]; const groups = { ...ch.groups }; delete groups[id]; ch.groups = groups; }, { structural: true }) }, `remove ${words.group}`),
       ),
       scopeSequenceField(group, inheritedSequenceFor(workspaceName),
         (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(ws.channels[chIndex].groups[id]), { structural })),
       appendField(group.appendSystemPrompt, (v) => patchGroup({ appendSystemPrompt: v })),
-      ...topicsSection(workspaceName, group, inheritedSequenceFor(workspaceName, group), (ws) => ws.channels[chIndex].groups[id]),
+      ...topicsSection(workspaceName, group, inheritedSequenceFor(workspaceName, group, `the ${words.group}`), (ws) => ws.channels[chIndex].groups[id], words),
     ),
   );
 }
 
 function addChannelForm(workspaceName) {
   const types = state.overview?.channelTypes ?? ["telegram"];
-  const type = h("select", { class: "select select-sm w-32" }, types.map((t) => h("option", { value: t }, t)));
+  const token = h("input", { class: "input input-sm flex-1 font-mono", placeholder: wordsFor(types[0]).tokenHint });
+  const type = h("select", { class: "select select-sm w-32", onchange: (e) => { token.placeholder = wordsFor(e.target.value).tokenHint; } },
+    types.map((t) => h("option", { value: t }, t)));
   const name = h("input", { class: "input input-sm w-28 font-mono", placeholder: "name" });
-  const token = h("input", { class: "input input-sm flex-1 font-mono", placeholder: "bot token from @BotFather" });
   return disclosure("Add channel",
     h("div", { class: "flex gap-2 items-center stack-mobile" },
       type, name, token,

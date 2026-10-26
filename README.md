@@ -87,3 +87,24 @@ list is always intersected with the running model's. `users` and `groups` are
 the allowlists — empty means deny, and pairing fills them in from the
 dashboard. Values written as `"$VAR"` are read from the environment at load
 time.
+
+### Discord
+
+Create an application in the [Developer Portal](https://discord.com/developers/applications),
+open **Bot**, turn on **Message Content Intent** and copy the token. Invite the
+bot with the `bot` and `applications.commands` scopes and the View Channels,
+Send Messages, Send Messages in Threads, Read Message History, Attach Files and
+Add Reactions permissions. Then add a channel of type `discord` with that
+token; `eleven doctor` tells you if the intent is still off.
+
+The config is the same shape as Telegram's. `users` are the people allowed to
+DM the bot. `groups` are servers, keyed by server id, and every channel or
+thread in a server is one of its `topics`: each is a thread of its own, and
+registers itself (with its name) the first time someone speaks in it. So do
+the category a channel sits in and the channel a thread hangs off, each
+recorded as the topic's `parent`: instructions set on a category reach every
+channel in it, a channel's reach its threads (forum posts included), and the
+innermost `models` win. A server
+approved from the dashboard hears every message from its allowed users; set
+`requireMention` back on and it answers only when mentioned or replied to.
+`/new`, `/stop`, `/skills` and `/usage` are native slash commands.

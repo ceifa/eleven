@@ -55,8 +55,9 @@ export function runtimeTools(provider: string): readonly WorkspaceTool[] {
   return provider === "claude-code" ? BUILTIN_TOOLS : PI_BUILTIN_TOOLS;
 }
 
-/** Channel types eleven can speak. Telegram today; the config shape is ready for more. */
-export const CHANNEL_TYPES = ["telegram"] as const;
+/** Channel types eleven can speak. */
+export const CHANNEL_TYPES = ["telegram", "discord"] as const;
+export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
 /** A "$VAR" value whose variable wasn't found in the environment. */
 export function isUnresolved(value: string | undefined): boolean {
@@ -78,6 +79,10 @@ export interface TopicConfig extends ModelScope {
   iconEmojiId?: string;
   /** Extra instructions appended to this topic's system prompt. */
   appendSystemPrompt?: string;
+  /** The topic this one sits in — a Discord thread's channel, a channel's
+   * category. Its instructions apply here too, and its models unless this
+   * one has its own. Self-heals from live traffic. */
+  parent?: string;
 }
 
 export interface GroupConfig extends ModelScope {
@@ -85,7 +90,8 @@ export interface GroupConfig extends ModelScope {
   title?: string;
   /** Extra instructions appended to this group's system prompt. */
   appendSystemPrompt?: string;
-  /** Forum topics, keyed by topic id. Each topic is its own thread/session. */
+  /** Forum topics — on Discord, the server's channels and threads — keyed by
+   * id. Each topic is its own thread/session. */
   topics?: Record<string, TopicConfig>;
 }
 
@@ -102,16 +108,18 @@ export interface UserConfig extends ModelScope {
 }
 
 export interface ChannelConfig {
-  type: (typeof CHANNEL_TYPES)[number];
+  type: ChannelType;
   /** Unique across all workspaces — it names the bot inside thread session keys. */
   name: string;
   token: string;
   /** Users allowed to DM, keyed by numeric id. Deny by default; grown via pairing. */
   users?: Record<string, UserConfig>;
-  /** Group chats the channel participates in, keyed by chat id. Grown via pairing. */
+  /** Group chats the channel participates in, keyed by chat id (a Discord
+   * server's id). Grown via pairing. */
   groups?: Record<string, GroupConfig>;
-  /** Numeric user ids listened to inside groups (falls back to the DM users). */
-  groupAllowedUsers?: number[];
+  /** User ids listened to inside groups (falls back to the DM users). Discord
+   * ids only fit as strings. */
+  groupAllowedUsers?: (number | string)[];
 }
 
 export interface WorkspaceConfig extends ModelScope {

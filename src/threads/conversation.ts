@@ -1,5 +1,5 @@
-import type { ChannelConfig } from "../config.ts";
-import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
+import type { ChannelConfig, ChannelType } from "../config.ts";
+import { parseSessionKey, topicChain } from "../channels/session-key.ts";
 
 /**
  * How a conversation is named for a human. A session key is precise and
@@ -14,12 +14,14 @@ export interface ConversationIdentity {
   context?: string;
   /** The full one-line reading, channel spelled out. */
   label: string;
-  /** What Telegram draws for it, when that is a picture: the chat's photo, or
-   *  a topic's custom emoji. */
+  /** What the platform draws for it, when that is a picture: the chat's (or
+   *  server's, or person's) photo, or a Telegram topic's custom emoji. */
   picture?: { kind: "photo" | "emoji"; version: string };
   /** A topic's own colour (0xRRGGBB) — Telegram's bubble behind its initial. */
   color?: number;
 }
+
+const PLATFORM: Record<ChannelType, string> = { telegram: "Telegram", discord: "Discord" };
 
 /**
  * Names a conversation from its session key and the channel registry that holds
@@ -28,7 +30,7 @@ export interface ConversationIdentity {
  * inventing anything: an unnamed chat is better shown as its id than as "?".
  */
 export function conversationIdentity(sessionKey: string, channels: ChannelConfig[] = []): ConversationIdentity {
-  const target = parseTelegramSessionKey(sessionKey);
+  const target = parseSessionKey(sessionKey);
   if (!target) {
     const source = sessionKey.split(":", 1)[0];
     const name = source === "dashboard" ? "Dashboard" : source === "cli" ? "CLI" : source;
@@ -36,15 +38,14 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   }
 
   const channel = channels.find((entry) => entry.name === target.channel);
-  const chatKey = String(target.chatId);
-  // Positive ids are people, negative ones are groups — Telegram's own split.
-  const inDm = target.chatId > 0;
-  const user = inDm ? channel?.users?.[chatKey] : undefined;
-  const group = inDm ? undefined : channel?.groups?.[chatKey];
+  const inDm = target.owner.kind === "user";
+  const user = inDm ? channel?.users?.[target.owner.id] : undefined;
+  const group = inDm ? undefined : channel?.groups?.[target.owner.id];
   // Whoever holds the topics: the person in a DM, the group in a group.
   const owner = user ?? group;
-  const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || chatKey;
-  const channelContext = inDm ? "Telegram DM" : "Telegram";
+  const [topic, ...around] = topicChain(owner, target.topic);
+  const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || target.owner.id;
+  const channelContext = `${PLATFORM[target.type]}${inDm ? " DM" : ""}`;
   if (target.topic === undefined) {
     return {
       name: ownerName,
@@ -56,13 +57,14 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
     };
   }
   // Inside a forum the topic is the conversation; the group — or, in a DM with
-  // topic mode, the person — is where it sits.
-  const topic = owner?.topics?.[String(target.topic)];
-  const topicName = topic?.title || `topic ${target.topic}`;
+  // topic mode, the person — is where it sits, along with whatever the topic
+  // is nested in (a Discord channel's category, a thread's channel).
+  const topicName = topic?.title || `${target.type === "discord" ? "channel" : "topic"} ${target.topic}`;
+  const where = [ownerName, ...around.reverse().flatMap((parent) => parent.title ?? [])].join(" › ");
   return {
     name: topicName,
-    context: inDm ? `${channelContext} · ${ownerName}` : ownerName,
-    label: `${channelContext} · ${ownerName} · ${topicName}`,
+    context: inDm ? `${channelContext} · ${where}` : where,
+    label: `${channelContext} · ${where} · ${topicName}`,
     // The emoji's id is the version: a topic that changes its icon names a
     // new picture, and no cache anywhere keeps showing the old one.
     ...(topic?.iconEmojiId && { picture: { kind: "emoji", version: topic.iconEmojiId } as const }),

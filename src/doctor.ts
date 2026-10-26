@@ -4,6 +4,10 @@ import { ConfigStore, isUnresolved } from "./config.ts";
 import { findModel, modelRuntime } from "./agent/pi.ts";
 import { CLAUDE_CODE_PROVIDER, probeClaudeCodeAuth } from "./agent/claude-code.ts";
 import { CONFIG_FILE } from "./paths.ts";
+import { ApplicationFlags } from "discord-api-types/v10";
+import { DiscordRest } from "./channels/discord/rest.ts";
+
+const MESSAGE_CONTENT_FLAGS = ApplicationFlags.GatewayMessageContent | ApplicationFlags.GatewayMessageContentLimited;
 
 export async function runDoctor(): Promise<boolean> {
   let healthy = true;
@@ -56,6 +60,18 @@ export async function runDoctor(): Promise<boolean> {
     const label = `channel ${channel.name} (${channel.type} → ${workspace})`;
     if (isUnresolved(channel.token)) {
       check(false, label, `token unresolved (${channel.token || "empty"})`);
+      continue;
+    }
+    if (channel.type === "discord") {
+      try {
+        const app = await new DiscordRest(channel.token).get<{ flags?: number; bot?: { username: string } }>("/applications/@me");
+        const content = ((app.flags ?? 0) & MESSAGE_CONTENT_FLAGS) !== 0;
+        check(content, label, content
+          ? `@${app.bot?.username}`
+          : "the Message Content intent is off — enable it under Bot → Privileged Gateway Intents in the Developer Portal");
+      } catch (error) {
+        check(false, label, `token check failed: ${error}`);
+      }
       continue;
     }
     try {

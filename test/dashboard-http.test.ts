@@ -7,7 +7,7 @@ import test from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { startDashboard } from "../src/dashboard/server.ts";
 import { TurnFailure } from "../src/agent/runner.ts";
-import { continuePrompt } from "../src/channels/telegram/failover.ts";
+import { continuePrompt } from "../src/channels/failover.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "dashboard", "public");
 

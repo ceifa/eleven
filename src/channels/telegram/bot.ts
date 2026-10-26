@@ -1,12 +1,17 @@
 import { API_CONSTANTS, Bot, type Context } from "grammy";
 import { run, sequentialize, type RunnerHandle } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ChannelConfig, GroupConfig, ModelEntry, TopicConfig, UserConfig } from "../../config.ts";
-import { TurnFailure, type TurnRewind } from "../../agent/runner.ts";
-import { lruTouch, summarizeToolArgs } from "../../util.ts";
-import type { Gateway } from "../../gateway.ts";
-import type { PairingStore } from "./pairing.ts";
+import type { InlineKeyboardMarkup } from "@grammyjs/types";
+import type { ChannelConfig, TopicConfig } from "../../config.ts";
+import { lruTouch } from "../../util.ts";
+import type { BotDeps } from "../bots.ts";
+import { Bursts } from "../burst.ts";
+import { COMMANDS, runCommand } from "../commands.ts";
+import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, type ChatButton } from "../failover.ts";
+import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
+import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
 import { collectInboundMedia, formatInboundBody } from "./media.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { TelegramTurnStatus } from "./turn-status.ts";
@@ -14,7 +19,6 @@ import { sendRich } from "./rich.ts";
 import { chatPhoto } from "./avatars.ts";
 import { isNoop, withRetry } from "./retry.ts";
 import { disableKeyboard, telegramTool } from "./tool.ts";
-import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, modelName } from "./failover.ts";
 import { logger } from "../../log.ts";
 
 const STALL_THRESHOLD_MS = 120_000;
@@ -22,27 +26,9 @@ const WATCHDOG_INTERVAL_MS = 30_000;
 const RESTART_BACKOFF_MS = { initial: 30_000, max: 600_000 };
 const ACK_REACTION = "👀";
 const MAX_CHAT_TOOLS = 128;
-// Coalesce rapid arrivals (forwarded batches, albums) into a single turn: each
-// message re-arms the quiet window; the cap bounds the total added latency.
-const BURST_QUIET_MS = 1_500;
-const BURST_MAX_WAIT_MS = 5_000;
 // Telegram flood-limits a group at roughly twenty messages a minute, counting
 // edits — one call every three seconds is the sustained rate that fits.
 const GROUP_MIN_INTERVAL_MS = 3_000;
-// Telegram can redeliver updates after reconnects/restarts; remember handled
-// message ids long enough to swallow those instead of running double turns.
-const SEEN_MESSAGE_TTL_MS = 20 * 60 * 1000;
-const MAX_SEEN_MESSAGES = 5_000;
-
-/** Injected to resume a conversation whose turn a restart cut off (see gateway
- * interruptedTurns). The pending ledger releases only after Telegram confirmed
- * the send, so waking implies the reply never landed: the model may have
- * written nothing, part of a reply, or a full one — it can see its own prior
- * output, and a finished answer must be (re)sent, not assumed delivered. */
-const WAKE_PROMPT =
-  "[eleven restarted mid-turn. If you already finished a reply above, it likely never reached the user — send it again. Otherwise continue from wherever you left off. No need to mention the restart unless it changes your answer]";
-
-type InboundImage = { type: "image"; data: string; mimeType: string };
 
 /** Where a turn should land, distilled from a live update or a bare session key
  * (a wake-up after restart has no grammy Context to read from). */
@@ -56,14 +42,6 @@ interface Target {
   triggerMessageId?: number;
 }
 
-/** Registered with Telegram (the client's "/" menu) and handled in handleCommand. */
-const COMMANDS = [
-  { command: "new", description: "Start a fresh thread" },
-  { command: "skills", description: "List the skills the agent can use here" },
-  { command: "usage", description: "Show model subscription usage" },
-  { command: "stop", description: "Abort the running turn" },
-] as const;
-
 /** Keep one canonical command list. Telegram gives group-specific scopes
  * precedence over the default scope, so a bot token that served another gateway
  * before can still carry that gateway's all_group_chats list. */
@@ -72,22 +50,6 @@ export async function syncTelegramCommands(
 ): Promise<void> {
   await api.setMyCommands([...COMMANDS]);
   await api.deleteMyCommands({ scope: { type: "all_group_chats" } });
-}
-
-export interface BotDeps {
-  gateway: Gateway;
-  pairing: PairingStore;
-  /** Live view of this channel's config (allowlist edits apply without restart). */
-  botConfig: () => ChannelConfig | undefined;
-  /** The workspace this channel routes to. */
-  workspace: () => string | undefined;
-  transcribeCommand: () => string | undefined;
-  /** Live view of the auto-failover setting (Models page) — read per failure. */
-  autoFailover: () => boolean;
-  /** Mutate a registered group's config entry; return true to persist. */
-  updateGroup: (chatId: string, mutate: (group: GroupConfig) => boolean) => void;
-  /** Mutate an allowed user's config entry; return true to persist. */
-  updateUser: (userId: string, mutate: (user: UserConfig) => boolean) => void;
 }
 
 export interface BotHandle {
@@ -101,71 +63,6 @@ export interface BotHandle {
    *  issued from outside Telegram — the dashboard — needs this too). */
   discardBurst(sessionKey: string): boolean;
   stop(): Promise<void>;
-}
-
-/** Remembers handled messages so a redelivery doesn't run the turn twice. */
-export function createSeenMessages(now: () => number = Date.now) {
-  // Insertion-ordered so eviction drops the oldest.
-  const seen = new Map<string, number>();
-  return function alreadyHandled(chatId: number, messageId: number): boolean {
-    const key = `${chatId}:${messageId}`;
-    const at = seen.get(key);
-    if (at !== undefined && now() - at < SEEN_MESSAGE_TTL_MS) return true;
-    seen.delete(key);
-    seen.set(key, now());
-    if (seen.size > MAX_SEEN_MESSAGES) seen.delete(seen.keys().next().value!);
-    return false;
-  };
-}
-
-/**
- * How one turn's prose reaches the chat. Prose the runtime settles mid-loop goes
- * out while it is still true — it says what the model is about to do, and Claude
- * Code's loop can run for minutes before the turn ends. The answer goes out at
- * the end, inside the turn's durable window, minus whatever already left.
- *
- * `sent` is the conversation's, shared with the telegram tool: whatever reached
- * the chat by any route is not sent twice.
- */
-export function createTurnDelivery(
-  send: (text: string, silent: boolean) => Promise<unknown>,
-  sent: Set<string>,
-  onError: (error: unknown) => void,
-) {
-  // One chain, so a slow send can't let the next chunk — or the answer —
-  // overtake it. Sending prose early is worth nothing if the chat reorders it.
-  let chain: Promise<unknown> = Promise.resolve();
-  let flushed = false;
-  /** Ship a block of prose now, unless the chat already has it. `silent` is for
-   * prose that only says the turn is still working: it belongs in the chat, but
-   * buzzing a phone for "checking X now" is a notification nobody asked for. */
-  const early = (chunk: string, options: { silent?: boolean } = {}): void => {
-    const text = chunk.trim();
-    if (!text || sent.has(text)) return;
-    // Remembering it here is also what keeps the final send from repeating it:
-    // the turn's own text still carries this prose.
-    sent.add(text);
-    flushed = true;
-    chain = chain.then(() => send(text, !!options.silent)).catch(onError);
-  };
-  const unsent = (blocks: string[]) => blocks.filter((block) => !sent.has(block)).join("\n\n");
-  return {
-    early,
-    /** Ship, as one message, the blocks the chat doesn't have yet — what a
-     * steered message cuts off. Joining first and checking after would miss the
-     * prose already sent on its own and post it again glued to the answer. */
-    catchUp(blocks: string[]): void {
-      early(unsent(blocks));
-    },
-    /** What the chat is still owed once the early sends are out. */
-    remaining(blocks: string[], resultText: string): string {
-      return (flushed ? unsent(blocks) : resultText).trim();
-    },
-    /** Resolves when every early send has landed. */
-    settled(): Promise<unknown> {
-      return chain;
-    },
-  };
 }
 
 export function startTelegramBot(name: string, token: string, deps: BotDeps): BotHandle {
@@ -192,76 +89,16 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     return entry;
   };
 
-  // Burst buffer: prepared messages per conversation waiting out the quiet
-  // window before becoming (or steering into) one turn.
-  interface Burst {
-    target: Target;
-    prompts: string[];
-    images: InboundImage[];
-    firstAt: number;
-    timer: NodeJS.Timeout;
-    /** Timer fired while a sibling was still preparing — flush when prep drains. */
-    held?: boolean;
-  }
-  const bursts = new Map<string, Burst>();
-
-  // Messages of a conversation between arrival and end of preparation. A burst
-  // must not flush while this is non-zero: a fast photo would start a turn
-  // without the slow audio (whisper) sent along with it.
-  const preparing = new Map<string, number>();
-
-  /** Queue a prepared message for its conversation's next turn. The flush runs
-   * outside the per-chat prep lane, so a message landing mid-turn reaches the
-   * runner (which steers it into the live turn) instead of waiting the whole
-   * turn out behind sequentialize. */
-  function enqueueTurn(target: Target, prompt: string, images: InboundImage[]) {
-    const key = sessionKeyFor(target.chatId, target.topic);
-    const burst = bursts.get(key);
-    if (!burst) {
-      bursts.set(key, {
-        target,
-        prompts: [prompt],
-        images: [...images],
-        firstAt: Date.now(),
-        timer: setTimeout(() => flushBurst(key), BURST_QUIET_MS),
-      });
-      return;
-    }
-    clearTimeout(burst.timer);
-    burst.prompts.push(prompt);
-    burst.images.push(...images);
-    burst.held = false; // fresh arrival → the quiet window runs again
-    // Ack/reply threading targets the newest message that has an id.
-    burst.target = { ...target, triggerMessageId: target.triggerMessageId ?? burst.target.triggerMessageId };
-    const untilCap = burst.firstAt + BURST_MAX_WAIT_MS - Date.now();
-    burst.timer = setTimeout(() => flushBurst(key), Math.max(0, Math.min(BURST_QUIET_MS, untilCap)));
-  }
-
-  function flushBurst(key: string) {
-    const burst = bursts.get(key);
-    if (!burst) return;
-    if (preparing.get(key)) {
-      // A sibling message is still in the prep lane (e.g. a long transcription)
-      // — hold; the prep-tracking middleware re-flushes when it drains.
-      burst.held = true;
-      return;
-    }
-    bursts.delete(key);
-    void runTurn(burst.target, burst.prompts.join("\n\n"), burst.images);
-  }
+  const bursts = new Bursts<Target>((target, text, images) => void runTurn(target, text, images));
 
   /** Drop a conversation's pending burst (/stop and /new discard queued input). */
   function discardBurst(sessionKey: string): boolean {
-    const burst = bursts.get(sessionKey);
-    if (!burst) return false;
-    clearTimeout(burst.timer);
-    bursts.delete(sessionKey);
-    return true;
+    return bursts.discard(sessionKey);
   }
 
   // Manual failover buttons hanging off failure messages, each holding what it
   // takes to run that turn again.
-  const failovers = new FailoverOffers<{ target: Target; text: string; images: InboundImage[] }>();
+  const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
 
   const alreadyHandled = createSeenMessages();
 
@@ -290,25 +127,16 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   // end of preparation (sequentialize queue + media download/transcription) —
   // registered before sequentialize so the count covers the queued wait too.
   bot.use(async (ctx, next) => {
-    const key = ctx.message ? sessionKeyFor(ctx.chat!.id, topicOf(ctx.message)) : undefined;
-    if (key) preparing.set(key, (preparing.get(key) ?? 0) + 1);
+    const release = ctx.message ? bursts.prepare(sessionKeyFor(ctx.chat!.id, topicOf(ctx.message))) : undefined;
     try {
       await next();
     } finally {
-      if (key) {
-        const left = (preparing.get(key) ?? 1) - 1;
-        if (left > 0) {
-          preparing.set(key, left);
-        } else {
-          preparing.delete(key);
-          if (bursts.get(key)?.held) flushBurst(key);
-        }
-      }
+      release?.();
     }
   });
 
   // Per-chat/per-topic ordering of message *preparation* only (commands, media
-  // transcription) — turns run outside the lane (enqueueTurn/flushBurst), so a
+  // transcription) — turns run outside the lane (the burst flush), so a
   // message arriving mid-turn still reaches the runner and steers. /stop keeps
   // its escape lane to bypass even a slow preparation (e.g. a long transcription).
   bot.use(
@@ -374,7 +202,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (target.triggerMessageId !== undefined) {
       void bot.api.setMessageReaction(target.chatId, target.triggerMessageId, [{ type: "emoji", emoji: ACK_REACTION }]).catch(() => {});
     }
-    enqueueTurn(target, prompt, media.images);
+    bursts.enqueue(sessionKeyFor(target.chatId, target.topic), target, prompt, media.images);
   }
 
   async function handleCallback(ctx: Context) {
@@ -440,41 +268,15 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   /** `retry` is set by a manual failover: its own model plan for this turn
    * alone, and the failed attempt a restart branches away first. */
-  async function runTurn(target: Target, text: string, images: InboundImage[], retry?: { models: ModelEntry[]; rewind?: TurnRewind }) {
+  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry) {
     const { chatId, topic, isPrivate } = target;
     const sessionKey = sessionKeyFor(chatId, topic);
-    // The conversation is moving on: a retry button left over from an earlier
-    // failure would replay a turn this one has already gone past.
-    failovers.clear(sessionKey);
-
     void bot.api.sendChatAction(chatId, "typing", { message_thread_id: topic }).catch(() => {});
 
-    const blocks: string[] = [];
-    let current = "";
-
     const { tool, sent } = toolFor(chatId, topic);
-
-    const sendOptions = {
-      messageThreadId: topic,
-      replyParameters:
-        target.triggerMessageId !== undefined
-          ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
-          : undefined,
-    };
-
-    const delivery = createTurnDelivery(
-      (text, silent) => sendRich(bot.api, chatId, text, { ...sendOptions, silent }),
-      sent,
-      (error) => log.warn(`mid-turn flush failed: ${error}`),
-    );
-    const turnStatus = new TelegramTurnStatus(bot.api, chatId, {
-      topic,
-      replyParameters: sendOptions.replyParameters,
-    });
-    // A turn that produces no event at all (a provider stalling on the first
-    // request) still owes the chat a sign of life — the typing action expires in
-    // five seconds and says nothing about a turn that takes minutes.
-    turnStatus.start();
+    const replyParameters = target.triggerMessageId !== undefined
+      ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
+      : undefined;
 
     // Whatever owns this conversation: the person in a DM, the group in a group.
     // Both carry topics — a bot with topic mode enabled has them in its DMs too
@@ -483,22 +285,18 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const config = deps.botConfig();
     const owner = isPrivate ? config?.users?.[String(chatId)] : config?.groups?.[String(chatId)];
     const topicConfig = topic !== undefined ? owner?.topics?.[String(topic)] : undefined;
-    // An unattended failover, decided in the catch below and run once this
-    // turn's status message is closed out — a retry must not share the dead
-    // turn's progress message.
-    let autoRetry: { models: ModelEntry[]; text: string } | undefined;
     // Appends accumulate outermost→innermost: the owner's, then the topic's.
     const appends = [owner?.appendSystemPrompt, topicConfig?.appendSystemPrompt].filter((a): a is string => !!a);
-    try {
-      await deps.gateway.handle({
-        sessionKey,
-        text,
-        images,
+    const autoRetry = await runChatTurn({
+      gateway: deps.gateway,
+      sessionKey,
+      text,
+      images,
+      retry,
+      incoming: {
         workspaceHint: deps.workspace(),
         // Most specific first: a topic's model settings beat its owner's.
         modelScopes: [topicConfig, owner],
-        models: retry?.models,
-        rewind: retry?.rewind,
         appends,
         customTools: [tool],
         runtime: {
@@ -506,86 +304,24 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
           conversation: describeConversation(target, config),
           capabilities: ["rich markdown (headings/tables/spoilers render natively)", "inline buttons", "media files", "reactions — via the telegram tool"],
         },
-        events: {
-          onDelta: (delta) => {
-            current += delta;
-          },
-          onAssistantText: () => {
-            if (current.trim()) blocks.push(current.trim());
-            current = "";
-          },
-          // What the model said before going back to work. It reads as an
-          // intention ("checking X now"), so it is worth nothing once the work
-          // it announces is already done — send it while it is still true, and
-          // without a notification: the answer it precedes is what deserves one.
-          onProse: (text) => delivery.early(text, { silent: true }),
-          // The runtime answered what was asked first while what was asked
-          // during the turn is still being written. Ship it now: the chat then
-          // reads as the exchange it was, instead of both replies arriving
-          // together with the older one underneath.
-          onEarlyAnswer: (text) => delivery.early(text),
-          // A steered message just entered the turn — deliver the prose that
-          // preceded it now, so replies land in timeline order instead of a
-          // stale answer arriving glued to the final one. This one is an answer,
-          // not narration, so it notifies like any other.
-          onEvent: (event) => {
-            if (event.type !== "message_end" || event.message.role !== "user") return;
-            delivery.catchUp(blocks.splice(0));
-          },
-          // Failover abandons the attempt's prose — drop our copy of it too.
-          onFailover: () => {
-            blocks.length = 0;
-            current = "";
-          },
-          onPanels: (update) => turnStatus.panels(update),
-          onToolCall: (name, args) => turnStatus.tool(name, summarizeToolArgs(args)),
-          onRetry: (notice) => turnStatus.retry(notice),
-        },
-        // The final send runs inside the turn's durable window: the pending
-        // ledger releases only after this settles, so a daemon death before
-        // Telegram confirms the send wakes the conversation instead of
-        // silently losing the reply. A steered message never gets here — the
-        // owning turn's deliver ships the combined result (and clears `sent`).
-        deliver: async (result) => {
-          await turnStatus.finish(result.status === "stopped" ? "stopped" : "completed");
-          const final = delivery.remaining(blocks, result.text);
-          const duplicate = !!final && sent.has(final);
-          sent.clear(); // the turn is over — next one starts clean
-          if (!final || duplicate) return;
-          await delivery.settled(); // the answer never lands above the prose that led to it
-          await sendRich(bot.api, chatId, final, sendOptions);
-        },
-      });
-    } catch (error) {
-      sent.clear();
-      await turnStatus.finish("failed");
-      log.error(`turn failed: ${error}`);
-      // The runner stops instead of failing over once an attempt ran tools (a
-      // spent quota mid-turn is the common way there) — so when its plan still
-      // has models left, the failure either carries the buttons that run the
-      // next one, or runs it on its own when auto-failover is on.
-      const next = error instanceof TurnFailure
-        ? failovers.resolve(sessionKey, { target, text, images }, error, deps.autoFailover())
-        : undefined;
-      autoRetry = next?.retry;
-      const continuing = autoRetry ? ` — continuing on ${modelName(autoRetry.models[0]!)}` : "";
-      // The failure is now a footnote to a turn that is still going: it still
-      // belongs in the chat, but it doesn't deserve a notification of its own.
-      await sendRich(bot.api, chatId, `⚠️ ${error instanceof Error ? error.message : error}${continuing}`, {
+      },
+      sent,
+      status: new TelegramTurnStatus(bot.api, chatId, { topic, replyParameters }),
+      send: (markdown, options) => sendRich(bot.api, chatId, markdown, {
         messageThreadId: topic,
-        replyMarkup: next?.keyboard,
-        silent: !!autoRetry,
-      }).catch(() => {});
-    } finally {
-      turnStatus.cancel();
-    }
-    // Outside the try: this is a turn of its own, with its own status message
-    // and its own failure handling (including, if it comes to it, the next
-    // failover — the plan it carries is strictly shorter, so the chain ends).
-    if (autoRetry) {
-      log.info(`auto failover in ${sessionKey}: continue on ${autoRetry.models[0]!.model}`);
-      await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
-    }
+        replyParameters: options.reply ? replyParameters : undefined,
+        replyMarkup: inlineKeyboard(options.buttons),
+        silent: options.silent,
+      }),
+      failovers,
+      replay: { target, text, images },
+      autoFailover: deps.autoFailover,
+      log,
+    });
+    // A turn of its own, with its own status message and its own failure
+    // handling (including, if it comes to it, the next failover — the plan it
+    // carries is strictly shorter, so the chain ends).
+    if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
   }
 
   /** Resume a conversation a restart cut off — reconstruct the target from the
@@ -624,39 +360,17 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const reply = (markdown: string) =>
       sendRich(ctx.api, chat.id, markdown, { messageThreadId: topic, replyParameters }).then(() => true);
 
-    switch (command.replace(`@${handle.username}`, "")) {
-      case "/start":
-        return reply(`Hi! I'm **${name}** running on eleven.\nYour user id: \`${ctx.from?.id}\``);
-      case "/new": {
-        // Fresh means fresh: drop buffered input and abort the in-flight turn,
-        // so neither bleeds into (or races) the new conversation.
-        discardBurst(sessionKey);
-        await deps.gateway.interrupt(sessionKey);
-        deps.gateway.newThread(sessionKey, deps.workspace());
-        return reply("🧵 Fresh thread started.");
-      }
-      case "/skills": {
-        const { workspace, skills } = await deps.gateway.listSkills(sessionKey, deps.workspace());
-        if (!skills.length) return reply(`No skills loaded for **${workspace}**.`);
-        const lines = skills.map((s) => `- \`${s.name}\` — ${s.description.length > 90 ? `${s.description.slice(0, 90)}…` : s.description}`);
-        return reply(`**${skills.length} skills** loaded for **${workspace}**:\n${lines.join("\n")}`);
-      }
-      case "/usage": {
-        try {
-          return reply(await deps.gateway.providerUsage());
-        } catch (error) {
-          log.warn(`usage lookup failed: ${error}`);
-          return reply(`⚠️ ${error instanceof Error ? error.message : error}`);
-        }
-      }
-      case "/stop": {
-        const dropped = discardBurst(sessionKey);
-        const stopped = await deps.gateway.interrupt(sessionKey);
-        return reply(stopped || dropped ? "⏹ Stopped." : "Nothing running.");
-      }
-      default:
-        return false; // unknown command → goes to the agent as text
-    }
+    const bare = command.replace(`@${handle.username}`, "");
+    if (bare === "/start") return reply(`Hi! I'm **${name}** running on eleven.\nYour user id: \`${ctx.from?.id}\``);
+    const answer = await runCommand(bare.slice(1), {
+      gateway: deps.gateway,
+      sessionKey,
+      workspace: deps.workspace(),
+      discardBurst: () => discardBurst(sessionKey),
+      log,
+    });
+    // An unknown command goes to the agent as text.
+    return answer === undefined ? false : reply(answer);
   }
 
   /** Keep the config registry in sync with live traffic: group titles heal on
@@ -689,14 +403,16 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     // one. Checking for a pending request first keeps a persistent knocker from
     // costing a download per message — and fetching before registering keeps
     // the photo in the request the dashboard is pushed.
-    if (deps.pairing.find({ bot: name, kind, userId: from.id, chatId: chat.id })) return;
+    const userId = String(from.id);
+    const chatId = String(chat.id);
+    if (deps.pairing.find({ bot: name, kind, userId, chatId })) return;
     const raw = [from.first_name, from.last_name].filter(Boolean).join(" ");
     const { name: senderName, disguised } = foldDisplayName(raw);
     const { request, isNew } = deps.pairing.request({
       kind,
       bot: name,
-      userId: from.id,
-      chatId: chat.id,
+      userId,
+      chatId,
       chatTitle: isGroup ? (chat as { title?: string }).title : undefined,
       username: from.username,
       name: senderName,
@@ -730,8 +446,8 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     }
     // Unregistered group → surface a pairing request instead of silence.
     if (!config.groups?.[String(chat.id)]) return "pair";
-    const allowed = config.groupAllowedUsers ?? Object.keys(config.users ?? {}).map(Number);
-    return allowed.includes(userId) ? "ok" : "ignore";
+    const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
+    return allowed.includes(String(userId)) ? "ok" : "ignore";
   }
 
   function checkAccess(ctx: Context, config: ChannelConfig): "ok" | "pair" | "ignore" {
@@ -835,36 +551,20 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   async function stop() {
     stopped = true;
-    // Flush pending bursts immediately: the turn registers as in-flight, so a
-    // restart wakes the conversation instead of silently dropping the messages.
-    for (const key of [...bursts.keys()]) {
-      const burst = bursts.get(key)!;
-      clearTimeout(burst.timer);
-      flushBurst(key);
-    }
+    bursts.flushAll();
     await runner?.stop().catch(() => {});
   }
 
   return handle;
 }
 
-function fullName(user?: { first_name?: string; last_name?: string }): string {
-  return foldDisplayName([user?.first_name, user?.last_name].filter(Boolean).join(" ")).name;
+/** Buttons as Telegram hangs them under a message. */
+export function inlineKeyboard(rows?: ChatButton[][]): InlineKeyboardMarkup | undefined {
+  return rows?.length ? { inline_keyboard: rows.map((row) => row.map((b) => ({ text: b.label, callback_data: b.data }))) } : undefined;
 }
 
-/**
- * Display names are attacker-controlled, and a stranger who writes theirs in
- * styled unicode ("T𝚎𝐥𝚎𝚐𝚛𝚊𝗺") or pads it with invisible characters looks
- * official everywhere the name lands — the pairing panel, the config, a prompt
- * label. NFKC folds those lookalikes back to plain letters, so the name reads
- * as what it imitates; comparing against plain NFC (which differs only for the
- * compatibility characters) is also the detector: a name that moves was
- * wearing a costume.
- */
-export function foldDisplayName(value: string): { name: string; disguised: boolean } {
-  const visible = value.replaceAll(/[\p{Cc}\p{Cf}]/gu, "");
-  const name = visible.normalize("NFKC").replaceAll(/\s+/g, " ").trim();
-  return { name, disguised: name !== value.normalize("NFC").replaceAll(/\s+/g, " ").trim() };
+function fullName(user?: { first_name?: string; last_name?: string }): string {
+  return foldDisplayName([user?.first_name, user?.last_name].filter(Boolean).join(" ")).name;
 }
 
 interface TopicAnnouncement {
@@ -952,10 +652,6 @@ function topicOf(message: { message_thread_id?: number; is_topic_message?: boole
   return message?.is_topic_message ? message.message_thread_id : undefined;
 }
 
-const REPLY_QUOTE_LIMIT = 200;
-const REPLY_QUOTE_HEAD = 120;
-const REPLY_QUOTE_TAIL = 70;
-
 /** Compact per-message attribution for shared conversations. Message ids stay
  * in the transport layer: the gateway already replies to the triggering id,
  * and exposing them to the model would spend tokens without improving prose. */
@@ -997,16 +693,6 @@ function senderLabel(user?: { id?: number; first_name?: string; last_name?: stri
   if (name) return name;
   if (username) return `@${username}`;
   return user?.id !== undefined ? `Telegram user ${user.id}` : "Unknown sender";
-}
-
-function sanitizeContextLabel(value: string): string {
-  return value.replaceAll("[", "(").replaceAll("]", ")").replaceAll(/\s+/g, " ").trim();
-}
-
-function compactReplyQuote(text: string): string {
-  const chars = [...text.replaceAll(/\s+/g, " ").trim()];
-  if (chars.length <= REPLY_QUOTE_LIMIT) return chars.join("");
-  return `${chars.slice(0, REPLY_QUOTE_HEAD).join("")}…${chars.slice(-REPLY_QUOTE_TAIL).join("")}`;
 }
 
 function replyMediaKind(message: {

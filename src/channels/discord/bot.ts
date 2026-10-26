@@ -8,6 +8,7 @@ import {
   type APIChannel,
   type APIGuild,
   type APIInteraction,
+  type APIRole,
   type APIMessage,
   type APIUser,
   type GatewayDispatchPayload,
@@ -92,6 +93,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   let commandsSynced = false;
 
   const guilds = new Map<string, Pick<APIGuild, "name" | "icon">>();
+  // Role names, for spelling out role mentions; and the role Discord creates
+  // for this bot in each server. Picking "@Mortar" from the client's list
+  // often picks that role rather than the bot itself, and it means the same.
+  const roles = new Map<string, string>();
+  const ownRoles = new Set<string>();
   const channels = new Map<string, ChannelInfo>();
   // A DM's session is keyed by the person; sending needs the DM channel's id.
   const dmChannels = new Map<string, string>();
@@ -178,6 +184,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       case GatewayDispatchEvents.GuildUpdate:
         guilds.set(payload.d.id, { name: payload.d.name, icon: payload.d.icon });
         return;
+      case GatewayDispatchEvents.GuildRoleCreate:
+      case GatewayDispatchEvents.GuildRoleUpdate:
+        return rememberRole(payload.d.role);
       case GatewayDispatchEvents.ChannelCreate:
       case GatewayDispatchEvents.ChannelUpdate:
       case GatewayDispatchEvents.ThreadCreate:
@@ -193,7 +202,13 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   function rememberGuild(guild: GatewayGuildCreateDispatchData) {
     if ("unavailable" in guild && guild.unavailable) return;
     guilds.set(guild.id, { name: guild.name, icon: guild.icon });
+    for (const role of guild.roles) rememberRole(role);
     for (const channel of [...(guild.channels ?? []), ...(guild.threads ?? [])]) rememberChannel({ ...channel, guild_id: guild.id });
+  }
+
+  function rememberRole(role: APIRole) {
+    roles.set(role.id, role.name);
+    if (role.tags?.bot_id && role.tags.bot_id === self?.id) ownRoles.add(role.id);
   }
 
   function rememberChannel(channel: Pick<APIChannel, "id" | "type"> & { name?: string | null; guild_id?: string }) {
@@ -296,6 +311,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       const replacement = user.id === self?.id ? "" : `@${displayName(user) || user.username}`;
       text = text.replaceAll(`<@${user.id}>`, replacement).replaceAll(`<@!${user.id}>`, replacement);
     }
+    text = text.replaceAll(/<@&(\d+)>/g, (raw, id: string) => {
+      if (ownRoles.has(id)) return "";
+      const role = roles.get(id);
+      return role ? `@${role}` : raw;
+    });
     text = text.replaceAll(/<#(\d+)>/g, (raw, id: string) => {
       const channel = channels.get(id);
       return channel?.name ? `#${channel.name}` : raw;
@@ -317,8 +337,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (access !== "ok" || !message.guild_id) return access;
     if (config.groups![message.guild_id]!.requireMention === false) return "ok";
     // A reply to the bot counts: answering it is talking to it.
-    const mentioned = message.mentions.some((user) => user.id === self!.id) || message.referenced_message?.author.id === self!.id;
-    return mentioned ? "ok" : "ignore";
+    return addressesBot(message, self!.id, ownRoles) ? "ok" : "ignore";
   }
 
   /** Keep the registry in sync with live traffic: the server's name heals on
@@ -615,6 +634,18 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
 function plain(text: string): string {
   const escaped = escapeMarkdown(text);
   return escaped.length <= MAX_MESSAGE ? escaped : `${escaped.slice(0, MAX_MESSAGE - 1)}…`;
+}
+
+/** Whether a server message is talking to the bot: a mention of it or of the
+ *  role Discord made for it, or a reply to one of its messages. */
+export function addressesBot(
+  message: Pick<APIMessage, "mentions" | "mention_roles" | "referenced_message">,
+  selfId: string,
+  ownRoles: ReadonlySet<string>,
+): boolean {
+  return message.mentions.some((user) => user.id === selfId)
+    || message.mention_roles.some((role) => ownRoles.has(role))
+    || message.referenced_message?.author.id === selfId;
 }
 
 function displayName(user: Pick<APIUser, "global_name" | "username">): string {

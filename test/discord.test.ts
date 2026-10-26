@@ -7,7 +7,7 @@ import test from "node:test";
 import { ButtonStyle, ComponentType, GatewayOpcodes } from "discord-api-types/v10";
 import { Bursts } from "../src/channels/burst.ts";
 import { Channels, type Channel } from "../src/channels/index.ts";
-import { formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
+import { addressesBot, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
 import { DiscordGateway } from "../src/channels/discord/gateway.ts";
 import { discordChunks, toDiscordMarkdown } from "../src/channels/discord/markdown.ts";
 import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
@@ -125,6 +125,15 @@ test("server messages carry who said them and what they answer; DMs stay bare", 
     "9",
   );
   assert.equal(reply, '[Gabriel @ceifa]\n[Replying to you: "the build is green"]\nship it');
+});
+
+test("mentioning the role Discord made for the bot is mentioning the bot", () => {
+  // Regression: picking "@Mortar" from the client's list sent <@&role>, and
+  // only user mentions counted — a mention-gated server ignored the bot's name.
+  const message = { mentions: [], mention_roles: ["777"], referenced_message: undefined };
+  assert.equal(addressesBot(message, "9", new Set(["777"])), true);
+  assert.equal(addressesBot(message, "9", new Set()), false);
+  assert.equal(addressesBot({ ...message, mention_roles: [], referenced_message: { author: { id: "9" } } as never }, "9", new Set()), true);
 });
 
 /** A socket the gateway can drive and the test can speak through. */

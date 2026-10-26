@@ -4,10 +4,9 @@ import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { InlineKeyboardMarkup } from "@grammyjs/types";
-import type { ChannelConfig, GroupConfig, TopicConfig, UserConfig } from "../../config.ts";
+import type { ChannelConfig, TopicConfig } from "../../config.ts";
 import { lruTouch } from "../../util.ts";
-import type { Gateway } from "../../gateway.ts";
-import type { PairingStore } from "../pairing.ts";
+import type { BotDeps } from "../bots.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, type ChatButton } from "../failover.ts";
@@ -51,22 +50,6 @@ export async function syncTelegramCommands(
 ): Promise<void> {
   await api.setMyCommands([...COMMANDS]);
   await api.deleteMyCommands({ scope: { type: "all_group_chats" } });
-}
-
-export interface BotDeps {
-  gateway: Gateway;
-  pairing: PairingStore;
-  /** Live view of this channel's config (allowlist edits apply without restart). */
-  botConfig: () => ChannelConfig | undefined;
-  /** The workspace this channel routes to. */
-  workspace: () => string | undefined;
-  transcribeCommand: () => string | undefined;
-  /** Live view of the auto-failover setting (Models page) — read per failure. */
-  autoFailover: () => boolean;
-  /** Mutate a registered group's config entry; return true to persist. */
-  updateGroup: (chatId: string, mutate: (group: GroupConfig) => boolean) => void;
-  /** Mutate an allowed user's config entry; return true to persist. */
-  updateUser: (userId: string, mutate: (user: UserConfig) => boolean) => void;
 }
 
 export interface BotHandle {

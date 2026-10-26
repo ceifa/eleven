@@ -276,7 +276,7 @@ test("Telegram delivery resolves bot, chat and forum topic from a session key", 
   const config = { on() {}, channels: () => [] };
   const telegram = new TelegramChannel(config as never, {} as never, {} as never);
   const sent: Record<string, unknown>[] = [];
-  (telegram as unknown as { bots: Map<string, unknown> }).bots.set("main", {
+  (telegram as unknown as { pool: { bots: Map<string, unknown> } }).pool.bots.set("main", {
     token: "test",
     handle: {
       bot: {
@@ -362,7 +362,7 @@ test("stopping a thread from outside Telegram also drops its buffered input", ()
   const config = { on() {}, channels: () => [] };
   const telegram = new TelegramChannel(config as never, {} as never, {} as never);
   const discarded: string[] = [];
-  (telegram as unknown as { bots: Map<string, unknown> }).bots.set("main", {
+  (telegram as unknown as { pool: { bots: Map<string, unknown> } }).pool.bots.set("main", {
     token: "test",
     handle: { discardBurst: (sessionKey: string) => (discarded.push(sessionKey), true) },
   });

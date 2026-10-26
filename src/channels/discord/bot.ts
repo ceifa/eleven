@@ -16,23 +16,23 @@ import {
 } from "discord-api-types/v10";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ChannelConfig, GroupConfig, UserConfig } from "../../config.ts";
-import type { Gateway } from "../../gateway.ts";
+import type { ChannelConfig } from "../../config.ts";
 import { formatInboundBody } from "../../media-store.ts";
 import { logger } from "../../log.ts";
 import { keyedLane, lruTouch } from "../../util.ts";
 import { capped } from "../avatars.ts";
+import type { BotDeps } from "../bots.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
-import type { PairingRequest, PairingStore } from "../pairing.ts";
+import type { PairingRequest } from "../pairing.ts";
 import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { TurnStatus } from "../turn-status.ts";
 import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
 import { DiscordGateway } from "./gateway.ts";
 import { collectInboundMedia } from "./media.ts";
 import { DiscordRest, isNoop } from "./rest.ts";
-import { discordChunks } from "./markdown.ts";
+import { discordChunks, escapeMarkdown } from "./markdown.ts";
 import { disableComponents, sendMessage } from "./send.ts";
 import { discordSessionKey, parseDiscordSessionKey } from "./session-key.ts";
 import { discordTool } from "./tool.ts";
@@ -47,6 +47,7 @@ const STATUS_THROTTLE_MS = 1_200;
 // The heartbeat runs every ~41 s; two missed acks is a dead connection.
 const HEALTHY_ACK_MS = 100_000;
 const CDN = "https://cdn.discordapp.com";
+const MAX_MESSAGE = 2_000;
 
 /** Where a turn lands, distilled from a live event or a bare session key (a
  * wake-up after restart has nothing else to read from). */
@@ -65,22 +66,6 @@ interface Target {
 interface ChannelInfo {
   name?: string;
   guildId?: string;
-}
-
-export interface BotDeps {
-  gateway: Gateway;
-  pairing: PairingStore;
-  /** Live view of this channel's config (allowlist edits apply without restart). */
-  botConfig: () => ChannelConfig | undefined;
-  /** The workspace this channel routes to. */
-  workspace: () => string | undefined;
-  transcribeCommand: () => string | undefined;
-  /** Live view of the auto-failover setting (Models page) — read per failure. */
-  autoFailover: () => boolean;
-  /** Mutate a registered server's config entry; return true to persist. */
-  updateGroup: (guildId: string, mutate: (group: GroupConfig) => boolean) => void;
-  /** Mutate an allowed user's config entry; return true to persist. */
-  updateUser: (userId: string, mutate: (user: UserConfig) => boolean) => void;
 }
 
 export interface BotHandle {
@@ -405,9 +390,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     // Same access policy as messages, minus the mention gate (a command or a
     // press is explicit).
     if (senderAccess(user.id, guildId, config) !== "ok") {
-      if (interaction.type !== InteractionType.Ping && interaction.type !== InteractionType.ApplicationCommandAutocomplete) {
-        await respond({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: "This bot is private.", flags: MessageFlags.Ephemeral } });
-      }
+      await respond({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: "This bot is private.", flags: MessageFlags.Ephemeral } });
       return;
     }
 
@@ -523,7 +506,8 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
   }
 
-  /** The turn's status card as a quiet Discord message. */
+  /** The turn's status card as a quiet Discord message. Its text is plain:
+   *  a path like `my_file_name` must not come out in italics. */
   function turnStatus(channelId: string, replyTo?: string): TurnStatus {
     let messageId: string | undefined;
     const tolerate = (error: unknown) => {
@@ -534,7 +518,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
         const message = await rest.request<APIMessage>("POST", `/channels/${channelId}/messages`, {
           creates: true,
           body: {
-            content,
+            content: plain(content),
             flags: MessageFlags.SuppressNotifications | MessageFlags.SuppressEmbeds,
             allowed_mentions: { parse: [] },
             message_reference: replyTo ? { message_id: replyTo, fail_if_not_exists: false } : undefined,
@@ -542,7 +526,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
         });
         messageId = message.id;
       },
-      edit: (content) => rest.request("PATCH", `/channels/${channelId}/messages/${messageId}`, { body: { content } }).then(() => {}, tolerate),
+      edit: (content) => rest.request("PATCH", `/channels/${channelId}/messages/${messageId}`, { body: { content: plain(content) } }).then(() => {}, tolerate),
       remove: () => rest.request("DELETE", `/channels/${channelId}/messages/${messageId}`).then(() => {}, tolerate),
     }, { throttleMs: STATUS_THROTTLE_MS, rateKey: `discord:${channelId}` });
   }
@@ -624,6 +608,13 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   }
 
   return handle;
+}
+
+/** Status text as Discord shows it: escaped, and within a message's 2000
+ *  characters (a long plan can render past that). */
+function plain(text: string): string {
+  const escaped = escapeMarkdown(text);
+  return escaped.length <= MAX_MESSAGE ? escaped : `${escaped.slice(0, MAX_MESSAGE - 1)}…`;
 }
 
 function displayName(user: Pick<APIUser, "global_name" | "username">): string {

@@ -45,6 +45,11 @@ export function discordChunks(markdown: string): string[] {
   return splitMarkdown(toDiscordMarkdown(markdown), MESSAGE_LIMIT).filter((chunk) => chunk.trim());
 }
 
+/** Text that renders as written, whatever it contains. */
+export function escapeMarkdown(text: string): string {
+  return text.replaceAll(/[\\*_~`|]/g, "\\$&");
+}
+
 function cells(row: string): string[] {
   const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
   // An escaped pipe is part of the cell, not a border.

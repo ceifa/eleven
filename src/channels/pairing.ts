@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { PAIRING_FILE } from "../../paths.ts";
-import { debouncedWriter, readJsonFile, writeJsonFile } from "../../util.ts";
+import { PAIRING_FILE } from "../paths.ts";
+import { debouncedWriter, readJsonFile, writeJsonFile } from "../util.ts";
 
 const REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -11,16 +11,22 @@ export interface PairingRequest {
   /** "dm": an unknown sender wants to talk. "group": the bot saw an unregistered group. */
   kind: "dm" | "group";
   bot: string;
-  userId: number;
-  chatId: number;
+  /** Ids are strings: a Discord snowflake does not fit a double. */
+  userId: string;
+  /** What approving registers: the person in a DM, the group (a Telegram chat,
+   *  a Discord server) otherwise. */
+  chatId: string;
   chatTitle?: string;
+  /** Where the request was made, when that is not `chatId` itself — the
+   *  Discord channel a server knocked from, which is where the welcome goes. */
+  origin?: string;
   username?: string;
   name?: string;
   /** The name arrived dressed up in lookalike unicode (see `foldDisplayName`). */
   disguised?: boolean;
-  /** Profile picture as a `data:` URL — small enough (Telegram's 160px thumb)
-   *  to travel inside the record, which spares the dashboard an image route
-   *  that would have to carry the bot token. */
+  /** Profile picture as a `data:` URL — small enough (a 160px thumb) to travel
+   *  inside the record, which spares the dashboard an image route that would
+   *  have to carry the bot token. */
   photo?: string;
   createdAt: number;
 }
@@ -39,9 +45,10 @@ export class PairingStore extends EventEmitter {
   constructor() {
     super();
     const stored = readJsonFile<{ requests: (PairingRequest & { code?: string })[] }>(PAIRING_FILE, { requests: [] });
+    // Requests written before ids were strings carry Telegram's numbers.
     this.requests = stored.requests
       .filter((r) => Date.now() - r.createdAt < REQUEST_TTL_MS)
-      .map((r) => ({ ...r, id: r.id ?? r.code ?? randomUUID().slice(0, 8) }));
+      .map((r) => ({ ...r, userId: String(r.userId), chatId: String(r.chatId), id: r.id ?? r.code ?? randomUUID().slice(0, 8) }));
   }
 
   /** The pending request for this stranger, if they already knocked. Callers use

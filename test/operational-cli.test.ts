@@ -274,7 +274,7 @@ test("the scrolling thread list pads every side, so the live halo is not sheared
 
 test("Telegram delivery resolves bot, chat and forum topic from a session key", async () => {
   const config = { on() {}, channels: () => [] };
-  const telegram = new TelegramChannel(config as never, {} as never);
+  const telegram = new TelegramChannel(config as never, {} as never, {} as never);
   const sent: Record<string, unknown>[] = [];
   (telegram as unknown as { bots: Map<string, unknown> }).bots.set("main", {
     token: "test",
@@ -293,7 +293,7 @@ test("Telegram delivery resolves bot, chat and forum topic from a session key", 
   });
 
   const target = await telegram.sendToSession("telegram:main:-123:topic:45", "**hello**");
-  assert.deepEqual(target, { bot: "main", chatId: -123, topic: 45 });
+  assert.deepEqual(target, { channel: "telegram", bot: "main", chatId: -123, topic: 45 });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].chat_id, -123);
   assert.equal(sent[0].message_thread_id, 45);
@@ -360,7 +360,7 @@ test("a conversation is named by its topic, then its group, then the person", ()
 
 test("stopping a thread from outside Telegram also drops its buffered input", () => {
   const config = { on() {}, channels: () => [] };
-  const telegram = new TelegramChannel(config as never, {} as never);
+  const telegram = new TelegramChannel(config as never, {} as never, {} as never);
   const discarded: string[] = [];
   (telegram as unknown as { bots: Map<string, unknown> }).bots.set("main", {
     token: "test",

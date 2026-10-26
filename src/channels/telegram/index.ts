@@ -1,10 +1,12 @@
 import { isUnresolved, type ChannelConfig, type ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
-import { PairingStore, type PairingRequest } from "./pairing.ts";
+import type { PairingRequest, PairingStore } from "../pairing.ts";
+import { AvatarCache, type Avatar } from "../avatars.ts";
+import type { Channel, ChannelStatus, DeliveryTarget } from "../index.ts";
 import { startTelegramBot, type BotHandle } from "./bot.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { sendRich } from "./rich.ts";
-import { AvatarCache, chatPhoto, topicEmoji, type Avatar } from "./avatars.ts";
+import { chatPhoto, topicEmoji } from "./avatars.ts";
 import { AVATARS_DIR } from "../../paths.ts";
 import { logger } from "../../log.ts";
 
@@ -13,29 +15,25 @@ const log = logger("telegram");
 // for a face in a list. A custom emoji's id names one image forever.
 const CHAT_PHOTO_TTL_MS = 24 * 60 * 60 * 1000;
 
-export interface BotStatus {
-  name: string;
-  username?: string;
-  connected: boolean;
-}
-
 /**
  * Runs one polling bot per telegram channel configured across workspaces and
  * keeps them in sync with config changes (dashboard edits): new channels start,
  * removed/re-tokened ones restart. Allowlist and workspace edits apply live via
  * the config getter.
  */
-export class TelegramChannel {
-  readonly pairing = new PairingStore();
+export class TelegramChannel implements Channel {
+  readonly type = "telegram";
+  private pairing: PairingStore;
   private avatars: AvatarCache;
   private bots = new Map<string, { handle: BotHandle; token: string }>();
   private config: ConfigStore;
   private gateway: Gateway;
 
-  constructor(config: ConfigStore, gateway: Gateway, avatarsDir = AVATARS_DIR) {
+  constructor(config: ConfigStore, gateway: Gateway, pairing: PairingStore, avatarsDir = AVATARS_DIR) {
     this.config = config;
     this.avatars = new AvatarCache(avatarsDir);
     this.gateway = gateway;
+    this.pairing = pairing;
     config.on("change", () => this.sync());
     this.sync();
   }
@@ -97,39 +95,23 @@ export class TelegramChannel {
     this.config.save(this.config.raw);
   }
 
-  /** Approve a pairing request: allowlist the user (dm) or register the group. */
-  async approvePairing(id: string): Promise<PairingRequest> {
-    const request = this.pairing.take(id);
-    if (!request) throw new Error(`unknown pairing request ${id}`);
-
-    const raw = structuredClone(this.config.raw);
-    const channel = this.config.channels(raw).find((c) => c.channel.name === request.bot)?.channel;
-    if (!channel) throw new Error(`channel ${request.bot} no longer configured`);
-
-    if (request.kind === "dm") {
-      channel.users = { ...channel.users, [String(request.userId)]: { name: request.name, username: request.username } };
-    } else {
-      channel.groups = { ...channel.groups, [String(request.chatId)]: { requireMention: false, title: request.chatTitle } };
-    }
-    this.config.save(raw);
-
+  /** Tell an approved requester they're in. */
+  async welcome(request: PairingRequest): Promise<void> {
     const handle = this.bots.get(request.bot)?.handle;
-    if (handle) {
-      const text = request.kind === "dm" ? "✅ Pairing approved — you're in. Say hi!" : "✅ This group is now connected.";
-      await sendRich(handle.bot.api, request.chatId, text).catch(() => {});
-    }
-    return request;
+    if (!handle) return;
+    const text = request.kind === "dm" ? "✅ Pairing approved — you're in. Say hi!" : "✅ This group is now connected.";
+    await sendRich(handle.bot.api, request.chatId, text);
   }
 
   /** Deliver literal operator-authored prose to the Telegram conversation. */
-  async sendToSession(sessionKey: string, text: string): Promise<{ bot: string; chatId: number; topic?: number }> {
+  async sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
     const target = parseTelegramSessionKey(sessionKey);
     if (!target) throw new Error("thread has no Telegram delivery target");
     const { channel, chatId, topic } = target;
     const handle = this.bots.get(channel)?.handle;
     if (!handle) throw new Error(`Telegram channel ${channel} is not running`);
     await sendRich(handle.bot.api, chatId, text, { messageThreadId: topic });
-    return { bot: channel, chatId, topic };
+    return { channel: "telegram", bot: channel, chatId, topic };
   }
 
   /** Drop input a conversation has buffered but not yet turned into a turn.
@@ -175,14 +157,9 @@ export class TelegramChannel {
     );
   }
 
-  denyPairing(id: string): PairingRequest {
-    const request = this.pairing.take(id);
-    if (!request) throw new Error(`unknown pairing request ${id}`);
-    return request;
-  }
-
-  status(): BotStatus[] {
+  status(): ChannelStatus[] {
     return [...this.bots.entries()].map(([name, { handle }]) => ({
+      type: "telegram" as const,
       name,
       username: handle.username,
       connected: Date.now() - handle.lastPollAt < 90_000,

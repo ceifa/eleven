@@ -21,7 +21,7 @@ const {
 } = await import("../src/agent/claude-code.ts");
 const { modelRuntime } = await import("../src/agent/pi.ts");
 const { ConfigStore, validate, DEFAULT_CONFIG } = await import("../src/config.ts");
-const { FailoverOffers } = await import("../src/channels/telegram/failover.ts");
+const { FailoverOffers } = await import("../src/channels/failover.ts");
 const { Runner } = await import("../src/agent/runner.ts");
 
 test("credentials resolve on the account the operation runs on, and on the machine's own outside one", async () => {
@@ -194,11 +194,11 @@ test("an account must be a name that can be a directory", () => {
 });
 
 test("a failover onto another account says which one", () => {
-  const keyboard = new FailoverOffers<string>().offer("telegram:main:7", "replay", {
+  const buttons = new FailoverOffers<string>().offer("telegram:main:7", "replay", {
     remaining: [{ model: "openai-codex/gpt-6", account: "spare" }],
     hiddenToolCalls: [],
   });
-  const labels = keyboard?.inline_keyboard[0]?.map((button) => button.text);
+  const labels = buttons?.[0]?.map((button) => button.label);
 
   assert.deepEqual(labels, ["▶ Continue on gpt-6 (spare)", "↻ Restart on gpt-6 (spare)"]);
 });

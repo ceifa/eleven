@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { InputFile } from "grammy";
-import { createSeenMessages, createTurnDelivery, foldDisplayName, formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry, userTopicEntry } from "../src/channels/telegram/bot.ts";
+import { formatTelegramInboundPrompt, registerTopic, syncTelegramCommands, topicEntry, userTopicEntry } from "../src/channels/telegram/bot.ts";
+import { createSeenMessages, foldDisplayName } from "../src/channels/text.ts";
+import { createTurnDelivery } from "../src/channels/turn.ts";
+import { renderTurnStatus } from "../src/channels/turn-status.ts";
 import { sendRich, splitRich } from "../src/channels/telegram/rich.ts";
 import { disableKeyboard, telegramTool } from "../src/channels/telegram/tool.ts";
-import { renderTurnStatus, TelegramTurnStatus } from "../src/channels/telegram/turn-status.ts";
+import { TelegramTurnStatus } from "../src/channels/telegram/turn-status.ts";
 
 test("Telegram command sync removes stale group-scoped commands", async () => {
   const calls: Array<{ method: string; value: unknown }> = [];

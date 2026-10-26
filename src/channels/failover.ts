@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
-import type { InlineKeyboardMarkup } from "@grammyjs/types";
-import type { ModelEntry } from "../../config.ts";
-import type { TurnFailure } from "../../agent/runner.ts";
-import type { RecordedToolCall } from "../../threads/reader.ts";
-import { summarizeToolArgs } from "../../util.ts";
+import type { ModelEntry } from "../config.ts";
+import type { TurnFailure } from "../agent/runner.ts";
+import type { RecordedToolCall } from "../threads/reader.ts";
+import { summarizeToolArgs } from "../util.ts";
 
-/** Namespaces our own callback data, so a keyboard the agent built with the
- * telegram tool can never be mistaken for a failover offer. */
+/** A button as every channel draws one: a label, and the data a press sends back. */
+export interface ChatButton {
+  label: string;
+  data: string;
+}
+
+/** Namespaces our own callback data, so buttons the agent built with its
+ * channel tool can never be mistaken for a failover offer. */
 export const FAILOVER_PREFIX = "eleven:failover:";
 
 /** How long the buttons stay live. Past it the conversation has moved on far
@@ -39,7 +44,7 @@ export interface FailureResolution {
    * that picks the dead turn up on it. */
   retry?: { models: ModelEntry[]; text: string };
   /** Set when the choice went to the chat — the buttons the failure carries. */
-  keyboard?: InlineKeyboardMarkup;
+  buttons?: ChatButton[][];
 }
 
 /** Calls past this are dropped from the prompt, oldest first — a long attempt
@@ -113,15 +118,15 @@ export class FailoverOffers<T> {
     if (auto && failure.remaining.length) {
       return { retry: { models: failure.remaining, text: continuePrompt(failure.hiddenToolCalls) } };
     }
-    return { keyboard: this.offer(sessionKey, replay, failure) };
+    return { buttons: this.offer(sessionKey, replay, failure) };
   }
 
-  /** Attach an offer to a conversation's failure, returning its keyboard. */
+  /** Attach an offer to a conversation's failure, returning its buttons. */
   offer(
     sessionKey: string,
     replay: T,
     failure: Pick<TurnFailure, "remaining" | "rewind" | "hiddenToolCalls">,
-  ): InlineKeyboardMarkup | undefined {
+  ): ChatButton[][] | undefined {
     const next = failure.remaining[0];
     if (!next) return undefined;
     const id = randomUUID().slice(0, 8);
@@ -136,12 +141,10 @@ export class FailoverOffers<T> {
     // Insertion-ordered: the oldest offer is the first to go.
     if (this.offers.size > MAX_OFFERS) this.offers.delete(this.offers.keys().next().value!);
     const on = modelName(next);
-    return {
-      inline_keyboard: [[
-        { text: `▶ Continue on ${on}`, callback_data: `${FAILOVER_PREFIX}${id}:continue` },
-        { text: `↻ Restart on ${on}`, callback_data: `${FAILOVER_PREFIX}${id}:restart` },
-      ]],
-    };
+    return [[
+      { label: `▶ Continue on ${on}`, data: `${FAILOVER_PREFIX}${id}:continue` },
+      { label: `↻ Restart on ${on}`, data: `${FAILOVER_PREFIX}${id}:restart` },
+    ]];
   }
 
   /**

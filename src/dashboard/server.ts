@@ -9,12 +9,12 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, entryKey, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig, type ModelEntry } from "../config.ts";
 import { collectProviderUsage, usageLogins } from "../provider-usage.ts";
-import { parseTelegramSessionKey } from "../channels/telegram/session-key.ts";
+import { conversationModelScopes } from "../channels/session-key.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
 import { listWorkspaceSkills, TurnFailure } from "../agent/runner.ts";
-import { continuePrompt } from "../channels/telegram/failover.ts";
+import { continuePrompt } from "../channels/failover.ts";
 import type { Gateway } from "../gateway.ts";
-import type { TelegramChannel } from "../channels/telegram/index.ts";
+import type { Channels } from "../channels/index.ts";
 import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
 import { addSample, buildUsageReport, cacheWasteOf, emptyBucket, promptTokens, readSessionUsage, startOfLocalDay } from "../threads/usage.ts";
@@ -143,7 +143,7 @@ export interface Dashboard {
   close(): Promise<void>;
 }
 
-export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: TelegramChannel): Dashboard {
+export function startDashboard(config: ConfigStore, gateway: Gateway, channels: Channels): Dashboard {
   const server = createServer((req, res) => void route(req, res).catch((error) => fail(res, 500, error)));
   const wss = new WebSocketServer({ server, path: "/ws" });
   const cliRuns = new Map<string, { status: "running" | "done" | "error"; result?: unknown; error?: string }>();
@@ -222,7 +222,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       text: typeof text === "string" ? text.slice(0, ACTIVITY_PREVIEW_CHARS) : undefined,
     }),
   );
-  telegram.pairing.on("request", (request) => broadcast({ type: "pairing", request }));
+  channels.pairing.on("request", (request) => broadcast({ type: "pairing", request }));
   // The daemon itself mutates config (pairing approvals, group/topic auto-registry) —
   // let open dashboards refresh instead of showing stale state.
   config.on("change", () => broadcast({ type: "config-changed" }));
@@ -240,29 +240,16 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   // them — so the channel array is derived once per config generation instead
   // of being rebuilt for every single thread.
   const channelsByConfig = new WeakMap<object, ReturnType<typeof config.channels>[number]["channel"][]>();
-  function identityOf(sessionKey: string) {
+  function channelConfigs() {
     const entries = config.channels();
-    let channels = channelsByConfig.get(entries);
-    if (!channels) {
-      channels = entries.map(({ channel }) => channel);
-      channelsByConfig.set(entries, channels);
+    let list = channelsByConfig.get(entries);
+    if (!list) {
+      list = entries.map(({ channel }) => channel);
+      channelsByConfig.set(entries, list);
     }
-    return conversationIdentity(sessionKey, channels);
+    return list;
   }
-
-  /** The model scopes a Telegram conversation runs under, most specific first
-   * (topic, then owner — the group, or the person when it is a DM). Read-only
-   * here: what the detail view reports as the thread's effective model. Turns in
-   * these threads are the channel's own, and it resolves this itself. */
-  function channelModelScopes(sessionKey: string) {
-    const target = parseTelegramSessionKey(sessionKey);
-    if (!target) return [];
-    const channel = config.channels().find((entry) => entry.channel.name === target.channel)?.channel;
-    const key = String(target.chatId);
-    const owner = target.chatId > 0 ? channel?.users?.[key] : channel?.groups?.[key];
-    const topic = target.topic !== undefined ? owner?.topics?.[String(target.topic)] : undefined;
-    return [topic, owner];
-  }
+  const identityOf = (sessionKey: string) => conversationIdentity(sessionKey, channelConfigs());
 
   /** A thread as the API describes it. `sessionFile` is an absolute path nobody
    *  but the detail view reads, and it is a fifth of a full list read — so the
@@ -369,9 +356,9 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
   async function workspaceView(name: string, includeSkills: boolean) {
     const workspace = config.resolved.workspaces[name];
     if (!workspace) throw new Error(`workspace ${name} not found`);
-    const bots = new Map(telegram.status().map((bot) => [bot.name, bot]));
+    const bots = new Map(channels.status().map((bot) => [bot.name, bot]));
     const threads = gateway.threads.list(name);
-    const channels = (workspace.channels ?? []).map((channel) => {
+    const channelViews = (workspace.channels ?? []).map((channel) => {
       const bot = bots.get(channel.name);
       return {
         type: channel.type,
@@ -392,7 +379,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       fallbacks: chain.slice(1).map((entry) => entry.model),
       tools: workspace.tools ?? [...BUILTIN_TOOLS],
       customPrompt: workspace.systemPrompt !== undefined,
-      channels,
+      channels: channelViews,
       threads: {
         total: threads.length,
         current: threads.filter((thread) => gateway.threads.isCurrent(thread.id)).length,
@@ -454,7 +441,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
 
     try {
       if (method === "GET" && path === "/status") {
-        const bots = telegram.status();
+        const bots = channels.status();
         const configuredChannels = config.channels();
         const healthyNames = new Set(bots.filter((bot) => bot.connected).map((bot) => bot.name));
         const threads = gateway.threads.list();
@@ -483,8 +470,8 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       }
       if (method === "GET" && path === "/overview") {
         return send(200, {
-          bots: telegram.status(),
-          pairing: telegram.pairing.list(),
+          bots: channels.status(),
+          pairing: channels.pairing.list(),
           // Names only: the pages that edit a workspace read /config for it,
           // and the ones that merely offer a choice (the filter, the new-thread
           // dialog) never needed anything else.
@@ -546,7 +533,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // miss for five minutes, so a chat without a photo isn't asked for on
       // every paint, and one that just set a photo shows it soon enough.
       if (method === "GET" && path.startsWith("/avatars/")) {
-        const avatar = await telegram.avatar(decodeURIComponent(path.slice("/avatars/".length)));
+        const avatar = await channels.avatar(decodeURIComponent(path.slice("/avatars/".length)));
         if (!avatar) {
           res.writeHead(404, { "cache-control": "private, max-age=300" });
           return res.end();
@@ -573,7 +560,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const messages = timeline.flatMap((item) => (item.kind === "message" ? [item] : []));
         const workspace = config.resolved.workspaces[thread.workspace];
         const effectiveModel = workspace
-          ? config.turnModels(thread.model, [...channelModelScopes(thread.sessionKey), workspace])
+          ? config.turnModels(thread.model, [...conversationModelScopes(thread.sessionKey, channelConfigs()), workspace])
               .map((candidate) => candidate.model)
               .find((ref) => findModel(ref))
           : undefined;
@@ -647,7 +634,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
       // quiet window would otherwise start a turn a second after the stop.
       if (method === "POST" && path.match(/^\/threads\/[^/]+\/interrupt$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
-        const dropped = gateway.threads.isCurrent(thread.id) && telegram.discardPending(thread.sessionKey);
+        const dropped = gateway.threads.isCurrent(thread.id) && channels.discardPending(thread.sessionKey);
         const stopped = await gateway.interruptThread(thread.id);
         return send(200, { stopped, dropped });
       }
@@ -659,7 +646,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
         const thread = resolveThreadRef(path.split("/")[2]);
         // Fresh means fresh, exactly as in Telegram: buffered input and the
         // in-flight turn belong to the thread being left behind.
-        telegram.discardPending(thread.sessionKey);
+        channels.discardPending(thread.sessionKey);
         await gateway.interrupt(thread.sessionKey);
         const started = gateway.newThread(thread.sessionKey, thread.workspace);
         return send(201, threadView(started));
@@ -687,12 +674,12 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, telegram: 
           const current = gateway.threads.current(thread.sessionKey);
           throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
         }
-        const delivery = await gateway.deliverOutbound(thread.id, text, () => telegram.sendToSession(thread.sessionKey, text));
+        const delivery = await gateway.deliverOutbound(thread.id, text, () => channels.sendToSession(thread.sessionKey, text));
         return send(200, { ok: true, threadId: thread.id, ...delivery });
       }
       if (method === "POST" && path.match(/^\/pairing\/[^/]+\/(approve|deny)$/)) {
         const [, , requestId, action] = path.split("/");
-        const request = action === "approve" ? await telegram.approvePairing(requestId) : telegram.denyPairing(requestId);
+        const request = action === "approve" ? await channels.approvePairing(requestId) : channels.denyPairing(requestId);
         return send(200, request);
       }
       if (method === "GET" && path === "/models") {

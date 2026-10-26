@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TurnFailure, turnFailure } from "../src/agent/runner.ts";
-import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../src/channels/telegram/failover.ts";
+import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../src/channels/failover.ts";
 
 const PLAN = [
   { model: "claude-code/opus" },
@@ -35,16 +35,12 @@ test("a turn that failed before any candidate ran keeps its own error", () => {
   assert.equal(error.message, "all models failed");
 });
 
-/** The keyboard a failure carries, and the callback data of one of its buttons. */
+/** The buttons a failure carries, and the callback data of one of them. */
 function offerFor(offers: FailoverOffers<string>, sessionKey = "telegram:main:7", rewind?: { from: string; to: string }) {
-  const keyboard = offers.offer(sessionKey, "replay", { remaining: TAIL, rewind, hiddenToolCalls: [] });
-  const buttons = keyboard?.inline_keyboard[0] ?? [];
+  const buttons = offers.offer(sessionKey, "replay", { remaining: TAIL, rewind, hiddenToolCalls: [] })?.[0] ?? [];
   return {
-    labels: buttons.map((button) => ("text" in button ? button.text : "")),
-    data: (mode: "continue" | "restart") => {
-      const button = buttons.find((b) => "callback_data" in b && b.callback_data.endsWith(`:${mode}`));
-      return button && "callback_data" in button ? button.callback_data : "";
-    },
+    labels: buttons.map((button) => button.label),
+    data: (mode: "continue" | "restart") => buttons.find((b) => b.data.endsWith(`:${mode}`))?.data ?? "",
   };
 }
 
@@ -107,9 +103,8 @@ test("a continue names the tool calls the next model cannot read back", () => {
     { id: "claude:0", name: "Bash", args: { command: "npm test" } },
     { id: "claude:1", name: "telegram", args: { action: "send", text: "the report is ready" } },
   ];
-  const keyboard = offers.offer("telegram:main:7", "replay", { remaining: TAIL, hiddenToolCalls });
-  const button = keyboard!.inline_keyboard[0]![0]!;
-  const taken = offers.take("callback_data" in button ? button.callback_data : "", "telegram:main:7");
+  const button = offers.offer("telegram:main:7", "replay", { remaining: TAIL, hiddenToolCalls })![0]![0]!;
+  const taken = offers.take(button.data, "telegram:main:7");
 
   const prompt = continuePrompt(taken!.hiddenToolCalls);
   // A send is exactly the side effect no amount of reading the workspace recovers.
@@ -143,7 +138,7 @@ test("with auto-failover on, the failure runs the continue itself instead of ask
   const resolution = offers.resolve("telegram:main:7", "replay", { remaining: TAIL, rewind: { from: "leaf-9", to: "leaf-4" }, hiddenToolCalls }, true);
 
   // No buttons at all — the retry is already on its way.
-  assert.equal(resolution.keyboard, undefined);
+  assert.equal(resolution.buttons, undefined);
   assert.deepEqual(resolution.retry?.models, TAIL);
   // A continue, never a restart: the rewind is left alone and the prompt is the
   // one that tells the next model what already ran.
@@ -157,7 +152,7 @@ test("auto-failover with the plan spent still just reports the failure", () => {
   const resolution = offers.resolve("telegram:main:7", "replay", { remaining: [], hiddenToolCalls: [] }, true);
 
   assert.equal(resolution.retry, undefined);
-  assert.equal(resolution.keyboard, undefined);
+  assert.equal(resolution.buttons, undefined);
 });
 
 test("with auto-failover off, the choice still goes to the chat", () => {
@@ -166,11 +161,11 @@ test("with auto-failover off, the choice still goes to the chat", () => {
   const resolution = offers.resolve("telegram:main:7", "replay", { remaining: TAIL, hiddenToolCalls: [] }, false);
 
   assert.equal(resolution.retry, undefined);
-  const buttons = resolution.keyboard?.inline_keyboard[0] ?? [];
-  assert.deepEqual(buttons.map((button) => ("text" in button ? button.text : "")), ["▶ Continue on gpt-5", "↻ Restart on gpt-5"]);
+  const buttons = resolution.buttons?.[0] ?? [];
+  assert.deepEqual(buttons.map((button) => button.label), ["▶ Continue on gpt-5", "↻ Restart on gpt-5"]);
   // The offer is live: the button it just handed out can be claimed.
-  const data = buttons.find((b) => "callback_data" in b && b.callback_data.endsWith(":continue"));
-  assert.ok(offers.take(data && "callback_data" in data ? data.callback_data : "", "telegram:main:7"));
+  const data = buttons.find((b) => b.data.endsWith(":continue"))?.data ?? "";
+  assert.ok(offers.take(data, "telegram:main:7"));
 });
 
 test("callback data that is not a live offer is refused, not guessed at", () => {

@@ -487,11 +487,12 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 .btn-ghost:hover { background: color-mix(in oklab, var(--color-base-content) 12%, transparent); }
 
 /* provider-request chip: a plain, dim meta row that lines up with the message
-   column's left edge (no button padding pushing it out of alignment). */
+   column's left edge (no button padding pushing it out of alignment). A row of
+   its own, so a run of retries stacks instead of wrapping into one line. */
 .request-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.5rem;
   margin: 0.2rem 0;
   padding: 0;
   background: none;
@@ -501,6 +502,9 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   transition: opacity 0.15s;
 }
 .request-chip:hover { opacity: 1; }
+.request-chip-mark { flex: 0 0 1em; text-align: center; }
+.request-chip.is-retry { margin-top: -0.1rem; }
+.request-chip.is-retry .request-chip-mark { color: var(--color-warning); }
 
 /* ---------- badges ---------- */
 

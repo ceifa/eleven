@@ -1306,7 +1306,7 @@ function transcriptNode(row) {
   if (row.kind === "tool-calls") return toolCallsBlock(row.calls);
   if (row.kind === "buttons") return buttonsMessage(row.call, row.reply);
   if (row.kind === "error") return turnErrorRow(row.text);
-  if (row.kind === "request") return requestChip(row.request);
+  if (row.kind === "request") return requestChip(row.request, row.retry);
   return messageBubble(row.message, { grouped: row.grouped, at: row.at });
 }
 
@@ -1353,7 +1353,9 @@ function renderLive(rebuild = false) {
 function liveNode(item) {
   if (item.kind === "tool") return isButtonsCall(item) ? buttonsMessage(item) : toolCallsBlock([item]);
   if (item.kind === "request") {
-    return state.showRequests ? requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 }) : h("div", { hidden: true });
+    if (!state.showRequests) return h("div", { hidden: true });
+    const retry = state.live[state.live.indexOf(item) - 1]?.kind === "request";
+    return requestChip({ id: item.id, model: item.model, at: item.at, bytes: 0 }, retry);
   }
   // A message that arrived mid-turn: an ordinary bubble, in the ordinary flow,
   // at the point in the turn where it actually landed.
@@ -2245,12 +2247,17 @@ function markUnreadBelow() {
 const fmtBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-function requestChip(request) {
+/** One provider request, on its own line. `retry` marks a request sent again
+ *  because the one above it brought nothing back. */
+function requestChip(request, retry = false) {
   return h("button", {
-    class: "request-chip font-mono text-xs",
-    title: "open the recorded provider request",
+    class: `request-chip font-mono text-xs${retry ? " is-retry" : ""}`,
+    title: retry ? "retry of the request above, which brought nothing back · open the recorded request" : "open the recorded provider request",
     onclick: () => openRequestModal(request),
-  }, "⚡", [request.model, request.bytes ? fmtBytes(request.bytes) : null, fmtTime(request.at)].filter(Boolean).join(" · "));
+  },
+    h("span", { class: "request-chip-mark", "aria-hidden": "true" }, retry ? "↻" : "⚡"),
+    h("span", {}, [request.model, request.bytes ? fmtBytes(request.bytes) : null, fmtTime(request.at)].filter(Boolean).join(" · ")),
+  );
 }
 
 // ---- JSON viewer -------------------------------------------------------

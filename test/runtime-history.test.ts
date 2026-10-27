@@ -177,3 +177,24 @@ test("a message delivered during a native tool call stays after its result in th
   const midAt = messages.findIndex((m) => m.role === "user" && JSON.stringify(m.content).includes("And explain it."));
   assert.ok(resultAt >= 0 && midAt > resultAt, "the wire must not synthesize a missing result before the steered input");
 });
+
+test("a provider picking up an answered Claude turn gets the head of large output, the transcript keeps all of it", async () => {
+  const long = `HEAD ${"y".repeat(20_000)} TAIL`;
+  installClaude(undefined, [nativeMessages[0], {
+    ...nativeMessages[1], message: { role: "user", content: [{ type: "tool_result", tool_use_id: "native-call", content: long }] },
+  } as SDKMessage, nativeMessages[2]]);
+  const runner = new Runner();
+  const workspace = join(scratch, "large-workspace");
+  mkdirSync(workspace);
+  const request = {
+    runtime: { channel: "test", workspace: "test", workspacePath: workspace },
+    sessionDir: join(scratch, "large-sessions"), workspacePath: workspace, tools: ["read" as const],
+  };
+  const first = await runner.submit("large-thread", { ...request, models: [{ model: "claude-code/default" }], text: "Read the big file" });
+  await runner.submit("large-thread", { ...request, sessionFile: first!.sessionFile, models: [{ model: "history-reader/m" }], text: "Summarize it." });
+  const sent = JSON.stringify(received.at(-1)!.find((m) => m.role === "toolResult")?.content);
+  assert.match(sent, /HEAD/);
+  assert.doesNotMatch(sent, /TAIL/);
+  assert.match(sent, /Run the tool again/);
+  assert.equal((await readToolResult(first!.sessionFile, "native-call"))?.output, long);
+});

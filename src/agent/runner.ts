@@ -795,7 +795,7 @@ export class Runner {
       extensionFactories: [{
         name: "eleven-runtime",
         factory: (pi: ExtensionAPI) => {
-          pi.on("context", (event) => ({ messages: withToolResults(event.messages) }));
+          pi.on("context", (event) => ({ messages: boundRuntimeResults(withToolResults(event.messages)) }));
           if (this.hooks.onProviderRequest) {
             pi.on("before_provider_request", (event) => {
               this.hooks.onProviderRequest?.(threadId, activeModel.current, event.payload);
@@ -968,6 +968,29 @@ export function withToolResults(messages: AgentMessage[]): AgentMessage[] {
     }
   }
   return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
+}
+
+const ANSWERED_RESULT_CHARS = 2_000;
+
+/** Claude Code's tool output never entered Pi's context before, and a real
+ * thread's runs past a million tokens. A provider picking such a thread up gets
+ * the calls and the head of each output from answered turns, not all of it cold. */
+export function boundRuntimeResults(messages: AgentMessage[]): AgentMessage[] {
+  const answered = messages.findLastIndex((message) => message.role === "assistant" && message.stopReason === "stop");
+  const runtimeCalls = new Set(messages.slice(0, answered).flatMap((message) =>
+    message.role === "assistant" && message.provider === CLAUDE_CODE_PROVIDER
+      ? message.content.flatMap((block) => block.type === "toolCall" ? [block.id] : [])
+      : []));
+  if (!runtimeCalls.size) return messages;
+  return messages.map((message, index) => {
+    if (index > answered || message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) return message;
+    const text = contentText(message.content);
+    const images = message.content.some((block) => block.type === "image");
+    if (text.length <= ANSWERED_RESULT_CHARS && !images) return message;
+    const kept = Math.min(text.length, ANSWERED_RESULT_CHARS).toLocaleString("en-US");
+    const notice = `[output shortened for context: ${kept} of ${text.length.toLocaleString("en-US")} characters${images ? ", images omitted" : ""}. Run the tool again if you need the rest.]`;
+    return { ...message, content: [{ type: "text", text: `${text.slice(0, ANSWERED_RESULT_CHARS)}\n${notice}` }] };
+  });
 }
 
 /** Identifies one message across a transcript round-trip: the arrival instant

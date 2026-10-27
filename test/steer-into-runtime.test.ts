@@ -3,7 +3,7 @@ import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { keepRuntimeInputsInContext, withRuntimeInputs, withToolResults } from "../src/agent/runner.ts";
+import { boundRuntimeResults, keepRuntimeInputsInContext, withRuntimeInputs, withToolResults } from "../src/agent/runner.ts";
 import { contentText } from "../src/util.ts";
 
 const model = { id: "opus", provider: "claude-code", api: "claude-code", baseUrl: "local://claude-code" } as unknown as Model;
@@ -154,4 +154,34 @@ test("input steered during a native tool call cannot split the model's call/resu
   assert.equal(withToolResults(ordered), ordered);
   const interrupted = [seed, call, mid];
   assert.equal(withToolResults(interrupted), interrupted, "a missing result is not invented");
+});
+
+test("only Claude tool output from answered turns is shortened in model context", () => {
+  const claudeCall = (id: string): AssistantMessage => ({ ...answer(""), stopReason: "toolUse", content: [{ type: "toolCall", id, name: "Read", arguments: {} }] });
+  const piCall: AssistantMessage = { ...claudeCall("pi"), provider: "openai-codex", api: "openai-codex-responses" } as AssistantMessage;
+  const output = (id: string, text: string, image = false) => ({
+    role: "toolResult" as const, toolCallId: id, toolName: "Read", isError: false, timestamp: 3,
+    content: [{ type: "text" as const, text }, ...(image ? [{ type: "image" as const, data: "aW1n", mimeType: "image/png" }] : [])],
+  });
+  const long = "x".repeat(10_000);
+  const old = output("old", long, true);
+  const small = output("small", "short");
+  const native = output("pi", long);
+  const pending = output("pending", long);
+  const failed: AssistantMessage = { ...answer(""), stopReason: "error" };
+  const messages = [
+    human("read", 1), claudeCall("old"), old, claudeCall("small"), small, piCall, native, answer("done"),
+    human("again", 4), claudeCall("pending"), pending, failed,
+  ];
+  const bounded = boundRuntimeResults(messages);
+  const text = (message: unknown) => JSON.stringify((message as { content: unknown }).content);
+  const shortened = bounded[2] as typeof old;
+  assert.equal(shortened.content.length, 1, "old images are dropped");
+  assert.ok(text(shortened).length < 2_300);
+  assert.match(text(shortened), /10,000 characters/);
+  assert.equal(bounded[4], small);
+  assert.equal(bounded[6], native, "Pi-native output was already in context and stays as it was");
+  assert.equal(bounded[10], pending, "a turn that did not finish keeps its whole output for a continuation");
+  assert.equal(old.content[0].text, long, "the transcript itself is never edited");
+  assert.equal(boundRuntimeResults([human("hi", 1), answer("hello")]).length, 2);
 });

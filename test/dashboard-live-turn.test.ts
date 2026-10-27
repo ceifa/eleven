@@ -104,6 +104,27 @@ test("provider requests sit between the calls they paid for, not in a clump", ()
   );
 });
 
+test("a request sent again because the last one brought nothing back is marked a retry", () => {
+  const t = Date.parse("2026-08-29T12:00:00.000Z");
+  const rows = transcriptRows({
+    timeline: [
+      { kind: "message", role: "user", text: "ship it", timestamp: iso(t) },
+      { kind: "tool-calls", calls: [{ id: "c1", name: "Read", summary: "" }], timestamp: iso(t + 9_000) },
+    ],
+    requests: [
+      { id: "r1", model: "openai-codex/gpt", at: t + 1_000, bytes: 10 },
+      { id: "r2", model: "claude-code/opus", at: t + 3_000, bytes: 10 },
+      { id: "r3", model: "claude-code/opus", at: t + 5_000, bytes: 10 },
+      { id: "r4", model: "claude-code/opus", at: t + 10_000, bytes: 10 },
+    ],
+    showRequests: true,
+  });
+  assert.deepEqual(
+    rows.filter((row) => row.kind === "request").map((row) => [row.request.id, row.retry ?? false]),
+    [["r1", false], ["r2", true], ["r3", true], ["r4", false]],
+  );
+});
+
 test("with the chips hidden, consecutive calls still read as one block", () => {
   const { timeline, requests } = loopingTurn();
   const rows = transcriptRows({ timeline, requests, showRequests: false });

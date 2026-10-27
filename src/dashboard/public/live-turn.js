@@ -145,6 +145,12 @@ export function transcriptRows({ timeline, requests = [], live = [], liveStarted
       out.push({ kind: "day", at: row.at });
     }
     const previous = out.at(-1);
+    // Nothing came back between two requests, so the later one is the same
+    // call again: a provider retry, or failover to the next model.
+    if (row.kind === "request" && previous?.kind === "request") {
+      out.push({ ...row, retry: true });
+      continue;
+    }
     if (row.kind === "tool-calls" && previous?.kind === "tool-calls") {
       previous.calls = [...previous.calls, ...row.calls];
       continue;

@@ -151,3 +151,18 @@ test("a phone opened cold lands on the launcher, and the Threads tab still lands
   const render = functionBody(app, "async function render()");
   assert.match(render, /await route\(\);\s*firstScreen = false;/);
 });
+
+test("a turn starting does not take away the message that opened it", () => {
+  // The launcher reads a new thread right after creating it, and that read's
+  // live record is the only place the first message exists until the turn
+  // ends. When the session was slow to load, turn-start landed after the read
+  // and emptied the live region — the message vanished as soon as it was sent.
+  const ws = app.slice(app.indexOf('if (message.type === "turn-start" || message.type === "turn-rewound")'));
+  const handler = ws.slice(0, ws.indexOf("\n    }\n"));
+  assert.doesNotMatch(handler, /state\.live = \[\];/);
+  assert.match(handler, /state\.live = \(message\.items \?\? \[\]\)/);
+  // A message sent from an open thread is already a pending bubble; it must
+  // not be drawn a second time from the record.
+  assert.match(handler, /!state\.pending\.some\(/);
+  assert.match(handler, /state\.liveStartedAt = message\.startedAt \?\? Date\.now\(\);/);
+});

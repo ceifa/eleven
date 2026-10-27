@@ -123,7 +123,10 @@ export class Gateway extends EventEmitter {
       if (!this.liveTurns.has(threadId)) this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0, panels: new PanelBoard() });
       // Queued messages run back to back on the same thread: this is the only
       // point where a watcher can tell one turn's output from the next one's.
-      this.emit("turn-start", { threadId });
+      // The record rides along: a watcher that starts the turn over from nothing
+      // drops the message that opened it, which on a first turn exists nowhere else.
+      const { startedAt, items } = this.liveTurns.get(threadId)!;
+      this.emit("turn-start", { threadId, startedAt, items: [...items] });
     },
     // Fired inside the turn lane, after channel delivery — so the ledger
     // covers the send, and the next turn's begin cannot overlap this end.

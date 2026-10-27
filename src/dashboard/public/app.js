@@ -307,13 +307,19 @@ function connectWs() {
     const active = message.threadId && message.threadId === state.activeThread?.id;
     // A turn began (or failed over and restarted): the live region belongs to
     // the new attempt, so drop whatever the old one left there. Anything durable
-    // it produced is already on disk and comes back with the transcript.
+    // it produced is already on disk and comes back with the transcript. What
+    // the new attempt already holds comes with the event: the message that
+    // opened it, on a new thread its only copy until the turn ends — unless
+    // this page sent it and still shows it as a pending bubble.
     if (message.type === "turn-start" || message.type === "turn-rewound") {
       markThreadLive(message.threadId);
       if (active) {
         liveEpoch++;
-        state.live = [];
-        state.liveStartedAt = Date.now();
+        state.live = (message.items ?? []).filter((item) =>
+          !state.pending.some((pending) => item.kind === "message" && sameMessage(pending, item, MATCH_CHARS)));
+        // The daemon's clock when it says, as with the catch-up read: the
+        // transcript's rows are dated on it.
+        state.liveStartedAt = message.startedAt ?? Date.now();
         state.panels = [];
         renderLive(true);
         renderPanels();

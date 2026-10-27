@@ -60,7 +60,9 @@ export function discordTool(
     description:
       "Interact with the current Discord conversation beyond your normal reply: send extra messages, " +
       "files, buttons, reactions, delete your message, or create a thread with its own context. " +
-      "Use action=thread with thread={name,message,start?}; start=true delegates work in parallel without waiting for the answer. " +
+      "Use action=thread with thread={name,message,start?}; start=true hands the subject off to an independent agent that works there with the user. " +
+      "A thread is a handoff, not a subagent: its result never comes back to this conversation and you cannot read it later. " +
+      "If you need the result here, do the work yourself or use a tool that returns it. " +
       "From a public thread, this creates a sibling under its parent channel. Not available in DMs or private threads. Your final answer is delivered " +
       "automatically — do NOT repeat content you already sent with this tool.",
     parameters,

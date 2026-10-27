@@ -145,7 +145,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       entry = { tool: discordTool(rest, channelId, (text) => sent.add(text), async (request) => {
         const created = await createThread(channelId, request);
         if (created.warning) return `Thread created: ${created.url}. NOT started: ${created.warning}. Do not create it again.`;
-        return `Thread created: ${created.url}\nsession_key: ${created.sessionKey}\n${request.start ? "Agent started independently; answers will arrive in that thread." : "Opening context recorded; waiting for a user message."}`;
+        return `Thread created: ${created.url}\nsession_key: ${created.sessionKey}\n${request.start ? "Agent started independently; answers will arrive in that thread and will not come back to this conversation." : "Opening context recorded; waiting for a user message."}`;
       }), sent };
       chatTools.set(key, entry);
       if (chatTools.size > MAX_CHAT_TOOLS) chatTools.delete(chatTools.keys().next().value!);

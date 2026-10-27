@@ -3,7 +3,7 @@ import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { keepRuntimeInputsInContext, withRuntimeInputs } from "../src/agent/runner.ts";
+import { keepRuntimeInputsInContext, withRuntimeInputs, withToolResults } from "../src/agent/runner.ts";
 import { contentText } from "../src/util.ts";
 
 const model = { id: "opus", provider: "claude-code", api: "claude-code", baseUrl: "local://claude-code" } as unknown as Model;
@@ -84,6 +84,7 @@ test("the turn's context keeps pi's own next-turn preparation", async () => {
   const agent = {
     prepareNextTurnWithContext: (turn: { context: { messages: UserMessage[] } }) => {
       prepared.push("pi");
+      assert.deepEqual(turn.context.messages, [human("original", 1), human("mid-turn", 2)], "compaction must see runtime history");
       // pi's own handler replaces the context (compaction) and the model.
       return { context: { ...turn.context, messages: [human("compacted", 1)] }, model };
     },
@@ -94,7 +95,7 @@ test("the turn's context keeps pi's own next-turn preparation", async () => {
 
   assert.deepEqual(prepared, ["pi"]);
   assert.equal((update as { model?: Model }).model, model);
-  assert.deepEqual((update as { context: { messages: UserMessage[] } }).context.messages, [human("compacted", 1), human("mid-turn", 2)]);
+  assert.deepEqual((update as { context: { messages: UserMessage[] } }).context.messages, [human("compacted", 1)]);
 });
 
 test("runtime input lands where the transcript records it, and only once", () => {
@@ -119,4 +120,38 @@ test("runtime input lands where the transcript records it, and only once", () =>
   // between a tool call and its result.
   const toolResult = { role: "toolResult" as const, content: [], toolCallId: "1", toolName: "read", isError: false, timestamp: 3 };
   assert.deepEqual(withRuntimeInputs([seed, reply, toolResult] as never, [mid]), [seed, reply, toolResult, mid]);
+});
+
+test("native calls and identical parallel results enter the next request only once", () => {
+  const call: AssistantMessage = {
+    ...answer(""), stopReason: "toolUse", timestamp: 2,
+    content: [
+      { type: "toolCall", id: "a", name: "Read", arguments: {} },
+      { type: "toolCall", id: "b", name: "Read", arguments: {} },
+    ],
+  };
+  const result = { role: "toolResult" as const, toolName: "Read", toolCallId: "a", content: [{ type: "text" as const, text: "" }], isError: false, timestamp: 3 };
+  const otherResult = { ...result, toolCallId: "b" };
+  const initial = human("read", 1);
+  const final = answer("done");
+  const history = [call, result, otherResult];
+  const merged = withRuntimeInputs([initial, final], history);
+  assert.deepEqual(merged, [initial, call, result, otherResult, final]);
+  assert.equal(withRuntimeInputs(merged, history), merged);
+  assert.deepEqual(withRuntimeInputs([initial, call, result, final], history), merged);
+});
+
+test("input steered during a native tool call cannot split the model's call/result pair", () => {
+  const call: AssistantMessage = { ...answer(""), stopReason: "toolUse", content: [{ type: "toolCall", id: "native", name: "Read", arguments: {} }] };
+  const result = { role: "toolResult" as const, toolCallId: "native", toolName: "Read", content: [{ type: "text" as const, text: "actual output" }], isError: false, timestamp: 3 };
+  const seed = human("read", 1);
+  const mid = human("and then explain it", 2);
+  const final = answer("done");
+  const chronological = [seed, call, mid, result, final];
+  const ordered = withToolResults(chronological);
+  assert.deepEqual(ordered, [seed, call, result, mid, final]);
+  assert.deepEqual(chronological, [seed, call, mid, result, final], "the dashboard retains arrival order");
+  assert.equal(withToolResults(ordered), ordered);
+  const interrupted = [seed, call, mid];
+  assert.equal(withToolResults(interrupted), interrupted, "a missing result is not invented");
 });

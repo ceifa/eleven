@@ -166,3 +166,10 @@ test("a turn starting does not take away the message that opened it", () => {
   assert.match(handler, /!state\.pending\.some\(/);
   assert.match(handler, /state\.liveStartedAt = message\.startedAt \?\? Date\.now\(\);/);
 });
+
+test("the request inspector identifies logical SDK invocations instead of calling them wire requests", () => {
+  const open = functionBody(app, "async function openRequestModal(request)");
+  assert.match(open, /entry\.payload\?\.runtime === "claude-code"/);
+  assert.match(open, /"SDK invocation"/);
+  assert.match(open, /not an individual provider request/);
+});

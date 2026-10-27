@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
-import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import { normalizeContext, type AssistantMessage, type Context, type Message, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
@@ -1104,5 +1104,72 @@ test("prose already streamed is never answered a second time", async () => {
     assert.deepEqual(texts, ["Done — cleaning up."]);
   } finally {
     unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("native tool calls and results survive a runtime switch without entering Pi's execution stream", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111112";
+  const history: Message[] = [];
+  const nativeResult = {
+    type: "user", parent_tool_use_id: null, uuid: "tool-result", session_id: "session",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "the file contents", is_error: false }] },
+  } as SDKMessage;
+  registerClaudeSession(sessionId, {
+    cwd: "/tmp", workspaceTools: ["read"], customTools: [],
+    onHistory: (message) => history.push(message),
+  });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery([successfulMessages[0], nativeResult, successfulMessages[1]], () => {}),
+      deleteSession: (async () => {}) as never, state: fakeState(),
+    });
+    const events = [];
+    for await (const event of provider.streamSimple(model, normalizeContext({ messages: [user("read the file")], tools: [] }), { sessionId })) events.push(event);
+    assert.deepEqual(history.map((m) => m.role), ["assistant", "toolResult"]);
+    const call = history[0] as AssistantMessage;
+    const result = history[1] as ToolResultMessage;
+    assert.deepEqual(call.content, [{ type: "toolCall", id: "tool-1", name: "Read", arguments: { file_path: "README.md" } }]);
+    assert.equal(call.usage.totalTokens, 0, "the settled SDK result owns the usage");
+    assert.equal(result.toolCallId, "tool-1");
+    assert.equal(result.toolName, "Read");
+    assert.deepEqual(result.content, [{ type: "text", text: "the file contents" }]);
+    assert.equal(result.isError, false);
+    assert.equal(events.some((event) => event.type.startsWith("toolcall")), false, "Pi must not execute native tools again");
+  } finally {
+    unregisterClaudeSession(sessionId);
+  }
+});
+
+test("native history keeps repeated calls, parallel results, errors and images, but excludes child sessions", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111113";
+  const history: Message[] = [];
+  const nativeCall = (id: string, parent: string | null = null) => ({
+    ...successfulMessages[0], parent_tool_use_id: parent,
+    message: { role: "assistant", content: [{ type: "tool_use", id, name: "Read", input: { file_path: "same-file" } }] },
+  }) as SDKMessage;
+  const nativeResult = {
+    type: "user", parent_tool_use_id: null, uuid: "results", session_id: "session",
+    message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "second", is_error: true, content: "not found" },
+      { type: "tool_result", tool_use_id: "first", content: [{ type: "image", source: { type: "base64", data: "aW1hZ2U=", media_type: "image/png" } }] },
+    ] },
+  } as SDKMessage;
+  registerClaudeSession(sessionId, { cwd: "/tmp", customTools: [], onHistory: (message) => history.push(message) });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery([
+        nativeCall("first"), nativeCall("first"), nativeCall("child", "parent"), nativeCall("second"),
+        nativeResult, nativeResult, successfulMessages[1],
+      ], () => {}),
+      deleteSession: (async () => {}) as never, state: fakeState(),
+    });
+    for await (const _event of provider.streamSimple(model, normalizeContext({ messages: [user("work")], tools: [] }), { sessionId })) { /* drain */ }
+    assert.deepEqual(history.map((m) => m.role), ["assistant", "assistant", "toolResult", "toolResult"]);
+    assert.deepEqual(history.flatMap((m) => m.role === "assistant" ? m.content.filter((c) => c.type === "toolCall").map((c) => c.id) : []), ["first", "second"]);
+    const results = history.filter((m) => m.role === "toolResult");
+    assert.equal(results[0].isError, true);
+    assert.deepEqual(results[1].content, [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
+  } finally {
+    unregisterClaudeSession(sessionId);
   }
 });

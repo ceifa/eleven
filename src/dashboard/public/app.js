@@ -2391,7 +2391,7 @@ function openModal(title, subtitle, toolbar, body) {
 
 // JSON inspector (tree ⇄ raw, expand/collapse, copy) — used for the raw
 // provider-request payload.
-function showJsonModal(title, subtitle, value) {
+function showJsonModal(title, subtitle, value, notice) {
   const json = JSON.stringify(value, null, 2);
   const tree = jsonTree(value);
   const raw = h("pre", { class: "json-raw text-xs", hidden: true }, json);
@@ -2411,7 +2411,7 @@ function showJsonModal(title, subtitle, value) {
     h("button", { class: "btn btn-xs btn-ghost", title: "collapse to the top level", onclick: () => tree.collapseAll() }, "collapse"),
     rawBtn,
     h("button", { class: "btn btn-xs", onclick: () => navigator.clipboard.writeText(json).then(() => toast("Copied.")) }, "copy"),
-  ], panel);
+  ], h("div", {}, notice ? h("p", { class: "text-sm opacity-70 mb-3" }, notice) : null, panel));
 }
 
 async function openRequestModal(request) {
@@ -2419,7 +2419,9 @@ async function openRequestModal(request) {
   const entry = await api.get(`/requests/${state.activeThread.id}/${request.id}`).catch((e) => (toast(e.message, true), null));
   if (!entry) return;
   const bytes = fmtBytes(JSON.stringify(entry.payload, null, 2).length);
-  showJsonModal("Provider request", `${entry.model} · ${fmtTime(entry.at)} · ${bytes}`, entry.payload);
+  const logical = entry.payload?.runtime === "claude-code";
+  showJsonModal(logical ? "SDK invocation" : "Provider request", `${entry.model} · ${fmtTime(entry.at)} · ${bytes}`, entry.payload,
+    logical ? "Claude Code runs its tool loop inside the SDK. This is the invocation, not an individual provider request." : undefined);
 }
 
 // Args (as a JSON tree) plus the recorded result (raw text, so command output

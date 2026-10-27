@@ -23,6 +23,7 @@ import {
   type Provider,
   type SimpleStreamOptions,
   type TextContent,
+  type ToolResultMessage,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -130,10 +131,12 @@ export interface ClaudeSessionRegistration {
   excludeNativeTools?: readonly string[];
   /** Executable, request-bound tools (Telegram today), never Pi's builtin tools. */
   customTools: AgentTool[];
+  /** Record native history without putting executable tool calls on Pi's stream. */
+  onHistory?: (message: AssistantMessage | ToolResultMessage) => void;
 }
 
 interface RegisteredSession extends ClaudeSessionRegistration {
-  onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  onToolCall?: (name: string, args: Record<string, unknown>, nested: boolean) => void;
   onPanels?: (update: PanelUpdate) => void;
   onProse?: (text: string) => void;
   /** An answer settled while human input the child took mid-turn is still
@@ -284,7 +287,7 @@ export function runWithClaudeSession<T>(sessionId: string, operation: () => Prom
 
 export function setClaudeToolListener(
   sessionId: string,
-  listener: ((name: string, args: Record<string, unknown>) => void) | undefined,
+  listener: ((name: string, args: Record<string, unknown>, nested: boolean) => void) | undefined,
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onToolCall = listener;
@@ -588,6 +591,8 @@ async function consumeClaudeQuery(
       }
     }
 
+    const historyCalls = new Map<string, string>();
+    const historyResults = new Set<string>();
     const seenToolCalls = new Set<string>();
     const seenToolSignatures = new Set<string>();
     const markTool = (name: string, args: Record<string, unknown>, id?: string) => {
@@ -597,7 +602,7 @@ async function consumeClaudeQuery(
       if (id) seenToolCalls.add(id);
       seenToolSignatures.add(signature);
       if (!isolated) deps.state.markTool(ownerSessionId);
-      registration.onToolCall?.(cleanName, args);
+      registration.onToolCall?.(cleanName, args, isolated);
     };
 
     const activeCustomNames = new Set(toolNames);
@@ -714,6 +719,18 @@ async function consumeClaudeQuery(
       if (grace) { clearTimeout(grace); grace = undefined; }
       if (message.type === "assistant") {
         if (message.parent_tool_use_id === null) {
+          const calls = message.message.content.filter((block) => block.type === "tool_use" && !historyCalls.has(block.id));
+          if (calls.length && !isolated) {
+            const history = emptyAssistant(model);
+            history.stopReason = "toolUse";
+            for (const call of calls) {
+              if (call.type !== "tool_use") continue;
+              const name = cleanToolName(call.name);
+              historyCalls.set(call.id, name);
+              history.content.push({ type: "toolCall", id: call.id, name, arguments: z.record(z.string(), z.json()).parse(asArgs(call.input)) });
+            }
+            registration.onHistory?.(history);
+          }
           const text = assistantText(message);
           // Prose that arrives with tool calls is Claude saying what it is about
           // to do, never the turn's answer — ship it now instead of holding it
@@ -730,6 +747,29 @@ async function consumeClaudeQuery(
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
           markTool(block.name, asArgs(block.input), block.id);
+        }
+      } else if (message.type === "user" && message.parent_tool_use_id === null && !isolated) {
+        const content = message.message.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block.type !== "tool_result" || historyResults.has(block.tool_use_id)) continue;
+          const toolName = historyCalls.get(block.tool_use_id);
+          if (!toolName) continue;
+          historyResults.add(block.tool_use_id);
+          const result: ToolResultMessage = {
+            role: "toolResult", toolCallId: block.tool_use_id, toolName,
+            content: typeof block.content === "string"
+              ? [{ type: "text", text: block.content }]
+              : (block.content ?? []).map((part): TextContent | ImageContent => {
+                  if (part.type === "text") return { type: "text", text: part.text };
+                  if (part.type === "image" && part.source.type === "base64") {
+                    return { type: "image", data: part.source.data, mimeType: part.source.media_type };
+                  }
+                  return { type: "text", text: JSON.stringify(part) };
+                }),
+            isError: block.is_error ?? false, timestamp: Date.now(),
+          };
+          registration.onHistory?.(result);
         }
       } else if (message.type === "result") {
         // A turn that queried no model and produced no prose answered someone

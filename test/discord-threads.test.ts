@@ -111,6 +111,7 @@ test("three delegated threads start independently, with inherited settings and d
   for (const name of ["First", "Second", "Third"]) {
     const result = textOf(await tool.execute(name, { action: "thread", thread: { name, message: `Resolve ${name}`, start: true } }));
     assert.match(result, /Agent started independently/);
+    assert.match(result, /will not come back to this conversation/);
     assert.match(result, /https:\/\/discord.com\/channels\/1\//);
   }
   await toolOf(turns, 3);

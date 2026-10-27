@@ -67,6 +67,23 @@ test("the message that starts a turn is in the live record, where a mid-turn pag
   assert.ok(opener.kind === "message" && opener.at >= live!.startedAt);
 });
 
+test("turn-start carries the message that opened the turn", async () => {
+  // Regression: a page watching the thread started its live region over from
+  // nothing on turn-start. The launcher reads a new thread before that event
+  // when the session is slow to load, so the first message (on screen from that
+  // read, and in no transcript yet) vanished until the turn ended.
+  const gateway = new Gateway(config as never);
+  const starts: { startedAt: number; items: { kind: string; text?: string }[] }[] = [];
+  gateway.on("turn-start", (event) => starts.push(event));
+  stubTurn(gateway, (threadId, hooks) => hooks.onTurnStart?.(threadId, undefined));
+
+  await send(gateway, "check the logs");
+
+  assert.deepEqual(starts[0].items.map((item) => [item.kind, item.text]), [["message", "check the logs"]]);
+  const thread = gateway.threads.current("telegram:main:-1001:topic:7");
+  assert.equal(starts[0].startedAt, gateway.liveTurn(thread!.id)!.startedAt);
+});
+
 test("a turn does not inherit the previous turn's live record", async () => {
   const gateway = new Gateway(config as never);
   const seen: string[][] = [];

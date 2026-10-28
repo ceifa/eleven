@@ -40,19 +40,30 @@ export function createTurnDelivery(
   // overtake it. Sending prose early is worth nothing if the chat reorders it.
   let chain: Promise<unknown> = Promise.resolve();
   let flushed = false;
+  const queued = new Set<string>();
+  const failed = new Set<string>();
   /** Ship a block of prose now, unless the chat already has it. `silent` is for
    * prose that only says the turn is still working: it belongs in the chat, but
    * buzzing a phone for "checking X now" is a notification nobody asked for. */
   const early = (chunk: string, options: { silent?: boolean } = {}): void => {
     const text = chunk.trim();
-    if (!text || sent.has(text)) return;
-    // Remembering it here is also what keeps the final send from repeating it:
-    // the turn's own text still carries this prose.
-    sent.add(text);
+    if (!text || sent.has(text) || queued.has(text)) return;
+    queued.add(text);
     flushed = true;
-    chain = chain.then(() => send(text, !!options.silent)).catch(onError);
+    chain = chain.then(async () => {
+      try {
+        await send(text, !!options.silent);
+        sent.add(text);
+        failed.delete(text);
+      } catch (error) {
+        failed.add(text);
+        onError(error);
+      } finally {
+        queued.delete(text);
+      }
+    });
   };
-  const unsent = (blocks: string[]) => blocks.filter((block) => !sent.has(block)).join("\n\n");
+  const unsent = (blocks: string[]) => blocks.filter((block) => !sent.has(block) && !queued.has(block)).join("\n\n");
   return {
     early,
     /** Ship, as one message, the blocks the chat doesn't have yet — what a
@@ -63,7 +74,7 @@ export function createTurnDelivery(
     },
     /** What the chat is still owed once the early sends are out. */
     remaining(blocks: string[], resultText: string): string {
-      return (flushed ? unsent(blocks) : resultText).trim();
+      return (flushed ? unsent([...new Set([...failed, ...blocks])]) : resultText).trim();
     },
     /** Resolves when every early send has landed. */
     settled(): Promise<unknown> {
@@ -179,12 +190,11 @@ export async function runChatTurn<R>(turn: ChatTurn<R>): Promise<{ models: Model
       // turn's deliver ships the combined result (and clears `sent`).
       deliver: async (result) => {
         await status.finish(result.status === "stopped" ? "stopped" : "completed");
+        await delivery.settled();
         const final = delivery.remaining(blocks, result.text);
         const duplicate = !!final && sent.has(final);
-        sent.clear(); // the turn is over — next one starts clean
-        if (!final || duplicate) return;
-        await delivery.settled(); // the answer never lands above the prose that led to it
-        await turn.send(final, { reply: true });
+        if (final && !duplicate) await turn.send(final, { reply: true });
+        sent.clear();
       },
     });
   } catch (error) {

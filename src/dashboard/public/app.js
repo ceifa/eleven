@@ -4224,7 +4224,8 @@ function settleSwipe(back) {
 document.addEventListener("touchstart", (e) => {
   const open = threadsLayout()?.classList.contains("pane-open");
   const busy = document.body.classList.contains("swipe-settling") || document.querySelector(".lightbox");
-  if (!isPhone() || !open || e.touches.length > 1 || busy) {
+  // The outermost 20px belong to native back; never paint a second swipe there.
+  if (!isPhone() || !open || e.touches.length > 1 || busy || e.touches[0].clientX <= 20) {
     swipe.cancel();
     return;
   }
@@ -4235,10 +4236,10 @@ document.addEventListener("touchstart", (e) => {
 // Non-passive: a pane that follows the finger has to stop the transcript
 // scrolling under it, and preventDefault from a passive listener is ignored.
 document.addEventListener("touchmove", (e) => {
-  if (e.touches.length > 1) { swipe.cancel(); dropSwipe(); return; }
+  if (e.touches.length > 1 || !e.cancelable) { swipe.cancel(); dropSwipe(); return; }
   const at = swipe.move({ x: e.touches[0].clientX, y: e.touches[0].clientY, at: e.timeStamp });
   if (!at) return;
-  if (e.cancelable) e.preventDefault();
+  e.preventDefault();
   paintSwipe(at.progress);
 }, { passive: false });
 document.addEventListener("touchend", () => {
@@ -4246,9 +4247,8 @@ document.addEventListener("touchend", () => {
   if (settled) settleSwipe(settled.open);
 });
 document.addEventListener("touchcancel", () => {
-  if (!swipe.dragging) return;
   swipe.cancel();
-  settleSwipe(false);
+  dropSwipe();
 });
 
 /* ---------- the phone's viewport ---------- */

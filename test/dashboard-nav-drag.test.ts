@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { AXIS_SLOP, browserBack, edgeZone, navDrag } from "../src/dashboard/public/nav-drag.js";
 
 /* The edge swipe was written for the navigation drawer and now drives the
@@ -135,6 +136,121 @@ test("the page and the gesture agree on how a swipe back is painted", () => {
   // transcript scrolls under a pane that is supposed to be following the finger.
   assert.match(app, /"touchmove",[\s\S]*?\{ passive: false \}\)/);
 });
+
+/** Run the page's touch listeners without booting its API and WebSocket. */
+function pageSwipe() {
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const source = app.slice(app.indexOf("const swipe = navDrag();"), app.indexOf("/* ---------- the phone's viewport"));
+  const listeners = new Map<string, (event: any) => void>();
+  const timers: (() => void)[] = [];
+  const classes = new Set<string>();
+  const styles = new Map<string, string>();
+  let open = true;
+  let backs = 0;
+  const body = {
+    classList: {
+      add: (...names: string[]) => names.forEach((name) => classes.add(name)),
+      remove: (...names: string[]) => names.forEach((name) => classes.delete(name)),
+      contains: (name: string) => classes.has(name),
+    },
+    style: {
+      setProperty: (key: string, value: string) => styles.set(key, value),
+      removeProperty: (key: string) => styles.delete(key),
+    },
+  };
+  vm.runInNewContext(source, {
+    navDrag,
+    isPhone: () => true,
+    window: { innerWidth: SCREEN },
+    document: {
+      body,
+      querySelector: () => null,
+      getElementById: () => ({ addEventListener() {} }),
+      addEventListener: (name: string, listener: (event: any) => void) => listeners.set(name, listener),
+    },
+    threadsLayout: () => ({ classList: { contains: () => open, remove: () => { open = false; } } }),
+    history: { state: { pane: true }, back: () => { backs++; } },
+    setTimeout: (callback: () => void) => timers.push(callback),
+  });
+  let at = 0;
+  return {
+    classes,
+    styles,
+    timers,
+    get backs() { return backs; },
+    get open() { return open; },
+    touch(type: string, x: number, { cancelable = true } = {}) {
+      const event = {
+        touches: [{ clientX: x, clientY: 400 }],
+        target: body,
+        timeStamp: at += 16,
+        cancelable,
+        defaultPrevented: false,
+        preventDefault() { if (this.cancelable) this.defaultPrevented = true; },
+      };
+      listeners.get(type)!(event);
+      return event;
+    },
+  };
+}
+
+test("the page leaves the system's outermost edge to native back", () => {
+  for (const x of [0, 10, 20]) {
+    const page = pageSwipe();
+    page.touch("touchstart", x);
+    assert.equal(page.touch("touchmove", 240).defaultPrevented, false);
+    page.touch("touchend", 240);
+    assert.equal(page.classes.has("swiping-back"), false, `native edge x=${x} must not paint a second list`);
+    assert.equal(page.timers.length, 0);
+    assert.equal(page.backs, 0);
+  }
+});
+
+test("a page-owned swipe still follows the finger and goes back once", () => {
+  const page = pageSwipe();
+  page.touch("touchstart", 40);
+  const move = page.touch("touchmove", 240);
+  assert.equal(move.defaultPrevented, true);
+  assert.equal(page.classes.has("swiping-back"), true);
+  assert.equal(page.styles.get("--back"), String(200 / SCREEN));
+  page.touch("touchend", 240);
+  assert.equal(page.classes.has("swipe-settling"), true);
+  page.timers.forEach((finish) => finish());
+  assert.equal(page.open, false);
+  assert.equal(page.backs, 1);
+  assert.equal(page.classes.size, 0);
+  assert.equal(page.styles.size, 0);
+});
+
+test("a non-cancelable move belongs to the browser, not the page", () => {
+  const page = pageSwipe();
+  page.touch("touchstart", 40);
+  page.touch("touchmove", 180, { cancelable: false });
+  // Once ownership is lost, a later event must not revive the page's drag.
+  page.touch("touchmove", 240);
+  page.touch("touchend", 240);
+  assert.equal(page.classes.size, 0);
+  assert.equal(page.styles.size, 0);
+  assert.equal(page.timers.length, 0);
+  assert.equal(page.backs, 0);
+});
+
+for (const interruption of ["touchcancel", "non-cancelable move"]) {
+  test(`${interruption} removes the page's partial swipe immediately`, () => {
+    const page = pageSwipe();
+    page.touch("touchstart", 40);
+    page.touch("touchmove", 140);
+    assert.equal(page.classes.has("swiping-back"), true);
+    if (interruption === "touchcancel") page.touch("touchcancel", 140);
+    else page.touch("touchmove", 240, { cancelable: false });
+    assert.equal(page.classes.size, 0, "native navigation must not capture a settling page swipe");
+    assert.equal(page.styles.size, 0);
+    page.touch("touchend", 240);
+    assert.equal(page.timers.length, 0);
+    assert.equal(page.backs, 0);
+    assert.equal(page.open, true);
+  });
+}
 
 test("a back the browser already slid is not slid again by the page", () => {
   // Regression: Safari's edge swipe animated the way back to the list, then

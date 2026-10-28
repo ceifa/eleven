@@ -56,8 +56,8 @@ const MAX_LISTED_CALLS = 15;
  * the failed attempt's tool calls sit right above it in the transcript, and the
  * error the last model died on says nothing the next one can use.
  *
- * A nested runtime (Claude Code) is the exception. It drives its own tool loop,
- * so its calls never enter LLM context — telling the next model not to repeat
+ * Isolated nested calls are the exception: they are display-only and never
+ * enter the owning model's context. Telling the next model not to repeat
  * side effects it cannot see is worthless, and the ones that matter most are
  * exactly the ones it cannot re-derive by reading the workspace. Those get
  * listed.

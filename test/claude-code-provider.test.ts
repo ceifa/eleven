@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";
-import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import { normalizeContext, type AssistantMessage, type Context, type Message, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
@@ -1104,5 +1104,109 @@ test("prose already streamed is never answered a second time", async () => {
     assert.deepEqual(texts, ["Done — cleaning up."]);
   } finally {
     unregisterClaudeSession(piSessionId);
+  }
+});
+
+test("native tool calls and results survive a runtime switch without entering Pi's execution stream", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111112";
+  const history: Message[] = [];
+  const nativeResult = {
+    type: "user", parent_tool_use_id: null, uuid: "tool-result", session_id: "session",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "the file contents", is_error: false }] },
+  } as SDKMessage;
+  registerClaudeSession(sessionId, {
+    cwd: "/tmp", workspaceTools: ["read"], customTools: [],
+    onHistory: (message) => history.push(message),
+  });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery([successfulMessages[0], nativeResult, successfulMessages[1]], () => {}),
+      deleteSession: (async () => {}) as never, state: fakeState(),
+    });
+    const events = [];
+    for await (const event of provider.streamSimple(model, normalizeContext({ messages: [user("read the file")], tools: [] }), { sessionId })) events.push(event);
+    assert.deepEqual(history.map((m) => m.role), ["assistant", "toolResult"]);
+    const call = history[0] as AssistantMessage;
+    const result = history[1] as ToolResultMessage;
+    assert.deepEqual(call.content, [{ type: "toolCall", id: "tool-1", name: "Read", arguments: { file_path: "README.md" } }]);
+    assert.equal(call.usage.totalTokens, 2, "the request that called the tool keeps its own usage");
+    assert.equal(result.toolCallId, "tool-1");
+    assert.equal(result.toolName, "Read");
+    assert.deepEqual(result.content, [{ type: "text", text: "the file contents" }]);
+    assert.equal(result.isError, false);
+    assert.equal(events.some((event) => event.type.startsWith("toolcall")), false, "Pi must not execute native tools again");
+  } finally {
+    unregisterClaudeSession(sessionId);
+  }
+});
+
+test("native history keeps repeated calls, parallel results, errors and images, but excludes child sessions", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111113";
+  const history: Message[] = [];
+  const nativeCall = (id: string, parent: string | null = null) => ({
+    ...successfulMessages[0], parent_tool_use_id: parent,
+    message: { role: "assistant", content: [{ type: "tool_use", id, name: "Read", input: { file_path: "same-file" } }] },
+  }) as SDKMessage;
+  const nativeResult = {
+    type: "user", parent_tool_use_id: null, uuid: "results", session_id: "session",
+    message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "second", is_error: true, content: "not found" },
+      { type: "tool_result", tool_use_id: "first", content: [{ type: "image", source: { type: "base64", data: "aW1hZ2U=", media_type: "image/png" } }] },
+    ] },
+  } as SDKMessage;
+  registerClaudeSession(sessionId, { cwd: "/tmp", customTools: [], onHistory: (message) => history.push(message) });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery([
+        nativeCall("first"), nativeCall("first"), nativeCall("child", "parent"), nativeCall("second"),
+        nativeResult, nativeResult, successfulMessages[1],
+      ], () => {}),
+      deleteSession: (async () => {}) as never, state: fakeState(),
+    });
+    for await (const _event of provider.streamSimple(model, normalizeContext({ messages: [user("work")], tools: [] }), { sessionId })) { /* drain */ }
+    assert.deepEqual(history.map((m) => m.role), ["assistant", "assistant", "toolResult", "toolResult"]);
+    assert.deepEqual(history.flatMap((m) => m.role === "assistant" ? m.content.filter((c) => c.type === "toolCall").map((c) => c.id) : []), ["first", "second"]);
+    const results = history.filter((m) => m.role === "toolResult");
+    assert.equal(results[0].isError, true);
+    assert.deepEqual(results[1].content, [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
+  } finally {
+    unregisterClaudeSession(sessionId);
+  }
+});
+
+test("each native request keeps its own usage, so the turn's last row is the real context size", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111114";
+  const history: Message[] = [];
+  const request = (id: string, content: unknown[], usage: Record<string, number>) => ({
+    type: "assistant", parent_tool_use_id: null, uuid: `${id}-${content.length}`, session_id: "session",
+    message: { id, type: "message", role: "assistant", model: "claude-opus-5", content, usage, stop_reason: null, stop_sequence: null },
+  }) as unknown as SDKMessage;
+  const first = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 50 };
+  const last = { input_tokens: 5, output_tokens: 10, cache_read_input_tokens: 1_200, cache_creation_input_tokens: 0 };
+  const messages = [
+    // The CLI splits one response into a message per block, each repeating its usage.
+    request("first", [{ type: "text", text: "Reading." }], first),
+    request("first", [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "a" } }], first),
+    { type: "user", parent_tool_use_id: null, uuid: "r", session_id: "session",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "a" }] } } as SDKMessage,
+    request("last", [{ type: "text", text: "done" }], last),
+    { type: "result", subtype: "success", is_error: false, result: "done", session_id: "session", duration_ms: 1, duration_api_ms: 1,
+      num_turns: 2, total_cost_usd: 0.5, usage: { input_tokens: 105, output_tokens: 30, cache_read_input_tokens: 2_200, cache_creation_input_tokens: 50 },
+      modelUsage: {}, permission_denials: [], uuid: "result" } as unknown as SDKMessage,
+  ];
+  registerClaudeSession(sessionId, { cwd: "/tmp", customTools: [], onHistory: (message) => history.push(message) });
+  try {
+    const provider = createClaudeCodeProvider({ query: scriptedQuery(messages, () => {}), deleteSession: (async () => {}) as never, state: fakeState() });
+    let done: AssistantMessage | undefined;
+    for await (const event of provider.streamSimple(model, normalizeContext({ messages: [user("work")], tools: [] }), { sessionId })) {
+      if (event.type === "done") done = event.message;
+    }
+    const call = history[0] as AssistantMessage;
+    assert.deepEqual([call.usage.input, call.usage.output, call.usage.cacheRead, call.usage.cacheWrite], [100, 20, 1_000, 50]);
+    assert.deepEqual([done!.usage.input, done!.usage.output, done!.usage.cacheRead, done!.usage.cacheWrite], [5, 10, 1_200, 0]);
+    assert.equal(call.usage.totalTokens + done!.usage.totalTokens, 105 + 30 + 2_200 + 50, "the turn still adds up to what the SDK billed");
+    assert.equal(done!.usage.cost.total, 0.5);
+  } finally {
+    unregisterClaudeSession(sessionId);
   }
 });

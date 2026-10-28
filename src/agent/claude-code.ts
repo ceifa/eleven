@@ -23,6 +23,7 @@ import {
   type Provider,
   type SimpleStreamOptions,
   type TextContent,
+  type ToolResultMessage,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -130,10 +131,12 @@ export interface ClaudeSessionRegistration {
   excludeNativeTools?: readonly string[];
   /** Executable, request-bound tools (Telegram today), never Pi's builtin tools. */
   customTools: AgentTool[];
+  /** Record native history without putting executable tool calls on Pi's stream. */
+  onHistory?: (message: AssistantMessage | ToolResultMessage) => void;
 }
 
 interface RegisteredSession extends ClaudeSessionRegistration {
-  onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  onToolCall?: (name: string, args: Record<string, unknown>, nested: boolean) => void;
   onPanels?: (update: PanelUpdate) => void;
   onProse?: (text: string) => void;
   /** An answer settled while human input the child took mid-turn is still
@@ -284,7 +287,7 @@ export function runWithClaudeSession<T>(sessionId: string, operation: () => Prom
 
 export function setClaudeToolListener(
   sessionId: string,
-  listener: ((name: string, args: Record<string, unknown>) => void) | undefined,
+  listener: ((name: string, args: Record<string, unknown>, nested: boolean) => void) | undefined,
 ): void {
   const session = sessions.get(sessionId);
   if (session) session.onToolCall = listener;
@@ -540,6 +543,8 @@ async function consumeClaudeQuery(
   let sdk: Query | undefined;
   let attemptId: string | undefined;
   let stateBegan = false;
+  // Requests already recorded on a history message; the answer keeps the rest of the result's sum.
+  const charged = emptyAssistant(model).usage;
 
   try {
     let currentStart = trailingUserStart(messages);
@@ -588,6 +593,9 @@ async function consumeClaudeQuery(
       }
     }
 
+    const historyCalls = new Map<string, string>();
+    const historyResults = new Set<string>();
+    const chargedRequests = new Set<string>();
     const seenToolCalls = new Set<string>();
     const seenToolSignatures = new Set<string>();
     const markTool = (name: string, args: Record<string, unknown>, id?: string) => {
@@ -597,7 +605,7 @@ async function consumeClaudeQuery(
       if (id) seenToolCalls.add(id);
       seenToolSignatures.add(signature);
       if (!isolated) deps.state.markTool(ownerSessionId);
-      registration.onToolCall?.(cleanName, args);
+      registration.onToolCall?.(cleanName, args, isolated);
     };
 
     const activeCustomNames = new Set(toolNames);
@@ -714,6 +722,24 @@ async function consumeClaudeQuery(
       if (grace) { clearTimeout(grace); grace = undefined; }
       if (message.type === "assistant") {
         if (message.parent_tool_use_id === null) {
+          const calls = message.message.content.filter((block) => block.type === "tool_use" && !historyCalls.has(block.id));
+          if (calls.length && !isolated && registration.onHistory) {
+            const history = emptyAssistant(model);
+            history.stopReason = "toolUse";
+            for (const call of calls) {
+              if (call.type !== "tool_use") continue;
+              const name = cleanToolName(call.name);
+              historyCalls.set(call.id, name);
+              history.content.push({ type: "toolCall", id: call.id, name, arguments: z.record(z.string(), z.json()).parse(asArgs(call.input)) });
+            }
+            // The CLI repeats one response's usage on each block it splits off.
+            if (!chargedRequests.has(message.message.id)) {
+              chargedRequests.add(message.message.id);
+              addUsage(history.usage, message.message.usage);
+              addUsage(charged, message.message.usage);
+            }
+            registration.onHistory(history);
+          }
           const text = assistantText(message);
           // Prose that arrives with tool calls is Claude saying what it is about
           // to do, never the turn's answer — ship it now instead of holding it
@@ -730,6 +756,29 @@ async function consumeClaudeQuery(
         for (const block of message.message.content) {
           if (block.type !== "tool_use") continue;
           markTool(block.name, asArgs(block.input), block.id);
+        }
+      } else if (message.type === "user" && message.parent_tool_use_id === null && !isolated) {
+        const content = message.message.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block.type !== "tool_result" || historyResults.has(block.tool_use_id)) continue;
+          const toolName = historyCalls.get(block.tool_use_id);
+          if (!toolName) continue;
+          historyResults.add(block.tool_use_id);
+          const result: ToolResultMessage = {
+            role: "toolResult", toolCallId: block.tool_use_id, toolName,
+            content: typeof block.content === "string"
+              ? [{ type: "text", text: block.content }]
+              : (block.content ?? []).map((part): TextContent | ImageContent => {
+                  if (part.type === "text") return { type: "text", text: part.text };
+                  if (part.type === "image" && part.source.type === "base64") {
+                    return { type: "image", data: part.source.data, mimeType: part.source.media_type };
+                  }
+                  return { type: "text", text: JSON.stringify(part) };
+                }),
+            isError: block.is_error ?? false, timestamp: Date.now(),
+          };
+          registration.onHistory?.(result);
         }
       } else if (message.type === "result") {
         // A turn that queried no model and produced no prose answered someone
@@ -811,6 +860,7 @@ async function consumeClaudeQuery(
     if (error) throw new Error(error);
     const text = answers.join("\n\n") || undefined;
     if (text) emit(text);
+    withoutCharged(output.usage, charged);
     // The owning Runner commits this active attempt only after Pi has accepted
     // the assistant message into its own transcript (see commitClaudeSession).
     output.stopReason = "stop";
@@ -832,6 +882,7 @@ async function consumeClaudeQuery(
         await deleteTracked(deps.state, deps.deleteSession, ownerSessionId, registration.cwd, abandoned.removable);
       }
     }
+    withoutCharged(output.usage, charged);
     if (abortController.signal.aborted || options?.signal?.aborted) {
       output.stopReason = "aborted";
       output.errorMessage = "Operation aborted";
@@ -1021,6 +1072,27 @@ function applyUsage(output: AssistantMessage, message: Extract<SDKMessage, { typ
   output.usage.cacheWrite += usage.cache_creation_input_tokens ?? 0;
   output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
   if ("total_cost_usd" in message && typeof message.total_cost_usd === "number") output.usage.cost.total += message.total_cost_usd;
+}
+
+type Usage = AssistantMessage["usage"];
+type RequestUsage = Extract<SDKMessage, { type: "assistant" }>["message"]["usage"];
+
+function addUsage(target: Usage, usage: RequestUsage | undefined): void {
+  target.input += usage?.input_tokens ?? 0;
+  target.output += usage?.output_tokens ?? 0;
+  target.cacheRead += usage?.cache_read_input_tokens ?? 0;
+  target.cacheWrite += usage?.cache_creation_input_tokens ?? 0;
+  target.totalTokens = target.input + target.output + target.cacheRead + target.cacheWrite;
+}
+
+/** Pi reads the last row as the context size, so the answer's row must be its
+ * own request, not the whole loop the result sums. */
+function withoutCharged(usage: Usage, charged: Usage): void {
+  usage.input = Math.max(0, usage.input - charged.input);
+  usage.output = Math.max(0, usage.output - charged.output);
+  usage.cacheRead = Math.max(0, usage.cacheRead - charged.cacheRead);
+  usage.cacheWrite = Math.max(0, usage.cacheWrite - charged.cacheWrite);
+  usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
 
 function emptyAssistant(model: Model<Api>): AssistantMessage {

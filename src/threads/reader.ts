@@ -2,13 +2,8 @@ import { stat } from "node:fs/promises";
 import { parseSessionEntries, type CustomEntry, type SessionEntry, type SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { contentText, keyedLane, lruTouch, readFileSlice, summarizeToolArgs } from "../util.ts";
 
-/** Custom session entry recording nested-runtime tool calls (Claude Code runs
- *  its own tool loop, so Pi's transcript never sees them as toolCall blocks).
- *  The Runner appends one entry per call, the moment it happens — that's what
- *  makes the record survive a daemon restart mid-turn, exactly like Pi's own
- *  incremental toolCall persistence. Display-only: pi ignores plain custom
- *  entries when it builds LLM context, which is exactly why the agent loop
- *  won't re-execute these. */
+/** Display-only activity from isolated nested runtimes, and legacy Claude Code
+ *  calls recorded before native history was persisted as regular messages. */
 export const TOOL_CALLS_ENTRY_TYPE = "eleven:tool-calls";
 
 /** Custom session entry recording a turn that ended in failure. Pi persists

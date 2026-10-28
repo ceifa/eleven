@@ -8,7 +8,7 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, AssistantMessage, ImageContent, Model, UserMessage } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ImageContent, JsonObject, JsonValue, Model, UserMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -970,27 +970,49 @@ export function withToolResults(messages: AgentMessage[]): AgentMessage[] {
   return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
 }
 
-const ANSWERED_RESULT_CHARS = 2_000;
+const RECENT_RESULT_CHARS = 2_000;
+const ANSWERED_ARGUMENT_CHARS = 300;
 
-/** Claude Code's tool output never entered Pi's context before, and a real
+/** Claude Code's tool history never entered Pi's context before, and a real
  * thread's runs past a million tokens. A provider picking such a thread up gets
- * the calls and the head of each output from answered turns, not all of it cold. */
+ * the head of each output from the last answered turn, the calls of earlier
+ * ones without their output, and short arguments — not all of it cold. Turns
+ * still unanswered keep everything a continuation needs. */
 export function boundRuntimeResults(messages: AgentMessage[]): AgentMessage[] {
   const answered = messages.findLastIndex((message) => message.role === "assistant" && message.stopReason === "stop");
+  const turnStart = messages.findLastIndex((message, index) => index < answered && message.role === "user");
   const runtimeCalls = new Set(messages.slice(0, answered).flatMap((message) =>
     message.role === "assistant" && message.provider === CLAUDE_CODE_PROVIDER
       ? message.content.flatMap((block) => block.type === "toolCall" ? [block.id] : [])
       : []));
   if (!runtimeCalls.size) return messages;
   return messages.map((message, index) => {
-    if (index > answered || message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) return message;
+    if (index > answered) return message;
+    if (message.role === "assistant") {
+      if (message.provider !== CLAUDE_CODE_PROVIDER) return message;
+      const content = message.content.map((block) => block.type === "toolCall" ? { ...block, arguments: shortenStrings(block.arguments) as JsonObject } : block);
+      return JSON.stringify(content) === JSON.stringify(message.content) ? message : { ...message, content };
+    }
+    if (message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) return message;
     const text = contentText(message.content);
     const images = message.content.some((block) => block.type === "image");
-    if (text.length <= ANSWERED_RESULT_CHARS && !images) return message;
-    const kept = Math.min(text.length, ANSWERED_RESULT_CHARS).toLocaleString("en-US");
+    if (index < turnStart) {
+      return { ...message, content: [{ type: "text", text: `[output of an earlier turn omitted for context (${text.length.toLocaleString("en-US")} characters). Run the tool again if you need it.]` }] };
+    }
+    if (text.length <= RECENT_RESULT_CHARS && !images) return message;
+    const kept = Math.min(text.length, RECENT_RESULT_CHARS).toLocaleString("en-US");
     const notice = `[output shortened for context: ${kept} of ${text.length.toLocaleString("en-US")} characters${images ? ", images omitted" : ""}. Run the tool again if you need the rest.]`;
-    return { ...message, content: [{ type: "text", text: `${text.slice(0, ANSWERED_RESULT_CHARS)}\n${notice}` }] };
+    return { ...message, content: [{ type: "text", text: `${text.slice(0, RECENT_RESULT_CHARS)}\n${notice}` }] };
   });
+}
+
+function shortenStrings(value: JsonValue): JsonValue {
+  if (typeof value === "string") {
+    return value.length > ANSWERED_ARGUMENT_CHARS ? `${value.slice(0, ANSWERED_ARGUMENT_CHARS)}… [${value.length.toLocaleString("en-US")} characters]` : value;
+  }
+  if (Array.isArray(value)) return value.map(shortenStrings);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shortenStrings(item)]));
+  return value;
 }
 
 /** Identifies one message across a transcript round-trip: the arrival instant

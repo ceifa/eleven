@@ -156,8 +156,8 @@ test("input steered during a native tool call cannot split the model's call/resu
   assert.equal(withToolResults(interrupted), interrupted, "a missing result is not invented");
 });
 
-test("only Claude tool output from answered turns is shortened in model context", () => {
-  const claudeCall = (id: string): AssistantMessage => ({ ...answer(""), stopReason: "toolUse", content: [{ type: "toolCall", id, name: "Read", arguments: {} }] });
+test("only Claude tool history from answered turns is shortened in model context", () => {
+  const claudeCall = (id: string, args = {}): AssistantMessage => ({ ...answer(""), stopReason: "toolUse", content: [{ type: "toolCall", id, name: "Read", arguments: args }] });
   const piCall: AssistantMessage = { ...claudeCall("pi"), provider: "openai-codex", api: "openai-codex-responses" } as AssistantMessage;
   const output = (id: string, text: string, image = false) => ({
     role: "toolResult" as const, toolCallId: id, toolName: "Read", isError: false, timestamp: 3,
@@ -168,13 +168,22 @@ test("only Claude tool output from answered turns is shortened in model context"
   const small = output("small", "short");
   const native = output("pi", long);
   const pending = output("pending", long);
+  const ancient = output("ancient", long);
+  const written = claudeCall("ancient", { path: "a.txt", content: long, edits: [{ text: long }] });
   const failed: AssistantMessage = { ...answer(""), stopReason: "error" };
   const messages = [
+    human("first", 0), written, ancient, answer("one"),
     human("read", 1), claudeCall("old"), old, claudeCall("small"), small, piCall, native, answer("done"),
     human("again", 4), claudeCall("pending"), pending, failed,
   ];
-  const bounded = boundRuntimeResults(messages);
+  const bounded = boundRuntimeResults(messages).slice(4);
   const text = (message: unknown) => JSON.stringify((message as { content: unknown }).content);
+  const [, shortWrite, omitted] = boundRuntimeResults(messages);
+  assert.ok(text(omitted).length < 200, "output of turns before the latest answered one is omitted");
+  assert.match(text(omitted), /earlier turn/);
+  assert.ok(text(shortWrite).length < 1_000, "long call arguments are shortened at any depth");
+  assert.match(text(shortWrite), /a\.txt/);
+  assert.equal((written.content[0] as { arguments: { content: string } }).arguments.content, long);
   const shortened = bounded[2] as typeof old;
   assert.equal(shortened.content.length, 1, "old images are dropped");
   assert.ok(text(shortened).length < 2_300);

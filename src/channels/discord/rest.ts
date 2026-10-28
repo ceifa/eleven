@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { basename } from "node:path";
 import { logger } from "../../log.ts";
 
@@ -9,6 +11,9 @@ const USER_AGENT = "DiscordBot (https://github.com/ceifa/eleven, 1)";
 const MAX_ATTEMPTS = 4;
 const BASE_DELAY_MS = 500;
 const RETRY_AFTER_CAP_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const INTERACTION_TIMEOUT_MS = 2_500;
+const INTERACTION_ATTEMPT_TIMEOUT_MS = 1_000;
 
 /** Errors that provably happened before the request reached Discord. */
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
@@ -44,9 +49,8 @@ export interface Upload {
 export interface RequestOptions {
   body?: unknown;
   files?: Upload[];
-  /** A POST that creates something (a message) cannot be retried once it may
-   *  have reached Discord — a duplicate is worse than a gap. Everything else
-   *  is safe to repeat. */
+  /** A creation without Discord nonce support cannot be retried once it may
+   *  have reached Discord. */
   creates?: boolean;
 }
 
@@ -54,7 +58,7 @@ export interface RequestOptions {
  * Discord's REST API over fetch. A 429 is always safe to retry — Discord
  * refused the request — so it waits out `retry_after` and goes again; a 5xx
  * or a network failure is retried only when repeating the call cannot
- * duplicate what it did.
+ * duplicate what it did. Channel messages reuse a Discord-enforced nonce.
  */
 export class DiscordRest {
   private token: string;
@@ -66,9 +70,14 @@ export class DiscordRest {
   }
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
-    const repeatable = !options.creates;
+    const message = method === "POST" && /^\/channels\/\d+\/messages$/.test(path);
+    if (message) options = { ...options, body: { ...options.body as object, nonce: randomBytes(12).toString("hex"), enforce_nonce: true } };
+    const repeatable = message || !options.creates;
+    const deadline = path.startsWith("/interactions/") ? AbortSignal.timeout(INTERACTION_TIMEOUT_MS) : undefined;
     for (let attempt = 1; ; attempt++) {
+      deadline?.throwIfAborted();
       let response: Response;
+      let body: Record<string, unknown> | undefined;
       try {
         response = await this.fetch(`${API}${path}`, {
           method,
@@ -78,19 +87,28 @@ export class DiscordRest {
             ...(options.files?.length || options.body === undefined ? {} : { "content-type": "application/json" }),
           },
           body: await encode(options),
+          signal: deadline
+            ? AbortSignal.any([deadline, AbortSignal.timeout(INTERACTION_ATTEMPT_TIMEOUT_MS)])
+            : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
+        if (response.status === 204) return undefined as T;
+        try {
+          body = await response.json() as Record<string, unknown>;
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+        }
       } catch (error) {
-        if (attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw error;
-        await this.wait(path, attempt, undefined, error);
+        if (deadline?.aborted || attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw error;
+        await this.wait(path, attempt, undefined, error, deadline);
         continue;
       }
-      if (response.status === 204) return undefined as T;
-      const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
       if (response.ok) return body as T;
+      // Discord's "already acknowledged" confirms the previous callback landed.
+      if (deadline && attempt > 1 && body?.code === 40060) return undefined as T;
       const retryAfter = response.status === 429 ? retryAfterMs(response, body) : undefined;
       const retriable = retryAfter !== undefined || (response.status >= 500 && repeatable);
       if (!retriable || attempt >= MAX_ATTEMPTS) throw new DiscordApiError(response.status, body);
-      await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`);
+      await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`, deadline);
     }
   }
 
@@ -98,10 +116,12 @@ export class DiscordRest {
     return this.request<T>("GET", path);
   }
 
-  private async wait(path: string, attempt: number, retryAfter: number | undefined, cause: unknown): Promise<void> {
-    const delay = retryAfter ?? BASE_DELAY_MS * 2 ** (attempt - 1);
-    log.warn(`${path} failed (attempt ${attempt}), retrying in ${Math.round(delay)}ms: ${cause}`);
-    await new Promise((resolve) => setTimeout(resolve, delay));
+  private async wait(path: string, attempt: number, retryAfter: number | undefined, cause: unknown, signal?: AbortSignal): Promise<void> {
+    const ms = retryAfter ?? BASE_DELAY_MS * 2 ** (attempt - 1);
+    const route = path.replace(/^(\/interactions|\/webhooks)\/([^/]+)\/[^/]+/, "$1/$2/[redacted]");
+    const detail = cause instanceof Error && cause.cause ? `${cause}: ${cause.cause}` : String(cause);
+    log.warn(`${route} failed (attempt ${attempt}), retrying in ${Math.round(ms)}ms: ${detail}`);
+    await delay(ms, undefined, { signal });
   }
 }
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -287,10 +288,10 @@ test("a rate-limited request waits out retry_after and goes again", async () => 
   assert.equal((calls[0]!.init.headers as Record<string, string>).authorization, "Bot token");
 });
 
-test("a message send that may have landed is never repeated; an edit is", async () => {
+test("a creation without nonce support that may have landed is never repeated; an edit is", async () => {
   const send = fakeFetch([json(502, { message: "Bad Gateway" }), json(200, {})]);
   await assert.rejects(
-    () => new DiscordRest("token", send.impl).request("POST", "/channels/1/messages", { body: { content: "hi" }, creates: true }),
+    () => new DiscordRest("token", send.impl).request("POST", "/channels/1/threads", { body: { name: "hi" }, creates: true }),
     (error: unknown) => error instanceof DiscordApiError && error.status === 502,
   );
   assert.equal(send.calls.length, 1, "a duplicate is worse than a gap");
@@ -308,7 +309,11 @@ test("files ride as multipart, announced in the payload", async () => {
     const { calls, impl } = fakeFetch([json(200, { id: "m1" })]);
     await new DiscordRest("token", impl).request("POST", "/channels/1/messages", { body: { content: "here" }, files: [{ path }], creates: true });
     const form = calls[0]!.init.body as FormData;
-    assert.deepEqual(JSON.parse(form.get("payload_json") as string), { content: "here", attachments: [{ id: 0, filename: "report.txt" }] });
+    const payload = JSON.parse(form.get("payload_json") as string);
+    assert.ok(payload.nonce && payload.nonce.length <= 25);
+    assert.equal(payload.enforce_nonce, true);
+    const { nonce, enforce_nonce, ...message } = payload;
+    assert.deepEqual(message, { content: "here", attachments: [{ id: 0, filename: "report.txt" }] });
     assert.equal(await (form.get("files[0]") as Blob).text(), "all good");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -376,4 +381,103 @@ test("one router: calls about a conversation reach the channel its key names, an
     "discord send discord:home:2:3",
     "discord welcome 1170000000000000001",
   ]);
+});
+
+test("Discord message retries reuse a nonce instead of losing a reply after an ambiguous failure", async () => {
+  const { calls, impl } = fakeFetch([new TypeError("fetch failed"), json(200, { id: "m1" })]);
+  const rest = new DiscordRest("token", impl);
+  const result = await rest.request<{ id: string }>("POST", "/channels/1/messages", { body: { content: "answer" }, creates: true });
+  assert.equal(result.id, "m1");
+  assert.equal(calls.length, 2);
+  const first = JSON.parse(calls[0].init.body as string);
+  const second = JSON.parse(calls[1].init.body as string);
+  assert.ok(first.nonce && first.nonce.length <= 25);
+  assert.equal(first.enforce_nonce, true);
+  assert.equal(first.nonce, second.nonce);
+  assert.ok(calls[0].init.signal instanceof AbortSignal, "a stalled connection must have a deadline");
+});
+
+test("separate sends of identical text get different nonces", async () => {
+  const { calls, impl } = fakeFetch([json(200, { id: "m1" }), json(200, { id: "m2" })]);
+  const rest = new DiscordRest("token", impl);
+  await rest.request("POST", "/channels/1/messages", { body: { content: "same text" }, creates: true });
+  await rest.request("POST", "/channels/1/messages", { body: { content: "same text" }, creates: true });
+  const nonces = calls.map((call) => JSON.parse(call.init.body as string).nonce);
+  assert.ok(nonces[0]);
+  assert.notEqual(nonces[0], nonces[1]);
+});
+
+test("an interaction acknowledgment cannot spend five minutes waiting past Discord's three-second deadline", async () => {
+  let attempts = 0;
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const impl = (async (_url: string, init: RequestInit) => {
+      attempts++;
+      assert.ok(init.signal instanceof AbortSignal);
+      await new Promise((_, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
+      return json(204, {});
+    }) as typeof fetch;
+    const started = Date.now();
+    await assert.rejects(
+      new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } }),
+      { name: "TimeoutError" },
+    );
+    assert.equal(attempts, 2);
+    assert.ok(Date.now() - started < 3_000);
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+
+test("a stalled response body is aborted and retried rather than accepted as a delivered message", { timeout: 15_000 }, async () => {
+  let attempts = 0;
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    if (++attempts === 1) response.write('{"id":');
+    else response.end(JSON.stringify({ id: "m1" }));
+  });
+  server.setTimeout(12_000, (socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const localFetch: typeof fetch = (_url, init) => fetch(`http://127.0.0.1:${address.port}`, init);
+    const result = await new DiscordRest("token", localFetch).request<{ id: string }>("POST", "/channels/1/messages", { body: { content: "answer" }, creates: true });
+    assert.equal(result.id, "m1");
+    assert.equal(attempts, 2);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("a stalled acknowledgment leaves time to retry before the interaction expires", async () => {
+  let attempts = 0;
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    const impl = (async (_url: string, init: RequestInit) => {
+      if (++attempts === 1) {
+        await new Promise((_, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
+      }
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    const started = Date.now();
+    await new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } });
+    assert.equal(attempts, 2);
+    assert.ok(Date.now() - started < 3_000);
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("an acknowledgment whose reply was lost is accepted when Discord confirms the retry is already acknowledged", async () => {
+  const { calls, impl } = fakeFetch([new TypeError("fetch failed"), json(400, { code: 40060, message: "Interaction has already been acknowledged." })]);
+  await new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } });
+  assert.equal(calls.length, 2);
+
+  await assert.rejects(
+    new DiscordRest("token", fakeFetch([json(400, { code: 40060 })]).impl).request("POST", "/interactions/1/private-token/callback"),
+    (error: unknown) => error instanceof DiscordApiError && error.code === 40060,
+  );
 });

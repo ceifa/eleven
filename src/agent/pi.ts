@@ -6,7 +6,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { accountCredentials } from "../accounts.ts";
+import { accountCredentials, runOnAccount } from "../accounts.ts";
 import { logger } from "../log.ts";
 import { claudeCodeProvider } from "./claude-code.ts";
 
@@ -24,6 +24,15 @@ export const agentDir = getAgentDir();
  */
 export const credentials = accountCredentials();
 export const modelRuntime = await ModelRuntime.create({ credentials });
+// pi keeps one auth snapshot per process (what the dashboard and
+// hasConfiguredAuth read), but credentials resolve per account. A refresh
+// fired inside an account, as an extension re-registering its provider while
+// a session boots there, would publish that account's logins as the machine's.
+const refresh = modelRuntime.refresh.bind(modelRuntime);
+modelRuntime.refresh = (options) => runOnAccount(undefined, () => refresh(options));
+const getAvailable = modelRuntime.getAvailable.bind(modelRuntime);
+modelRuntime.getAvailable = (providerId, options) =>
+  providerId ? getAvailable(providerId, options) : runOnAccount(undefined, () => getAvailable(undefined, options));
 // Claude Code is an ambient local runtime: it uses the official Agent SDK and
 // the login managed by `claude auth login`, never Pi's Anthropic OAuth/API path.
 modelRuntime.registerNativeProvider(claudeCodeProvider);

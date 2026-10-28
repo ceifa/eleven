@@ -12,6 +12,9 @@ const scratch = mkdtempSync(join(tmpdir(), "eleven-accounts-"));
 process.env.ELEVEN_STATE_DIR = join(scratch, "state");
 process.env.ELEVEN_CONFIG_DIR = join(scratch, "config");
 process.env.CLAUDE_CONFIG_DIR = join(scratch, "claude");
+process.env.PI_CODING_AGENT_DIR = join(scratch, "pi");
+mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+writeFileSync(join(process.env.PI_CODING_AGENT_DIR, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "sk-machine" } }));
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
 const { accountCredentials, accountDir, claudeEmail, runOnAccount, signedInAccounts } = await import("../src/accounts.ts");
@@ -46,6 +49,17 @@ test("a pi request inside an account authenticates with that account's auth.json
   const auth = await runOnAccount("spare", () => modelRuntime.getAuth("openai"));
 
   assert.equal(auth?.auth.apiKey, "sk-spare");
+});
+
+test("a catalog refresh fired inside an account keeps reporting the machine's own logins", async () => {
+  mkdirSync(accountDir("logged-out"), { recursive: true });
+  await modelRuntime.getAvailable();
+  assert.equal(modelRuntime.getProviderAuthStatus("openai").configured, true);
+
+  await runOnAccount("logged-out", () => modelRuntime.refresh({ allowNetwork: false }));
+
+  assert.equal(modelRuntime.getProviderAuthStatus("openai").configured, true);
+  assert.equal(modelRuntime.hasConfiguredAuth("openai"), true);
 });
 
 test("a turn whose account ran dry fails over to the same model on another account", async () => {

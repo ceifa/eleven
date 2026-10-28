@@ -112,7 +112,7 @@ export function transcriptRows({ timeline, requests = [], live = [], liveStarted
       for (const call of item.calls) {
         if (liveIds.has(call.id)) continue;
         if (!isButtonsCall(call)) {
-          calls.push(call);
+          calls.push({ ...call, at });
           continue;
         }
         if (calls.length) rows.push({ kind: "tool-calls", at, tie: 0, calls });

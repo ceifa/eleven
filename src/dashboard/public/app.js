@@ -349,7 +349,7 @@ function connectWs() {
       // The event carries the durable call id and the full args, so the row is
       // clickable right away — no reload needed to inspect a call mid-turn.
       if (active) {
-        state.live.push({ kind: "tool", id: message.id, name: message.name, summary: message.summary ?? "", args: message.args });
+        state.live.push({ kind: "tool", id: message.id, name: message.name, summary: message.summary ?? "", args: message.args, at: message.at });
         renderLive();
       }
     }
@@ -1113,10 +1113,10 @@ const backButton = () =>
 // line by CSS; a row with a call id opens the modal with the full args and the
 // recorded result. Live rows carry the same id the record is written under, so
 // they're clickable while the turn runs — the result simply isn't there yet.
-function toolCallRow({ name, summary, args, id }) {
+function toolCallRow({ name, summary, args, id, at }) {
   return h("div", {
     class: `tool-call${id ? " is-clickable" : ""}`,
-    ...(id ? { title: "view arguments and result", onclick: () => openToolCallModal(name, args, id) } : {}),
+    ...(id ? { title: "view arguments and result", onclick: () => openToolCallModal(name, args, id, at) } : {}),
   },
     h("span", { class: "tool-call-name" }, name),
     summary ? h("span", { class: "tool-call-arg" }, summary) : null,
@@ -2427,7 +2427,7 @@ async function openRequestModal(request) {
 // Args (as a JSON tree) plus the recorded result (raw text, so command output
 // and file contents read naturally instead of as an escaped JSON string).
 // `result` is undefined when none was recorded (e.g. the turn is still running).
-function showToolCallModal(name, args, result) {
+function showToolCallModal(name, args, result, at) {
   const hasArgs = args && Object.keys(args).length > 0;
   const argsTree = hasArgs ? jsonTree(args) : null;
   const output = result?.output ?? "";
@@ -2451,15 +2451,15 @@ function showToolCallModal(name, args, result) {
 
   // Prefix with the same ⚙ the rows use, so the header clearly reads as the
   // tool that ran (not just another section label like ARGUMENTS/RESULT).
-  openModal(`⚙ ${name}`, "tool call", toolbar, body);
+  openModal(`⚙ ${name}`, at ? `tool call · ${dayLabel(at)} ${fmtTime(at)}` : "tool call", toolbar, body);
 }
 
-async function openToolCallModal(name, args, callId) {
+async function openToolCallModal(name, args, callId, at) {
   // 404 (no result yet) resolves to undefined — the modal still shows the args.
   const result = callId && state.activeThread
     ? await api.get(`/threads/${state.activeThread.id}/toolresult?call=${encodeURIComponent(callId)}`).catch(() => undefined)
     : undefined;
-  showToolCallModal(name, args, result);
+  showToolCallModal(name, args, result, at);
 }
 
 /**

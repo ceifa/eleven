@@ -95,7 +95,7 @@ test("a native tool result reaches another runtime in warm and reopened sessions
   assert.deepEqual(liveCalls, ["native-call"]);
   const timeline = await readThreadTimeline(sessionFile);
   assert.deepEqual(timeline.flatMap((row) => row.kind === "tool-calls" ? row.calls.map((call) => call.id) : []), ["native-call"]);
-  for (const [turn, host] of [runner, new Runner()].entries()) {
+  for (const host of [runner, new Runner()]) {
     await host.submit("thread", { ...request, tools: ["read"], sessionFile, models: [{ model: "history-reader/m" }], text: "What did the file say?" });
     const context = received.at(-1)!;
     const call = context.find((m) => m.role === "assistant" && m.content.some((c) => c.type === "toolCall"));
@@ -103,9 +103,7 @@ test("a native tool result reaches another runtime in warm and reopened sessions
     assert.ok(call, "the next runtime must know what ran");
     assert.ok(result?.role === "toolResult");
     assert.equal(result.toolCallId, "native-call");
-    // Once another turn has been answered, the reopened session still carries the call, but its output is an earlier turn's.
-    if (turn === 0) assert.deepEqual(result.content, [{ type: "text", text: "file contents only the tool returned" }]);
-    else assert.match(JSON.stringify(result.content), /earlier turn omitted/);
+    assert.deepEqual(result.content, [{ type: "text", text: "file contents only the tool returned" }]);
   }
   const rebuilt = convertToLlm(SessionManager.open(sessionFile).buildSessionContext().messages);
   assert.equal(rebuilt.filter((m) => m.role === "toolResult").length, 1, "reopening must not duplicate results");

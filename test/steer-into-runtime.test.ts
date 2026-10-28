@@ -164,33 +164,32 @@ test("only Claude tool history from answered turns is shortened in model context
     content: [{ type: "text" as const, text }, ...(image ? [{ type: "image" as const, data: "aW1n", mimeType: "image/png" }] : [])],
   });
   const long = "x".repeat(10_000);
-  const old = output("old", long, true);
-  const small = output("small", "short");
-  const native = output("pi", long);
-  const pending = output("pending", long);
-  const ancient = output("ancient", long);
   const written = claudeCall("ancient", { path: "a.txt", content: long, edits: [{ text: long }] });
-  const failed: AssistantMessage = { ...answer(""), stopReason: "error" };
+  // Thirty heads of 2,000 characters fill the budget, so the oldest output no longer fits.
+  const filler = Array.from({ length: 30 }, (_, i) => [claudeCall(`fill-${i}`), output(`fill-${i}`, long)]).flat();
   const messages = [
-    human("first", 0), written, ancient, answer("one"),
-    human("read", 1), claudeCall("old"), old, claudeCall("small"), small, piCall, native, answer("done"),
-    human("again", 4), claudeCall("pending"), pending, failed,
+    human("first", 0), written, output("ancient", long), ...filler, answer("one"),
+    human("read", 1), claudeCall("old"), output("old", long, true), claudeCall("small"), output("small", "short"),
+    piCall, output("pi", long), answer("done"),
+    human("again", 4), claudeCall("pending"), output("pending", long), { ...answer(""), stopReason: "error" } as AssistantMessage,
   ];
-  const bounded = boundRuntimeResults(messages).slice(4);
+  const bounded = boundRuntimeResults(messages);
+  const result = (id: string) => bounded.find((m) => m.role === "toolResult" && m.toolCallId === id)!;
+  const original = (id: string) => messages.find((m) => m.role === "toolResult" && m.toolCallId === id)!;
   const text = (message: unknown) => JSON.stringify((message as { content: unknown }).content);
-  const [, shortWrite, omitted] = boundRuntimeResults(messages);
-  assert.ok(text(omitted).length < 200, "output of turns before the latest answered one is omitted");
-  assert.match(text(omitted), /earlier turn/);
+  assert.match(text(result("ancient")), /older output omitted/);
+  assert.ok(text(result("ancient")).length < 200, "output past the budget is omitted");
+  assert.match(text(result("fill-29")), /output shortened/, "newer outputs keep their head");
+  const shortWrite = bounded[1];
   assert.ok(text(shortWrite).length < 1_000, "long call arguments are shortened at any depth");
   assert.match(text(shortWrite), /a\.txt/);
   assert.equal((written.content[0] as { arguments: { content: string } }).arguments.content, long);
-  const shortened = bounded[2] as typeof old;
-  assert.equal(shortened.content.length, 1, "old images are dropped");
+  const shortened = result("old") as ReturnType<typeof output>;
+  assert.equal(shortened.content.length, 1, "images are dropped");
   assert.ok(text(shortened).length < 2_300);
   assert.match(text(shortened), /10,000 characters/);
-  assert.equal(bounded[4], small);
-  assert.equal(bounded[6], native, "Pi-native output was already in context and stays as it was");
-  assert.equal(bounded[10], pending, "a turn that did not finish keeps its whole output for a continuation");
-  assert.equal(old.content[0].text, long, "the transcript itself is never edited");
+  assert.equal(result("small"), original("small"));
+  assert.equal(result("pi"), original("pi"), "Pi-native output was already in context and stays as it was");
+  assert.equal(result("pending"), original("pending"), "a turn that did not finish keeps its whole output for a continuation");
   assert.equal(boundRuntimeResults([human("hi", 1), answer("hello")]).length, 2);
 });

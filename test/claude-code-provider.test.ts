@@ -1129,7 +1129,7 @@ test("native tool calls and results survive a runtime switch without entering Pi
     const call = history[0] as AssistantMessage;
     const result = history[1] as ToolResultMessage;
     assert.deepEqual(call.content, [{ type: "toolCall", id: "tool-1", name: "Read", arguments: { file_path: "README.md" } }]);
-    assert.equal(call.usage.totalTokens, 0, "the settled SDK result owns the usage");
+    assert.equal(call.usage.totalTokens, 2, "the request that called the tool keeps its own usage");
     assert.equal(result.toolCallId, "tool-1");
     assert.equal(result.toolName, "Read");
     assert.deepEqual(result.content, [{ type: "text", text: "the file contents" }]);
@@ -1169,6 +1169,43 @@ test("native history keeps repeated calls, parallel results, errors and images, 
     const results = history.filter((m) => m.role === "toolResult");
     assert.equal(results[0].isError, true);
     assert.deepEqual(results[1].content, [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
+  } finally {
+    unregisterClaudeSession(sessionId);
+  }
+});
+
+test("each native request keeps its own usage, so the turn's last row is the real context size", async () => {
+  const sessionId = "11111111-1111-4111-8111-111111111114";
+  const history: Message[] = [];
+  const request = (id: string, content: unknown[], usage: Record<string, number>) => ({
+    type: "assistant", parent_tool_use_id: null, uuid: `${id}-${content.length}`, session_id: "session",
+    message: { id, type: "message", role: "assistant", model: "claude-opus-5", content, usage, stop_reason: null, stop_sequence: null },
+  }) as unknown as SDKMessage;
+  const first = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 50 };
+  const last = { input_tokens: 5, output_tokens: 10, cache_read_input_tokens: 1_200, cache_creation_input_tokens: 0 };
+  const messages = [
+    // The CLI splits one response into a message per block, each repeating its usage.
+    request("first", [{ type: "text", text: "Reading." }], first),
+    request("first", [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "a" } }], first),
+    { type: "user", parent_tool_use_id: null, uuid: "r", session_id: "session",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "a" }] } } as SDKMessage,
+    request("last", [{ type: "text", text: "done" }], last),
+    { type: "result", subtype: "success", is_error: false, result: "done", session_id: "session", duration_ms: 1, duration_api_ms: 1,
+      num_turns: 2, total_cost_usd: 0.5, usage: { input_tokens: 105, output_tokens: 30, cache_read_input_tokens: 2_200, cache_creation_input_tokens: 50 },
+      modelUsage: {}, permission_denials: [], uuid: "result" } as unknown as SDKMessage,
+  ];
+  registerClaudeSession(sessionId, { cwd: "/tmp", customTools: [], onHistory: (message) => history.push(message) });
+  try {
+    const provider = createClaudeCodeProvider({ query: scriptedQuery(messages, () => {}), deleteSession: (async () => {}) as never, state: fakeState() });
+    let done: AssistantMessage | undefined;
+    for await (const event of provider.streamSimple(model, normalizeContext({ messages: [user("work")], tools: [] }), { sessionId })) {
+      if (event.type === "done") done = event.message;
+    }
+    const call = history[0] as AssistantMessage;
+    assert.deepEqual([call.usage.input, call.usage.output, call.usage.cacheRead, call.usage.cacheWrite], [100, 20, 1_000, 50]);
+    assert.deepEqual([done!.usage.input, done!.usage.output, done!.usage.cacheRead, done!.usage.cacheWrite], [5, 10, 1_200, 0]);
+    assert.equal(call.usage.totalTokens + done!.usage.totalTokens, 105 + 30 + 2_200 + 50, "the turn still adds up to what the SDK billed");
+    assert.equal(done!.usage.cost.total, 0.5);
   } finally {
     unregisterClaudeSession(sessionId);
   }

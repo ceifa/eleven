@@ -970,22 +970,33 @@ export function withToolResults(messages: AgentMessage[]): AgentMessage[] {
   return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
 }
 
-const RECENT_RESULT_CHARS = 2_000;
+const RESULT_HEAD_CHARS = 2_000;
+const RESULTS_BUDGET_CHARS = 60_000;
 const ANSWERED_ARGUMENT_CHARS = 300;
 
 /** Claude Code's tool history never entered Pi's context before, and a real
  * thread's runs past a million tokens. A provider picking such a thread up gets
- * the head of each output from the last answered turn, the calls of earlier
- * ones without their output, and short arguments — not all of it cold. Turns
- * still unanswered keep everything a continuation needs. */
+ * every call with short arguments and the head of the newest outputs, up to a
+ * fixed budget — not all of it cold. Turns still unanswered keep everything a
+ * continuation needs. */
 export function boundRuntimeResults(messages: AgentMessage[]): AgentMessage[] {
   const answered = messages.findLastIndex((message) => message.role === "assistant" && message.stopReason === "stop");
-  const turnStart = messages.findLastIndex((message, index) => index < answered && message.role === "user");
   const runtimeCalls = new Set(messages.slice(0, answered).flatMap((message) =>
     message.role === "assistant" && message.provider === CLAUDE_CODE_PROVIDER
       ? message.content.flatMap((block) => block.type === "toolCall" ? [block.id] : [])
       : []));
   if (!runtimeCalls.size) return messages;
+  // Newest first, and once one does not fit nothing older does: the window stays contiguous.
+  const kept = new Set<number>();
+  let budget = RESULTS_BUDGET_CHARS;
+  for (let index = answered - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) continue;
+    const size = Math.min(contentText(message.content).length, RESULT_HEAD_CHARS);
+    if (size > budget) break;
+    budget -= size;
+    kept.add(index);
+  }
   return messages.map((message, index) => {
     if (index > answered) return message;
     if (message.role === "assistant") {
@@ -996,13 +1007,13 @@ export function boundRuntimeResults(messages: AgentMessage[]): AgentMessage[] {
     if (message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) return message;
     const text = contentText(message.content);
     const images = message.content.some((block) => block.type === "image");
-    if (index < turnStart) {
-      return { ...message, content: [{ type: "text", text: `[output of an earlier turn omitted for context (${text.length.toLocaleString("en-US")} characters). Run the tool again if you need it.]` }] };
+    if (!kept.has(index)) {
+      return { ...message, content: [{ type: "text", text: `[older output omitted for context (${text.length.toLocaleString("en-US")} characters). Run the tool again if you need it.]` }] };
     }
-    if (text.length <= RECENT_RESULT_CHARS && !images) return message;
-    const kept = Math.min(text.length, RECENT_RESULT_CHARS).toLocaleString("en-US");
-    const notice = `[output shortened for context: ${kept} of ${text.length.toLocaleString("en-US")} characters${images ? ", images omitted" : ""}. Run the tool again if you need the rest.]`;
-    return { ...message, content: [{ type: "text", text: `${text.slice(0, RECENT_RESULT_CHARS)}\n${notice}` }] };
+    if (text.length <= RESULT_HEAD_CHARS && !images) return message;
+    const shown = Math.min(text.length, RESULT_HEAD_CHARS).toLocaleString("en-US");
+    const notice = `[output shortened for context: ${shown} of ${text.length.toLocaleString("en-US")} characters${images ? ", images omitted" : ""}. Run the tool again if you need the rest.]`;
+    return { ...message, content: [{ type: "text", text: `${text.slice(0, RESULT_HEAD_CHARS)}\n${notice}` }] };
   });
 }
 

@@ -132,6 +132,13 @@ test("with the chips hidden, consecutive calls still read as one block", () => {
   assert.deepEqual(rows[2].calls.map((call) => call.name), ["Read", "Bash", "Edit"]);
 });
 
+test("a merged block keeps each call on its own clock", () => {
+  const { timeline } = loopingTurn();
+  const t = Date.parse("2026-08-29T12:00:00.000Z");
+  const rows = transcriptRows({ timeline });
+  assert.deepEqual(rows[2].calls.map((call) => call.at), [t + 2_000, t + 4_000, t + 6_000]);
+});
+
 test("a message steered into a turn breaks the run of calls around it", () => {
   const t = Date.parse("2026-08-29T12:00:00.000Z");
   const rows = transcriptRows({

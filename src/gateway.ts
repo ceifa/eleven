@@ -42,7 +42,7 @@ const LIVE_ITEMS_MAX = 400;
 
 export type LiveItem =
   | { kind: "text"; text: string }
-  | { kind: "tool"; id: string; name: string; summary: string; args?: Record<string, unknown> }
+  | { kind: "tool"; id: string; name: string; summary: string; args?: Record<string, unknown>; at: number }
   | { kind: "request"; id: string; model: string; at: number }
   // A message that arrived while the turn was running and was steered into it.
   // It is persisted immediately too, but only the live record knows *where* in
@@ -216,8 +216,9 @@ export class Gateway extends EventEmitter {
         // turn can then open the call right away, instead of having to reload
         // the page to get the persisted (clickable) row.
         const summary = summarizeToolArgs(args);
-        this.pushLive(thread.id, { kind: "tool", id, name, args, summary });
-        this.emit("tool-call", { threadId: thread.id, id, name, args, summary });
+        const at = Date.now();
+        this.pushLive(thread.id, { kind: "tool", id, name, args, summary, at });
+        this.emit("tool-call", { threadId: thread.id, id, name, args, summary, at });
       },
       // Broadcast every producer's panels rather than the one update: a page
       // that connects mid-turn gets the same shape from the catch-up endpoint,

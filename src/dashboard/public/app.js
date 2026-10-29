@@ -3972,7 +3972,7 @@ async function viewSettings() {
         labeled("Speech command",
           h("textarea", { class: "textarea w-full font-mono text-xs", rows: "3", placeholder: "my-tts --out {{file}}",
             onchange: saveField((n, v) => (n.speech = v ? { command: v } : undefined)) }, c.speech?.command ?? ""),
-          "Optional. Reads plain text on stdin and writes WAV audio to {{file}}. Used by Voice conversation when Local voice is selected. Device voice needs no command and is usually faster."),
+          "Optional. Reads plain text on stdin and writes WAV audio to {{file}}. Used by Voice conversation when Local voice is selected. Device voice needs no command."),
       ),
     ),
   );

@@ -49,10 +49,6 @@ export function spokenText(text) {
     .replace(/\s+/g, " ").trim();
 }
 
-export function isVoiceExit(text) {
-  return /^(?:(?:encerrar|parar|sair d[ao]) (?:a )?(?:conversa|modo de voz)|(?:end|stop|exit) (?:the )?(?:conversation|voice mode))[.!?]?$/i.test(text.trim());
-}
-
 /** Each boundary checks cancellation: a late transcript must never start a
  *  turn. A turn already asked for is not asked again — a resumed loop waits
  *  for its reply instead of listening. */
@@ -66,7 +62,6 @@ export async function voiceLoop(io, signal) {
       const text = await io.transcribe(recording, signal);
       signal.throwIfAborted();
       if (!text.trim()) continue;
-      if (isVoiceExit(text)) { io.exit(); return; }
       io.heard(text);
       await io.ask(text, signal);
     }
@@ -167,7 +162,10 @@ function recordPhrase(stream, context, signal, cue) {
   });
 }
 
-function deviceSpeech(text, language, signal) {
+/** In the device's own language: the person who set the phone up is the one
+ *  talking to it. */
+function deviceSpeech(text, signal) {
+  const language = navigator.language;
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
     const utterance = new SpeechSynthesisUtterance(text);
@@ -217,12 +215,7 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
   const detail = h("p", { class: "voice-detail" }, "Checking voice settings.");
   const caption = h("p", { class: "voice-caption" });
   // Chosen once, parked; in the car the only tap left is Start.
-  const output = h("select", { class: "select", "aria-label": "Voice output", onchange: () => {
-    prefs.set("voice.output", output.value);
-    language.hidden = output.value !== "device"; // the local command speaks its own language
-  } });
-  const language = h("select", { class: "select", "aria-label": "Spoken language", onchange: () => prefs.set("voice.language", language.value) },
-    ...[...new Set([prefs.get("voice.language"), navigator.language, "pt-BR", "en-US", "es-ES"].filter(Boolean))].map((lang) => h("option", { value: lang }, lang)));
+  const output = h("select", { class: "select", "aria-label": "Voice output", onchange: () => prefs.set("voice.output", output.value) });
   const start = h("button", { class: "btn btn-primary voice-action", type: "button", disabled: true, onclick: () => void begin() }, "Start conversation");
   const pause = h("button", { class: "btn voice-action", type: "button", hidden: true, onclick: () => suspend("Paused", "Resume when you are ready.") }, "Pause");
   const dialog = h("dialog", { class: "voice-dialog", "aria-label": "Voice conversation" },
@@ -230,10 +223,10 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
       h("p", { class: "voice-workspace font-mono" }, thread.workspace),
       h("div", { class: "voice-beacon", "aria-hidden": "true" }, h("i", {}), h("i", {}), h("i", {}), h("i", {}), h("i", {})),
       status, detail, caption,
-      h("div", { class: "voice-options" }, output, language),
+      h("div", { class: "voice-options" }, output),
       h("div", { class: "voice-actions" }, start, pause,
         h("button", { class: "btn voice-action", type: "button", onclick: () => void close() }, "End conversation")),
-      h("p", { class: "voice-safety" }, "Set up while parked. Keep eleven open and the screen unlocked. Wait for the tone, then speak. Say “end conversation” or “encerrar conversa” to finish. Pause before switching audio devices."),
+      h("p", { class: "voice-safety" }, "Set up while parked. Keep eleven open and the screen unlocked. Wait for the tone, then speak. Pause before switching audio devices."),
     ));
   document.body.append(dialog);
   dialog.showModal();
@@ -309,7 +302,7 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
     wake = undefined;
     start.hidden = false;
     pause.hidden = true;
-    output.disabled = language.disabled = false;
+    output.disabled = false;
     setState(title);
     detail.textContent = message;
     start.textContent = "Resume conversation";
@@ -337,7 +330,7 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
   async function begin() {
     if (ended) return;
     start.hidden = true; pause.hidden = false;
-    output.disabled = language.disabled = true;
+    output.disabled = true;
     controller = new AbortController();
     const { signal } = controller;
     const current = ++generation;
@@ -385,11 +378,11 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
         speak: async (text, signal) => {
           const chunks = speechChunks(text, device ? 240 : 400);
           if (device) {
-            for (const chunk of chunks) await deviceSpeech(chunk, language.value, signal);
+            for (const chunk of chunks) await deviceSpeech(chunk, signal);
             return;
           }
-          // The next passage is synthesized while this one plays; local speech is
-          // slower than real time, so waiting for each in turn doubles the gaps.
+          // The next passage is synthesized while this one plays: a command that is
+          // slower than playback would otherwise add its whole run to every gap.
           const synthesize = (chunk) => request("/voice/speech", { text: chunk }, signal).then((response) => response.arrayBuffer());
           let next = synthesize(chunks[0]);
           for (let index = 0; index < chunks.length; index++) {
@@ -399,7 +392,6 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
             await playAudio(context, audio, signal);
           }
         },
-        exit: () => void close(),
       }, signal);
     } catch (error) {
       if (current !== generation || ended) return;
@@ -417,13 +409,12 @@ export function openVoiceConversation({ thread, h, prefs, refresh, closed }) {
       const settings = await response.json();
       if (ended) return;
       if (!settings.transcription) throw new Error("Configure voice transcription in Settings first.");
-      if (globalThis.speechSynthesis) output.append(h("option", { value: "device" }, "Device voice · faster"));
-      if (settings.speech) output.append(h("option", { value: "local" }, "Local voice · may take longer"));
+      if (globalThis.speechSynthesis) output.append(h("option", { value: "device" }, "Device voice"));
+      if (settings.speech) output.append(h("option", { value: "local" }, "Local voice"));
       if (!output.options.length) throw new Error("Configure local speech in Settings or use a browser with device voices.");
       if ([...output.options].some((option) => option.value === prefs.get("voice.output"))) output.value = prefs.get("voice.output");
-      language.hidden = output.value !== "device";
       setState("Ready to talk");
-      detail.textContent = "Choose your voice output and language before starting.";
+      detail.textContent = "Choose how replies are spoken, then start.";
       start.disabled = false;
     } catch (error) {
       if (!ended) { setState("Voice unavailable"); detail.textContent = error.message; }

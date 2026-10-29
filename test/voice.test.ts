@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 // @ts-expect-error — a browser module without types; its logic runs in Node too.
-import { isVoiceExit, speechChunks, speechDetector, spokenText, voiceLoop } from "../src/dashboard/public/voice.js";
+import { speechChunks, speechDetector, spokenText, voiceLoop } from "../src/dashboard/public/voice.js";
 import { synthesizeSpeech } from "../src/speech.ts";
 
 /** Feed a detector one level every 50 ms, the rate the recorder samples at. */
@@ -38,11 +38,6 @@ test("a reply is read as speech, not as markup", () => {
   );
 });
 
-test("the way out is spoken, and only when it is the whole sentence", () => {
-  for (const phrase of ["Encerrar conversa.", "encerrar a conversa", "End conversation!", "sair do modo de voz"]) assert.ok(isVoiceExit(phrase), phrase);
-  for (const phrase of ["Como encerrar conversa com o cliente?", "encerrar", "stop"]) assert.ok(!isVoiceExit(phrase), phrase);
-});
-
 test("long replies are split at sentences, and nothing is dropped", () => {
   const text = "Primeira frase curta. Segunda frase um pouco maior que a primeira! Terceira? Fim";
   const chunks = speechChunks(text, 40);
@@ -66,7 +61,6 @@ function fakeIo(overrides: Record<string, unknown> = {}) {
     reply: async () => { pending = false; return "**Livre** até o centro."; },
     answered: () => {},
     speak: async (text: string) => log.push(`speak:${text}`),
-    exit: () => log.push("exit"),
     setPending: (value: boolean) => { pending = value; },
     ...overrides,
   };
@@ -88,11 +82,12 @@ test("a resumed conversation speaks the reply it was waiting for instead of aski
   assert.deepEqual(io.log, ["thinking", "speaking", "speak:Livre até o centro."]);
 });
 
-test("silence keeps listening, and the exit phrase ends without asking the agent", async () => {
-  const heard = ["", "encerrar conversa"];
-  const io = fakeIo({ transcribe: async () => heard.shift() });
-  await voiceLoop(io, new AbortController().signal);
-  assert.deepEqual(io.log, ["listening", "transcribing", "listening", "transcribing", "exit"]);
+test("silence keeps listening instead of asking the agent", async () => {
+  const controller = new AbortController();
+  const heard = ["", "e aí"];
+  const io = fakeIo({ transcribe: async () => heard.shift(), ask: async () => { controller.abort(); controller.signal.throwIfAborted(); } });
+  await assert.rejects(voiceLoop(io, controller.signal));
+  assert.deepEqual(io.log, ["listening", "transcribing", "listening", "transcribing", "heard:e aí"]);
 });
 
 test("a transcript that lands after a pause never starts a turn", async () => {

@@ -177,6 +177,8 @@ export interface ElevenConfig {
   workspaces: Record<string, WorkspaceConfig>;
   /** Shell command that prints a transcript for {{file}} (voice messages). */
   transcription?: { command: string };
+  /** Reads plain text on stdin and writes WAV audio to {{file}}. */
+  speech?: { command: string };
   session?: {
     /** Days a conversation may idle before it gets a fresh thread (default 7). */
     idleDays?: number;
@@ -366,6 +368,9 @@ export function validate(config: ElevenConfig) {
   // agreed to replay.
   if (config.autoFailover !== undefined && typeof config.autoFailover !== "boolean") {
     throw new Error("autoFailover must be true or false");
+  }
+  if (config.speech !== undefined && (typeof config.speech?.command !== "string" || !config.speech.command.includes("{{file}}"))) {
+    throw new Error("speech.command must include {{file}} for the output WAV path");
   }
   const seen = new Set<string>();
   for (const [workspace, w] of Object.entries(config.workspaces)) {

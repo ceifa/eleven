@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, statSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { basename, join, extname, normalize, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -16,7 +16,7 @@ import { listWorkspaceSkills, TurnFailure } from "../agent/runner.ts";
 import { continuePrompt } from "../channels/failover.ts";
 import type { Gateway } from "../gateway.ts";
 import type { Channels } from "../channels/index.ts";
-import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
+import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, transcribeMedia, validMime, type StoredAttachment } from "../media-store.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
 import { addSample, buildUsageReport, cacheWasteOf, emptyBucket, promptTokens, readSessionUsage, startOfLocalDay } from "../threads/usage.ts";
 import { conversationIdentity } from "../threads/conversation.ts";
@@ -27,6 +27,7 @@ import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code.ts";
 import { claudeEmail, signedInAccounts } from "../accounts.ts";
 import { logger } from "../log.ts";
 import { dashboardTool } from "./tool.ts";
+import { synthesizeSpeech } from "../speech.ts";
 
 const log = logger("dashboard");
 const PUBLIC_DIR = join(import.meta.dirname, "public");
@@ -40,6 +41,7 @@ const SHELL_FILES = [
   "message-display.js",
   "nav-drag.js",
   "waveform.js",
+  "voice.js",
   "lightbox.js",
   "snapshot.js",
   "style.css",
@@ -147,7 +149,22 @@ export interface Dashboard {
 export function startDashboard(config: ConfigStore, gateway: Gateway, channels: Channels): Dashboard {
   const server = createServer((req, res) => void route(req, res).catch((error) => fail(res, 500, error)));
   const wss = new WebSocketServer({ server, path: "/ws" });
-  const cliRuns = new Map<string, { status: "running" | "done" | "error"; result?: unknown; error?: string }>();
+  let speechBusy = false;
+  // Turns whose caller polls for the answer instead of holding a request open
+  // for minutes: the CLI, and a voice conversation behind a mobile tunnel.
+  const runs = new Map<string, { status: "running" | "done" | "error"; result?: unknown; error?: string }>();
+  const trackRun = (threadId: string, turn: Promise<unknown>) => {
+    runs.set(threadId, { status: "running" });
+    while (runs.size > 100) {
+      const evictable = [...runs].find(([, run]) => run.status !== "running")?.[0];
+      if (!evictable) break;
+      runs.delete(evictable);
+    }
+    void turn.then(
+      (result) => runs.set(threadId, { status: "done", result }),
+      (error) => runs.set(threadId, { status: "error", error: error instanceof Error ? error.message : String(error) }),
+    );
+  };
 
   const send = (message: string) => {
     for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(message);
@@ -484,6 +501,58 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
           builtinSystemPrompt: BUILTIN_SYSTEM_PROMPT,
         });
       }
+      if (method === "GET" && path === "/voice") {
+        return send(200, { transcription: !!config.resolved.transcription?.command, speech: !!config.resolved.speech?.command });
+      }
+      if (method === "POST" && path === "/voice/thread") {
+        const { workspace } = z.object({ workspace: z.string().min(1) }).parse(await body(req));
+        if (!config.resolved.workspaces[workspace]) throw new ApiError(404, "workspace not found");
+        return send(201, threadView(gateway.newThread(`dashboard:${workspace}:${randomUUID()}`, workspace)));
+      }
+      if (method === "POST" && path === "/voice/transcribe") {
+        const command = config.resolved.transcription?.command;
+        if (!command) throw new ApiError(409, "Configure voice transcription in Settings first.");
+        const request = z.object({ id: z.string() }).parse(await body(req));
+        const file = resolveMediaPath(request.id);
+        if (!file || !existsSync(file)) throw new ApiError(404, "recording not found");
+        let text;
+        try {
+          text = await transcribeMedia(file, command);
+        } finally {
+          // The turn carries the text only, so nothing would ever point back at the audio.
+          await rm(file, { force: true });
+        }
+        return send(200, { text: text === "(empty transcript)" ? "" : text });
+      }
+      if (method === "POST" && path === "/voice/speech") {
+        const command = config.resolved.speech?.command;
+        if (!command) throw new ApiError(409, "Local speech is not configured.");
+        const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(await body(req));
+        if (speechBusy) throw new ApiError(409, "Local speech is busy. Try again shortly.");
+        speechBusy = true;
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.on("close", cancel);
+        try {
+          const audio = await synthesizeSpeech(text, command, controller.signal);
+          return deliver(req, res, 200, { "content-type": "audio/wav", "cache-control": "no-store" }, audio);
+        } finally {
+          res.off("close", cancel);
+          speechBusy = false;
+        }
+      }
+      // Answered at once and polled through /run: a turn can outlast the
+      // timeout of whatever tunnel the phone reaches the daemon through.
+      if (method === "POST" && path.match(/^\/threads\/[^/]+\/voice$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        if (!composable(thread.sessionKey) || !gateway.threads.isCurrent(thread.id)) {
+          throw new ApiError(409, "Start a current dashboard thread for voice conversation.");
+        }
+        if (gateway.isThreadRunning(thread.id) || runs.get(thread.id)?.status === "running") throw new ApiError(409, "This thread is already running.");
+        const { text } = z.object({ text: z.string().trim().min(1).max(8000) }).parse(await body(req));
+        trackRun(thread.id, runLocalTurn(thread.sessionKey, text, "dashboard", [], true));
+        return send(202, { ok: true });
+      }
       if (method === "GET" && path === "/config") return send(200, redactTokens(config.raw));
       if (method === "PUT" && path === "/config") {
         const next = (await body(req)) as ElevenConfig;
@@ -547,8 +616,8 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);
-        const run = cliRuns.get(thread.id);
-        if (!run) throw new ApiError(404, "no CLI run is tracked for this thread");
+        const run = runs.get(thread.id);
+        if (!run) throw new ApiError(404, "no run is tracked for this thread");
         return send(200, run);
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+$/)) {
@@ -639,16 +708,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
         const sessionKey = `${source}:${workspace}:${randomUUID()}`;
         const thread = gateway.newThread(sessionKey, workspace);
         if (source === "cli") {
-          cliRuns.set(thread.id, { status: "running" });
-          while (cliRuns.size > 100) {
-            const evictable = [...cliRuns].find(([, run]) => run.status !== "running")?.[0];
-            if (!evictable) break;
-            cliRuns.delete(evictable);
-          }
-          void runLocalTurn(sessionKey, text, source, images).then(
-            (result) => cliRuns.set(thread.id, { status: "done", result }),
-            (error) => cliRuns.set(thread.id, { status: "error", error: error instanceof Error ? error.message : String(error) }),
-          );
+          trackRun(thread.id, runLocalTurn(sessionKey, text, source, images));
           return send(201, threadView(thread));
         }
         void runLocalTurn(sessionKey, text, source, images).catch(() => {});
@@ -799,7 +859,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
     return { text: formatInboundBody(userText, media), images: media.images };
   }
 
-  async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli", images: ImageContent[] = []) {
+  async function runLocalTurn(sessionKey: string, message: string, source: "dashboard" | "cli", images: ImageContent[] = [], voice = false) {
     let text = message;
     let models: ModelEntry[] | undefined;
     // turn-done/turn-error reach the UI via the gateway's own events.
@@ -810,12 +870,13 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
           text,
           images: !models && images.length ? images : undefined,
           models,
+          appends: voice ? ["This is a hands-free voice conversation. Reply in the user's language, in brief, natural spoken sentences. Avoid markdown, links, code and long lists unless explicitly requested. Prefer one or two sentences and ask a short follow-up when needed. Your text is spoken automatically; do not generate or send audio yourself. Never require a button press: ask for spoken confirmation before consequential actions."] : undefined,
           // The CLI prints the answer and is gone: nobody is left to press a button.
-          customTools: source === "dashboard" ? [dashboardTool] : undefined,
+          customTools: source === "dashboard" && !voice ? [dashboardTool] : undefined,
           runtime: {
             channel: source,
-            conversation: source === "cli" ? "eleven CLI" : "eleven web dashboard",
-            capabilities: source === "dashboard" ? ["rich markdown", "buttons — via the dashboard tool"] : ["rich markdown"],
+            conversation: source === "cli" ? "eleven CLI" : voice ? "hands-free voice conversation" : "eleven web dashboard",
+            capabilities: voice ? ["spoken replies", "automatic turn-taking"] : source === "dashboard" ? ["rich markdown", "buttons — via the dashboard tool"] : ["rich markdown"],
           },
           workspaceHint: gateway.threads.current(sessionKey)?.workspace,
         });

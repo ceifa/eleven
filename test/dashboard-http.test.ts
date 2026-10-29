@@ -561,3 +561,27 @@ test("channel metadata can be discovered and looked up without a bot token in th
     assert.equal((await get(`${base}/api/channels/destination`)).status, 400);
   });
 });
+
+test("a voice turn is answered at once and polled, spoken-style and without buttons", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    const started = await post(`${base}/api/threads/${thread.id}/voice`, { text: "como está o trânsito?" });
+    assert.equal(started.status, 202, started.body);
+    const run = await cliRun(base, thread.id);
+    assert.equal(run.status, "done");
+    assert.equal(run.result.text, "Livre.");
+
+    const turn = spy.handled.at(-1)!;
+    assert.equal(turn.text, "como está o trânsito?");
+    assert.match(turn.appends?.join("\n") ?? "", /hands-free voice conversation/);
+    // Nobody can press a button while driving.
+    assert.equal(turn.customTools, undefined);
+  }, { handle: async () => ({ text: "Livre.", model: "m", status: "completed", sessionFile: "" }) });
+});
+
+test("voice is only for the dashboard's own threads", async () => {
+  await withDashboard(async (base, _thread, spy) => {
+    const response = await post(`${base}/api/threads/${spy.topic.id}/voice`, { text: "oi" });
+    assert.equal(response.status, 409);
+    assert.equal(spy.handled.length, 0);
+  });
+});

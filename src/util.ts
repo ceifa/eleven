@@ -117,6 +117,9 @@ export function contentText(content: unknown): string {
 export function summarizeToolArgs(args: unknown, cap = 120): string {
   if (!args || typeof args !== "object") return "";
   const a = args as Record<string, unknown>;
-  const value = a.path ?? a.file_path ?? a.command ?? a.pattern ?? Object.values(a)[0];
+  // Claude Code's shell tools have the model label each command for a human reader.
+  const label = typeof a.description === "string" ? a.description.trim() : "";
+  const command = label && typeof a.command === "string" ? `${label} · ${a.command}` : a.command;
+  const value = a.path ?? a.file_path ?? command ?? a.pattern ?? Object.values(a)[0];
   return typeof value === "string" ? value.slice(0, cap) : "";
 }

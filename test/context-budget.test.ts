@@ -139,3 +139,81 @@ test("compactAt outside what Claude Code accepts is rejected at load", () => {
   assert.throws(() => validate(config(250_000.5) as never), /compactAt/);
   assert.doesNotThrow(() => validate(config(250_000) as never));
 });
+
+/** A Claude Code double: each query answers with `reply(prompt)`, and every
+ * query's options and prompt text are kept. */
+function installClaudeDouble(reply: (prompt: string) => SDKMessage[]) {
+  const queries: { options: Options; prompt: string }[] = [];
+  modelRuntime.registerNativeProvider(createClaudeCodeProvider({
+    query: ((input: { options: Options; prompt: string | AsyncIterable<SDKUserMessage> }) => Object.assign((async function* () {
+      const prompt = typeof input.prompt === "string"
+        ? input.prompt
+        : JSON.stringify((await input.prompt[Symbol.asyncIterator]().next()).value?.message.content);
+      queries.push({ options: input.options, prompt });
+      yield* reply(prompt);
+    })(), { close() {}, interrupt: async () => {}, initializationResult: async () => ({ account: { email: "fixture@example.test" } }) }) as unknown as Query) as never,
+    deleteSession: (async () => {}) as never,
+  }));
+  return queries;
+}
+
+const result = (text: string, turns = 1) => ({
+  type: "result", subtype: "success", is_error: false, result: text, session_id: "native", num_turns: turns,
+  usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: {}, permission_denials: [], uuid: `result-${text}`,
+}) as SDKMessage;
+
+/** A turn whose last request held `context` tokens and wrote a 1h cache entry. */
+const answer = (context: number) => [{
+  type: "assistant", parent_tool_use_id: null, uuid: "a", session_id: "native",
+  message: {
+    role: "assistant", content: [{ type: "text", text: "Done." }],
+    usage: { input_tokens: 2, cache_read_input_tokens: context - 1_002, cache_creation_input_tokens: 1_000, output_tokens: 5, cache_creation: { ephemeral_1h_input_tokens: 1_000, ephemeral_5m_input_tokens: 0 } },
+  },
+} as SDKMessage, result("Done.")];
+
+const compacted = [
+  { type: "system", subtype: "compact_boundary", session_id: "native", uuid: "b", compact_metadata: { trigger: "manual", pre_tokens: 300_000 } } as SDKMessage,
+  result("", 0),
+];
+
+test("a large idle Claude conversation is compacted before its cache expires, and the next turn resumes the compaction", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(300_000));
+  const request = setup("idle-compaction");
+  const runner = new Runner();
+  const models = [{ model: "claude-code/default" }];
+  const first = await runner.submit("idle-compaction", { ...request, models, text: "Work on it" });
+  t.mock.timers.tick(57 * 60_000);
+  assert.equal(queries.length, 1, "nothing happens while the cache is fresh");
+  t.mock.timers.tick(60_000);
+  await t.waitFor(() => assert.equal(queries.length, 2));
+  const compaction = queries[1];
+  assert.equal(compaction.prompt, "/compact");
+  assert.equal(compaction.options.resume, queries[0].options.sessionId, "it compacts the committed conversation");
+  assert.equal(compaction.options.model, queries[0].options.model);
+  assert.deepEqual(compaction.options.systemPrompt, queries[0].options.systemPrompt, "it repeats the turn's prompt so the cache is read");
+  assert.deepEqual(compaction.options.tools, queries[0].options.tools);
+  await t.waitFor(() => assert.match(readFileSync(first!.sessionFile, "utf8"), /eleven:claude-compaction/));
+  await runner.submit("idle-compaction", { ...request, sessionFile: first!.sessionFile, models, text: "Back" });
+  assert.equal(queries[2].options.resume, compaction.options.sessionId);
+});
+
+test("a small Claude conversation, or one that gets a new message first, is not compacted", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const [name, context, interrupt] of [["small", 50_000, false], ["busy", 300_000, true]] as const) {
+    const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(context));
+    const request = setup(`no-idle-compaction-${name}`);
+    const runner = new Runner();
+    const models = [{ model: "claude-code/default" }];
+    const first = await runner.submit(name, { ...request, models, text: "Work on it" });
+    if (interrupt) {
+      t.mock.timers.tick(30 * 60_000);
+      await runner.submit(name, { ...request, sessionFile: first!.sessionFile, models, text: "One more thing" });
+      t.mock.timers.tick(30 * 60_000);
+    } else {
+      t.mock.timers.tick(2 * 60 * 60_000);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(queries.every((query) => query.prompt !== "/compact"), `${name} must not compact`);
+  }
+});

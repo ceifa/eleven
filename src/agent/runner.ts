@@ -20,6 +20,8 @@ import {
   abandonClaudeSession,
   CLAUDE_CODE_PROVIDER,
   commitClaudeSession,
+  compactClaudeSession,
+  claudeIdleCompactionAt,
   registerClaudeSession,
   runWithClaudeSession,
   setClaudeEarlyAnswerListener,
@@ -47,6 +49,9 @@ import { readToolPanels, type PanelUpdate } from "./panels.ts";
 import { runWithPanelSink } from "./host-api.ts";
 
 const log = logger("runner");
+
+/** Marks where Claude Code compacted its own copy of the conversation, which Pi's transcript does not show. */
+const CLAUDE_COMPACTION_ENTRY_TYPE = "eleven:claude-compaction";
 
 // Warm sessions: keep a thread's agent session alive between turns so a
 // message doesn't pay a full cold start (settings + resource discovery +
@@ -297,6 +302,8 @@ interface WarmSession {
   /** Narrow the live session to one candidate's tool allowlist and compaction window. */
   applyEntry: (entry: ModelEntry) => void;
   lastUsedAt: number;
+  /** Pending compaction before Claude's prompt cache expires; keeps the session warm until it runs. */
+  idleCompaction?: NodeJS.Timeout;
 }
 
 /** A candidate's effective policy: its allowlist ∩ the workspace's; undefined
@@ -550,6 +557,8 @@ export class Runner {
     // them: picking the model checks auth, prompting resolves it.
     const warm = await runOnAccount(models[0].entry.account, () => this.acquireSession(threadId, request, models[0]));
     const { session, sessionManager, activeModel } = warm;
+    clearTimeout(warm.idleCompaction);
+    warm.idleCompaction = undefined;
     // A restart of a failed turn drops that attempt's branch first, so this turn
     // opens on the transcript the failed one started from.
     if (request.rewind && sessionManager.getLeafId() === request.rewind.from) {
@@ -691,7 +700,10 @@ export class Runner {
         // An error-free turn with zero prose (e.g. a provider entitlement quirk
         // returning an empty message) still counts as a failure worth failing over.
         if (collected.length || attemptHadToolActivity) {
-          if (model.provider === CLAUDE_CODE_PROVIDER) await commitClaudeSession(session.sessionId);
+          if (model.provider === CLAUDE_CODE_PROVIDER) {
+            await commitClaudeSession(session.sessionId);
+            this.scheduleIdleCompaction(threadId, warm, entry.account);
+          }
           warm.lastUsedAt = Date.now();
           return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model), status: "completed" };
         }
@@ -914,9 +926,28 @@ export class Runner {
     return warm;
   }
 
+  /** Compact the thread's Claude conversation shortly before its prompt cache
+   * expires, unless another turn comes first (see claudeIdleCompactionAt).
+   * Timers live in memory: a restart skips the ones still waiting. */
+  private scheduleIdleCompaction(threadId: string, warm: WarmSession, account: string | undefined) {
+    const at = claudeIdleCompactionAt(warm.session.sessionId);
+    if (at === undefined) return;
+    warm.idleCompaction = setTimeout(() => {
+      warm.idleCompaction = undefined;
+      this.runWhenIdle(threadId, async () => {
+        if (this.warm.get(threadId) !== warm) return;
+        if (!(await runOnAccount(account, () => compactClaudeSession(warm.session.sessionId)))) return;
+        warm.sessionManager.appendCustomEntry(CLAUDE_COMPACTION_ENTRY_TYPE, { reason: "idle" });
+        log.info(`compacted the idle Claude conversation of ${threadId} before its cache expired`);
+      }).catch((error) => log.warn(`idle compaction of ${threadId} skipped: ${error}`));
+    }, Math.max(0, at - Date.now()));
+    warm.idleCompaction.unref();
+  }
+
   private dropSession(threadId: string) {
     const warm = this.warm.get(threadId);
     if (!warm) return;
+    clearTimeout(warm.idleCompaction);
     unregisterClaudeSession(warm.session.sessionId);
     warm.session.dispose();
     this.warm.delete(threadId);
@@ -925,7 +956,7 @@ export class Runner {
   private evictIdleSessions() {
     const cutoff = Date.now() - SESSION_IDLE_MS;
     for (const [threadId, warm] of this.warm) {
-      if (warm.lastUsedAt < cutoff && !this.active.has(threadId)) this.dropSession(threadId);
+      if (warm.lastUsedAt < cutoff && !warm.idleCompaction && !this.active.has(threadId)) this.dropSession(threadId);
     }
   }
 

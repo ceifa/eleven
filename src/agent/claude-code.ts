@@ -123,6 +123,41 @@ const EFFORT = {
   max: "max",
 } as const;
 
+/** Everything about a request that Claude's prompt cache is keyed on, beyond
+ * the conversation itself: a later request reads the cached prefix only if it
+ * repeats these exactly. */
+interface ClaudeRequestShape {
+  cwd: string;
+  model: string;
+  systemPrompt?: string;
+  nativeTools: string[];
+  customTools: AgentTool[];
+  reasoning?: SimpleStreamOptions["reasoning"];
+  compactAt?: number;
+}
+
+function requestOptions(shape: ClaudeRequestShape, mcpServer: ReturnType<typeof buildMcpServer>): Options {
+  return {
+    cwd: shape.cwd,
+    model: shape.model,
+    systemPrompt: { type: "preset", preset: "claude_code", append: shape.systemPrompt, snapshot: false },
+    tools: shape.nativeTools,
+    allowedTools: [...shape.nativeTools, ...shape.customTools.map((tool) => `${MCP_PREFIX}${tool.name}`)],
+    permissionMode: "dontAsk",
+    mcpServers: mcpServer ? { [MCP_SERVER]: mcpServer } : {},
+    strictMcpConfig: true,
+    settingSources: [],
+    settings: shape.compactAt ? { ...CLAUDE_SETTINGS, autoCompactWindow: shape.compactAt } : CLAUDE_SETTINGS,
+    skills: [],
+    plugins: [],
+    ...(shape.reasoning
+      ? { thinking: { type: "adaptive" as const }, effort: EFFORT[shape.reasoning] }
+      : { thinking: { type: "disabled" as const } }),
+    env: claudeChildEnv(),
+    stderr: (line) => log.warn(line.trim()),
+  };
+}
+
 export interface ClaudeSessionRegistration {
   cwd: string;
   /** Workspace policy as written in eleven.json. Undefined means the curated default. */
@@ -147,6 +182,9 @@ interface RegisteredSession extends ClaudeSessionRegistration {
   onEarlyAnswer?: (text: string) => void;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
+  /** The last committed-to-be turn's request and its cache, for an idle
+   * compaction to reuse (see compactClaudeSession). */
+  lastTurn?: ClaudeTurn;
   /** Human input this session's child already took off the wire
    * (steerClaudeSession). It belongs in the context of every later request —
    * the conversation happened — but sending it again would ask the child to
@@ -289,6 +327,94 @@ export function runWithClaudeSession<T>(sessionId: string, operation: () => Prom
   return activeOwner.run(sessionId, operation);
 }
 
+/** Below this, re-reading a conversation after its cache expired is cheap
+ * enough that compacting it would mostly lose context — Claude Code's own
+ * idle-compaction floor. */
+const IDLE_COMPACTION_MIN_TOKENS = 200_000;
+/** Long enough before the cache expires for the compaction request to land
+ * while it is still warm. */
+const IDLE_COMPACTION_LEAD_MS = 2 * 60_000;
+
+interface ClaudeTurn {
+  shape: ClaudeRequestShape;
+  requestedAt: number;
+  /** Prompt size of the turn's last request: the conversation Claude holds. */
+  contextTokens: number;
+  /** Lifetime of the cache that request wrote; unknown when it wrote none. */
+  cacheTtlMs?: number;
+}
+
+/** One request's footprint on the prompt cache. A request served entirely from
+ * cache writes no entry and so names no lifetime, yet still refreshes the one
+ * it read — which then keeps the lifetime it had. */
+function requestCache(usage: RequestUsage | undefined, requestedAt: number, previousTtlMs: number | undefined): Omit<ClaudeTurn, "shape"> {
+  const created = usage?.cache_creation;
+  const cacheTtlMs = created?.ephemeral_1h_input_tokens ? 60 * 60_000 : created?.ephemeral_5m_input_tokens ? 5 * 60_000 : previousTtlMs;
+  return {
+    requestedAt,
+    contextTokens: (usage?.input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0),
+    cacheTtlMs,
+  };
+}
+
+/**
+ * When a conversation that just finished a turn should be compacted if nobody
+ * writes in it, or undefined when it should not. Coming back after Claude's
+ * prompt cache expired re-reads the whole conversation at full price; compacted
+ * shortly before that, the summary is written from cache and the return is
+ * cheap. Small conversations and unknown lifetimes are left alone.
+ */
+export function claudeIdleCompactionAt(sessionId: string): number | undefined {
+  const turn = sessions.get(sessionId)?.lastTurn;
+  if (!turn?.cacheTtlMs || turn.contextTokens < IDLE_COMPACTION_MIN_TOKENS) return undefined;
+  return turn.requestedAt + turn.cacheTtlMs - IDLE_COMPACTION_LEAD_MS;
+}
+
+/**
+ * Run Claude Code's own /compact on the conversation's committed transcript and
+ * make the result what the next turn resumes. The request repeats the last
+ * turn's shape so it reads that turn's cache. False when there is nothing safe
+ * to compact: no committed transcript, an attempt still in flight, or a CLI
+ * that did not compact.
+ */
+export async function compactClaudeSession(sessionId: string): Promise<boolean> {
+  const deps = providerDeps;
+  const registration = sessions.get(sessionId);
+  const turn = registration?.lastTurn;
+  const state = deps.state.get(sessionId);
+  const base = state?.committed;
+  if (!registration || !turn || !base || state.active) return false;
+  const id = randomUUID();
+  const sdk = deps.query({
+    prompt: "/compact",
+    options: { ...requestOptions(turn.shape, buildMcpServer(turn.shape.customTools, sessionId, () => {})), persistSession: true, sessionId: id, resume: base, forkSession: true },
+  });
+  let compacted = false;
+  try {
+    for await (const message of sdk) {
+      if (message.type === "system" && message.subtype === "compact_boundary") compacted = true;
+      if (message.type !== "result") continue;
+      const error = sdkResultError(message);
+      if (error) throw new Error(error);
+      break;
+    }
+  } catch (error) {
+    log.warn(`idle compaction failed: ${error instanceof Error ? error.message : error}`);
+    compacted = false;
+  } finally {
+    try { sdk.close(); } catch { /* already closed */ }
+  }
+  // Another turn may have committed while the CLI worked; its transcript wins.
+  if (!compacted || deps.state.get(sessionId)?.committed !== base) {
+    await deps.deleteSession(id, { dir: registration.cwd }).catch(() => {});
+    return false;
+  }
+  registration.lastTurn = undefined;
+  const stale = deps.state.commit(sessionId, id);
+  await deleteTracked(deps.state, deps.deleteSession, sessionId, registration.cwd, stale);
+  return true;
+}
+
 export function setClaudeToolListener(
   sessionId: string,
   listener: ((name: string, args: Record<string, unknown>, nested: boolean) => void) | undefined,
@@ -404,6 +530,8 @@ interface ClaudeProviderDeps {
 }
 
 const defaultDeps: ClaudeProviderDeps = { query: sdkQuery, deleteSession, state: claudeSessionState };
+/** The registered provider's, so a compaction outside any turn talks to the same Claude. */
+let providerDeps = defaultDeps;
 
 async function deleteTracked(
   state: ClaudeStateBackend,
@@ -419,6 +547,7 @@ async function deleteTracked(
 
 export function createClaudeCodeProvider(overrides: Partial<ClaudeProviderDeps> = {}): Provider {
   const deps = { ...defaultDeps, ...overrides };
+  providerDeps = deps;
   return {
     id: CLAUDE_CODE_PROVIDER,
     name: "Claude Code",
@@ -623,6 +752,14 @@ async function consumeClaudeQuery(
       : nativeToolsForPolicy(registration.workspaceTools, registration.excludeNativeTools);
     const mcpServer = buildMcpServer(customTools, ownerSessionId, markTool);
     const qualifiedTools = customTools.map((tool) => `${MCP_PREFIX}${tool.name}`);
+    const shape: ClaudeRequestShape = {
+      cwd: registration.cwd, model: model.id, systemPrompt, nativeTools, customTools,
+      reasoning: options?.reasoning, compactAt: isolated ? undefined : registration.compactAt,
+    };
+    // When the request now being written was sent, as near as the stream shows:
+    // the prompt cache lives from then.
+    let requestedAt = Date.now();
+    let lastRequest: Omit<ClaudeTurn, "shape"> | undefined;
 
     if (!isolated) {
       deps.state.begin(ownerSessionId, registration.cwd, {
@@ -679,24 +816,10 @@ async function consumeClaudeQuery(
     await options?.onPayload?.(logicalPayload, model);
 
     const sdkOptions: Options = {
-      cwd: registration.cwd,
-      model: model.id,
-      systemPrompt: { type: "preset", preset: "claude_code", append: systemPrompt, snapshot: false },
-      tools: nativeTools,
-      allowedTools: [...nativeTools, ...qualifiedTools],
-      permissionMode: "dontAsk",
-      mcpServers: mcpServer ? { [MCP_SERVER]: mcpServer } : {},
-      strictMcpConfig: true,
-      settingSources: [],
-      settings: registration.compactAt && !isolated ? { ...CLAUDE_SETTINGS, autoCompactWindow: registration.compactAt } : CLAUDE_SETTINGS,
-      skills: [],
-      plugins: [],
+      ...requestOptions(shape, mcpServer),
       persistSession: !isolated,
       sessionId: attemptId,
       ...(baseId ? { resume: baseId, forkSession: true } : {}),
-      ...(options?.reasoning
-        ? { thinking: { type: "adaptive" as const }, effort: EFFORT[options.reasoning] }
-        : { thinking: { type: "disabled" as const } }),
       hooks: {
         PreToolUse: [{
           hooks: [async (input, toolUseId) => {
@@ -712,8 +835,6 @@ async function consumeClaudeQuery(
       },
       abortController,
       includePartialMessages: false,
-      env: claudeChildEnv(),
-      stderr: (line) => log.warn(line.trim()),
     };
 
     let skippedResult: SDKMessage | undefined;
@@ -726,6 +847,7 @@ async function consumeClaudeQuery(
       if (grace) { clearTimeout(grace); grace = undefined; }
       if (message.type === "assistant") {
         if (message.parent_tool_use_id === null) {
+          lastRequest = requestCache(message.message.usage, requestedAt, lastRequest?.cacheTtlMs);
           const calls = message.message.content.filter((block) => block.type === "tool_use" && !historyCalls.has(block.id));
           if (calls.length && !isolated && registration.onHistory) {
             const history = emptyAssistant(model);
@@ -762,6 +884,7 @@ async function consumeClaudeQuery(
           markTool(block.name, asArgs(block.input), block.id);
         }
       } else if (message.type === "user" && message.parent_tool_use_id === null && !isolated) {
+        requestedAt = Date.now();
         const content = message.message.content;
         if (!Array.isArray(content)) continue;
         for (const block of content) {
@@ -865,6 +988,7 @@ async function consumeClaudeQuery(
     const text = answers.join("\n\n") || undefined;
     if (text) emit(text);
     withoutCharged(output.usage, charged);
+    if (!isolated) registration.lastTurn = lastRequest && { shape, ...lastRequest };
     // The owning Runner commits this active attempt only after Pi has accepted
     // the assistant message into its own transcript (see commitClaudeSession).
     output.stopReason = "stop";

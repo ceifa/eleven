@@ -129,6 +129,8 @@ export interface ClaudeSessionRegistration {
   workspaceTools?: WorkspaceTool[];
   /** Native tools this workspace withholds, by name — it supplies its own. */
   excludeNativeTools?: readonly string[];
+  /** Claude Code's own auto-compact window; undefined keeps its tuned default. */
+  compactAt?: number;
   /** Executable, request-bound tools (Telegram today), never Pi's builtin tools. */
   customTools: AgentTool[];
   /** Record native history without putting executable tool calls on Pi's stream. */
@@ -242,11 +244,13 @@ export function unregisterClaudeSession(sessionId: string): void {
   sessions.delete(sessionId);
 }
 
-/** Narrow (or restore) the tool policy of a live registration — the runner
- * applies each model candidate's own allowlist before prompting it. */
-export function setClaudeWorkspaceTools(sessionId: string, tools: WorkspaceTool[] | undefined): void {
+/** Apply a model candidate's own tool allowlist and compaction window to a live
+ * registration — the runner does this before prompting each candidate. */
+export function setClaudeEntry(sessionId: string, tools: WorkspaceTool[] | undefined, compactAt: number | undefined): void {
   const session = sessions.get(sessionId);
-  if (session) session.workspaceTools = tools;
+  if (!session) return;
+  session.workspaceTools = tools;
+  session.compactAt = compactAt;
 }
 
 /** Delete every hidden Claude transcript owned by one Pi session. */
@@ -684,7 +688,7 @@ async function consumeClaudeQuery(
       mcpServers: mcpServer ? { [MCP_SERVER]: mcpServer } : {},
       strictMcpConfig: true,
       settingSources: [],
-      settings: CLAUDE_SETTINGS,
+      settings: registration.compactAt && !isolated ? { ...CLAUDE_SETTINGS, autoCompactWindow: registration.compactAt } : CLAUDE_SETTINGS,
       skills: [],
       plugins: [],
       persistSession: !isolated,

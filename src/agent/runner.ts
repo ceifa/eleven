@@ -5,7 +5,10 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  estimateTokens,
+  type CompactionResult,
   type ExtensionAPI,
+  type SessionBeforeCompactEvent,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, ImageContent, JsonObject, JsonValue, Model, UserMessage } from "@earendil-works/pi-ai";
@@ -23,7 +26,7 @@ import {
   setClaudeProseListener,
   setClaudePanelListener,
   setClaudeToolListener,
-  setClaudeWorkspaceTools,
+  setClaudeEntry,
   steerClaudeSession,
   unregisterClaudeSession,
 } from "./claude-code.ts";
@@ -289,8 +292,10 @@ interface WarmSession {
   customTools?: ToolDefinition[];
   /** Read by the request-log extension at call time, so it survives failover. */
   activeModel: { current: string };
-  /** Narrow the live session to one candidate's tool allowlist. */
-  applyToolPolicy: (entryTools?: WorkspaceTool[]) => void;
+  /** Set while a model switch compacts the session (see handOff). */
+  handoff: { current?: Handoff };
+  /** Narrow the live session to one candidate's tool allowlist and compaction window. */
+  applyEntry: (entry: ModelEntry) => void;
   lastUsedAt: number;
 }
 
@@ -300,6 +305,16 @@ function intersectTools(workspace?: WorkspaceTool[], entry?: WorkspaceTool[]): W
   if (!workspace) return entry;
   if (!entry) return workspace;
   return workspace.filter((tool) => entry.includes(tool));
+}
+
+type CompactionSettings = ReturnType<SettingsManager["getCompactionSettings"]>;
+
+/** Pi compacts once the context passes `window - reserveTokens`; widening the
+ * reserve is how a candidate's `compactAt` moves that point. Claude Code keeps
+ * its own context and compacts it natively, so Pi's copy is left alone there. */
+export function withCompactAt(settings: CompactionSettings, model: Model<Api> | undefined, compactAt: number | undefined): CompactionSettings {
+  if (!compactAt || !model || model.provider === CLAUDE_CODE_PROVIDER || compactAt >= model.contextWindow) return settings;
+  return { ...settings, reserveTokens: Math.max(settings.reserveTokens, model.contextWindow - compactAt) };
 }
 
 /** Reuse demands the same tool objects — a rebuilt tool may capture stale state. */
@@ -643,9 +658,10 @@ export class Runner {
           await runOnAccount(entry.account, () => session.setModel(model));
           // Each candidate runs with its own reasoning level and tool allowlist.
           session.setThinkingLevel(entry.reasoning ?? DEFAULT_REASONING);
-          warm.applyToolPolicy(entry.tools);
+          warm.applyEntry(entry);
           activeModel.current = modelRef(model);
         }
+        await handOff(warm, model);
         lastStopReason = undefined;
         lastErrorMessage = undefined;
         try {
@@ -744,7 +760,7 @@ export class Runner {
   ): Promise<WarmSession> {
     const systemPrompt = buildSystemPrompt(request.runtime, request.prompt);
     // Model candidates (and their reasoning/tool settings) are deliberately
-    // absent: setModel/setThinkingLevel/applyToolPolicy below reconcile the
+    // absent: setModel/setThinkingLevel/applyEntry below reconcile the
     // live session, so editing the sequence never discards a warm session.
     const signature = JSON.stringify([
       request.sessionDir,
@@ -767,7 +783,7 @@ export class Runner {
       const { session } = cached;
       if (!session.model || modelRef(session.model) !== modelRef(initial.model)) await session.setModel(initial.model);
       session.setThinkingLevel(initial.entry.reasoning ?? DEFAULT_REASONING);
-      cached.applyToolPolicy(initial.entry.tools);
+      cached.applyEntry(initial.entry);
       cached.activeModel.current = modelRef(initial.model);
       return cached;
     }
@@ -778,8 +794,15 @@ export class Runner {
     // Mutable ref so the request-log extension tags payloads with the model
     // actually in use, even after a mid-turn failover.
     const activeModel = { current: modelRef(initial.model) };
+    const handoff: WarmSession["handoff"] = {};
 
     const settingsManager = SettingsManager.create(request.workspacePath, agentDir);
+    // Pi compacts near the window unless told otherwise; the candidate driving
+    // the turn may want it much sooner (see ModelEntry.compactAt).
+    const compactAt: { current?: number } = {};
+    const compactionSettings = settingsManager.getCompactionSettings.bind(settingsManager);
+    settingsManager.getCompactionSettings = (model) =>
+      withCompactAt(compactionSettings(model), model && findModel(`${model.provider}/${model.id}`), compactAt.current);
     const loader = new DefaultResourceLoader({
       cwd: request.workspacePath,
       agentDir,
@@ -796,6 +819,8 @@ export class Runner {
         name: "eleven-runtime",
         factory: (pi: ExtensionAPI) => {
           pi.on("context", (event) => ({ messages: boundRuntimeResults(withToolResults(event.messages)) }));
+          pi.on("session_before_compact", (event) =>
+            handoff.current ? { compaction: handoffCompaction(event.preparation, handoff.current, sessionManager.getSessionFile()) } : undefined);
           if (this.hooks.onProviderRequest) {
             pi.on("before_provider_request", (event) => {
               this.hooks.onProviderRequest?.(threadId, activeModel.current, event.payload);
@@ -866,12 +891,13 @@ export class Runner {
     // Close over just this field: the closure lives as long as the warm
     // session, and capturing `request` would pin the turn's text and images.
     const workspaceTools = request.tools;
-    const applyToolPolicy = (entryTools?: WorkspaceTool[]) => {
-      const policy = intersectTools(workspaceTools, entryTools);
+    const applyEntry = (entry: ModelEntry) => {
+      const policy = intersectTools(workspaceTools, entry.tools);
       session.setActiveToolsByName(activeToolNames(piActive, customNames, policy));
-      setClaudeWorkspaceTools(session.sessionId, policy);
+      compactAt.current = entry.compactAt;
+      setClaudeEntry(session.sessionId, policy, entry.compactAt);
     };
-    applyToolPolicy(initial.entry.tools);
+    applyEntry(initial.entry);
 
     const warm: WarmSession = {
       session,
@@ -879,7 +905,8 @@ export class Runner {
       signature,
       customTools: request.customTools,
       activeModel,
-      applyToolPolicy,
+      handoff,
+      applyEntry,
       lastUsedAt: Date.now(),
     };
     this.warm.set(threadId, warm);
@@ -1024,6 +1051,77 @@ function shortenStrings(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map(shortenStrings);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shortenStrings(item)]));
   return value;
+}
+
+/** Below this a model switch carries the conversation whole: re-reading it
+ * uncached costs less than what cutting it would lose. */
+const HANDOFF_MIN_TOKENS = 100_000;
+const HANDOFF_REQUEST_CHARS = 4_000;
+
+interface Handoff {
+  from: string;
+  to: string;
+}
+
+/**
+ * A model that takes over a long conversation has none of it cached, so every
+ * request it makes re-reads all of it at full price — and a fallback tends to
+ * take over exactly when a long task drained the model before it. Hand it the
+ * recent part instead: a compaction that keeps Pi's recent window and replaces
+ * the rest with a pointer to the transcript, written here rather than by a model
+ * that would have to read everything to summarize it.
+ */
+export async function handOff(warm: Pick<WarmSession, "session" | "handoff">, model: Model<Api>): Promise<void> {
+  const { session } = warm;
+  const from = lastModelThatRan(session.agent.state.messages);
+  const to = modelRef(model);
+  if (!from || from === to) return;
+  const tokens = session.getContextUsage()?.tokens ?? session.agent.state.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+  if (tokens < HANDOFF_MIN_TOKENS) return;
+  warm.handoff.current = { from, to };
+  try {
+    await session.compact();
+    log.info(`handed ${to} the recent part of a ${tokens}-token conversation from ${from}`);
+  } catch (error) {
+    log.warn(`handoff from ${from} to ${to} kept the whole conversation: ${error}`);
+  } finally {
+    warm.handoff.current = undefined;
+  }
+}
+
+/** The model behind the latest response that cost anything — operator-written
+ * messages are recorded as assistant turns too, with no usage. */
+function lastModelThatRan(messages: AgentMessage[]): string | undefined {
+  const last = messages.findLast((message) => message.role === "assistant" && message.usage.totalTokens > 0);
+  return last?.role === "assistant" ? `${last.provider}/${last.model}` : undefined;
+}
+
+/** The compaction a handoff writes: Pi's cut point, and in place of a summary,
+ * where the rest is and the requests the cut would otherwise hide. */
+export function handoffCompaction(
+  preparation: SessionBeforeCompactEvent["preparation"],
+  { from, to }: Handoff,
+  sessionFile: string | undefined,
+): CompactionResult {
+  const firstRequest = preparation.messagesToSummarize.find((message) => message.role === "user");
+  const currentRequest = preparation.isSplitTurn ? preparation.turnPrefixMessages.find((message) => message.role === "user") : undefined;
+  const quote = (message: AgentMessage) => {
+    const text = message.role === "user" ? contentText(message.content) : "";
+    return text.length > HANDOFF_REQUEST_CHARS ? `${text.slice(0, HANDOFF_REQUEST_CHARS)}… [${text.length.toLocaleString("en-US")} characters]` : text;
+  };
+  const sections = [
+    `This conversation moved from ${from} to ${to}, which has none of it cached, so only its most recent part follows.`
+      + (sessionFile ? ` The full transcript is ${sessionFile} (a Pi session, one JSON entry per line): read what you need from it instead of guessing.` : ""),
+    preparation.previousSummary && `Summary from an earlier compaction:\n${preparation.previousSummary}`,
+    firstRequest && `The earliest request in the omitted part, verbatim:\n${quote(firstRequest)}`,
+    currentRequest && `The request being worked on when the cut was made, verbatim:\n${quote(currentRequest)}`,
+  ];
+  return {
+    summary: sections.filter(Boolean).join("\n\n"),
+    firstKeptEntryId: preparation.firstKeptEntryId,
+    tokensBefore: preparation.tokensBefore,
+    details: { handoff: { from, to } },
+  };
 }
 
 /** Identifies one message across a transcript round-trip: the arrival instant

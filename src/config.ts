@@ -152,7 +152,13 @@ export interface ModelEntry {
    * (`eleven login <provider> <account>`). Listing a model twice under two
    * accounts is how a spent subscription fails over to another one. */
   account?: string;
+  /** Compact the conversation once its context passes this many tokens,
+   * instead of near the model's own window. */
+  compactAt?: number;
 }
+
+/** Claude Code accepts a compaction window only inside this range. */
+export const COMPACT_AT_RANGE = [100_000, 1_000_000] as const;
 
 /** An account names a directory under eleven's state dir. */
 export const ACCOUNT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;
@@ -356,6 +362,10 @@ function validateSequence(entries: ModelEntry[] | undefined, where: string) {
     validateTools(entry.tools, label);
     if (entry.account !== undefined && (typeof entry.account !== "string" || !ACCOUNT_NAME.test(entry.account))) {
       throw new Error(`${label}: invalid account name "${entry.account}"`);
+    }
+    const [min, max] = COMPACT_AT_RANGE;
+    if (entry.compactAt !== undefined && !(Number.isInteger(entry.compactAt) && entry.compactAt >= min && entry.compactAt <= max)) {
+      throw new Error(`${label}: compactAt must be a whole number of tokens from ${min} to ${max}`);
     }
   });
 }

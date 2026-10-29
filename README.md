@@ -88,6 +88,15 @@ the allowlists — empty means deny, and pairing fills them in from the
 dashboard. Values written as `"$VAR"` are read from the environment at load
 time.
 
+A model with a 1M-token window compacts only when the conversation nears it,
+and until then every request re-sends all of it. `compactAt` on an entry moves
+that point (`{ "model": "kiro/claude-opus-5-5", "compactAt": 250000 }`, from
+100,000 to 1,000,000; on Claude Code it becomes Claude's own auto-compact
+window). When a long conversation (over 100,000 tokens) switches models — a
+fallback taking over, or a sequence edited — the incoming model has none of it
+cached, so it gets the recent part plus the path of the full transcript instead
+of re-reading everything.
+
 ### Discord
 
 Create an application in the [Developer Portal](https://discord.com/developers/applications),

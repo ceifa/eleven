@@ -112,27 +112,6 @@ test("a model taking over a short conversation gets all of it", async () => {
   assert.equal(compactions(first!.sessionFile).length, 0);
 });
 
-test("compactAt reaches Claude Code as its own auto-compact window", async () => {
-  const seen: Options[] = [];
-  modelRuntime.registerNativeProvider(createClaudeCodeProvider({
-    query: ((input: { options: Options; prompt: AsyncIterable<SDKUserMessage> }) => Object.assign((async function* () {
-      await input.prompt[Symbol.asyncIterator]().next();
-      seen.push(input.options);
-      yield {
-        type: "result", subtype: "success", is_error: false, result: "Done.", session_id: "native", num_turns: 1,
-        usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: {}, permission_denials: [], uuid: "result",
-      } as SDKMessage;
-    })(), { close() {}, interrupt: async () => {}, initializationResult: async () => ({ account: { email: "fixture@example.test" } }) }) as unknown as Query) as never,
-    deleteSession: (async () => {}) as never,
-  }));
-  const request = setup("claude-compact-at");
-  const runner = new Runner();
-  const first = await runner.submit("claude-compact-at", { ...request, models: [{ model: "claude-code/default", compactAt: 200_000 }], text: "Hi" });
-  await runner.submit("claude-compact-at", { ...request, sessionFile: first!.sessionFile, models: [{ model: "claude-code/default" }], text: "Again" });
-  assert.equal(seen[0].settings && typeof seen[0].settings === "object" ? seen[0].settings.autoCompactWindow : undefined, 200_000);
-  assert.equal(seen[1].settings && typeof seen[1].settings === "object" ? seen[1].settings.autoCompactWindow : "unset", undefined);
-});
-
 test("compactAt outside what Claude Code accepts is rejected at load", () => {
   const config = (compactAt: number) => ({ dashboard: { port: 1, host: "x" }, models: [{ model: "budget/a", compactAt }], workspaces: {} });
   assert.throws(() => validate(config(50_000) as never), /compactAt/);
@@ -140,8 +119,6 @@ test("compactAt outside what Claude Code accepts is rejected at load", () => {
   assert.doesNotThrow(() => validate(config(250_000) as never));
 });
 
-/** A Claude Code double: each query answers with `reply(prompt)`, and every
- * query's options and prompt text are kept. */
 function installClaudeDouble(reply: (prompt: string) => SDKMessage[]) {
   const queries: { options: Options; prompt: string }[] = [];
   modelRuntime.registerNativeProvider(createClaudeCodeProvider({
@@ -162,7 +139,6 @@ const result = (text: string, turns = 1) => ({
   usage: { input_tokens: 3, output_tokens: 2 }, modelUsage: {}, permission_denials: [], uuid: `result-${text}`,
 }) as SDKMessage;
 
-/** A turn whose last request held `context` tokens and wrote a 1h cache entry. */
 const answer = (context: number) => [{
   type: "assistant", parent_tool_use_id: null, uuid: "a", session_id: "native",
   message: {
@@ -175,6 +151,16 @@ const compacted = [
   { type: "system", subtype: "compact_boundary", session_id: "native", uuid: "b", compact_metadata: { trigger: "manual", pre_tokens: 300_000 } } as SDKMessage,
   result("", 0),
 ];
+
+test("compactAt reaches Claude Code as its own auto-compact window", async () => {
+  const queries = installClaudeDouble(() => [result("Done.")]);
+  const request = setup("claude-compact-at");
+  const runner = new Runner();
+  const first = await runner.submit("claude-compact-at", { ...request, models: [{ model: "claude-code/default", compactAt: 200_000 }], text: "Hi" });
+  await runner.submit("claude-compact-at", { ...request, sessionFile: first!.sessionFile, models: [{ model: "claude-code/default" }], text: "Again" });
+  const windows = queries.map(({ options }) => typeof options.settings === "object" ? options.settings.autoCompactWindow : "unset");
+  assert.deepEqual(windows, [200_000, undefined]);
+});
 
 test("a large idle Claude conversation is compacted before its cache expires, and the next turn resumes the compaction", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });

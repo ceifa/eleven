@@ -322,7 +322,7 @@ type CompactionSettings = ReturnType<SettingsManager["getCompactionSettings"]>;
 /** Pi compacts once the context passes `window - reserveTokens`; widening the
  * reserve is how a candidate's `compactAt` moves that point. Claude Code keeps
  * its own context and compacts it natively, so Pi's copy is left alone there. */
-export function withCompactAt(settings: CompactionSettings, model: Model<Api> | undefined, compactAt: number | undefined): CompactionSettings {
+function withCompactAt(settings: CompactionSettings, model: Model<Api> | undefined, compactAt: number | undefined): CompactionSettings {
   if (!compactAt || !model || model.provider === CLAUDE_CODE_PROVIDER || compactAt >= model.contextWindow) return settings;
   return { ...settings, reserveTokens: Math.max(settings.reserveTokens, model.contextWindow - compactAt) };
 }
@@ -1105,7 +1105,7 @@ interface Handoff {
  * the rest with a pointer to the transcript, written here rather than by a model
  * that would have to read everything to summarize it.
  */
-export async function handOff(warm: Pick<WarmSession, "session" | "handoff">, model: Model<Api>): Promise<void> {
+async function handOff(warm: WarmSession, model: Model<Api>): Promise<void> {
   const { session } = warm;
   const from = lastModelThatRan(session.agent.state.messages);
   const to = modelRef(model);
@@ -1132,7 +1132,7 @@ function lastModelThatRan(messages: AgentMessage[]): string | undefined {
 
 /** The compaction a handoff writes: Pi's cut point, and in place of a summary,
  * where the rest is and the requests the cut would otherwise hide. */
-export function handoffCompaction(
+function handoffCompaction(
   preparation: SessionBeforeCompactEvent["preparation"],
   { from, to }: Handoff,
   sessionFile: string | undefined,

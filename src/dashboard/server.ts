@@ -8,7 +8,7 @@ import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { WebSocketServer, WebSocket } from "ws";
 import { z } from "zod";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, entryKey, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig, type ModelEntry } from "../config.ts";
+import { BUILTIN_TOOLS, CHANNEL_TYPES, DEFAULT_REASONING, entryKey, isChannelSessionKey, isUnresolved, REASONING_LEVELS, runtimeTools, type ConfigStore, type ElevenConfig, type ModelEntry } from "../config.ts";
 import { collectProviderUsage, usageLogins } from "../provider-usage.ts";
 import { conversationModelScopes } from "../channels/session-key.ts";
 import { BUILTIN_SYSTEM_PROMPT } from "../agent/system-prompt.ts";
@@ -300,7 +300,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
    * literal text (/send, which does reach the chat) all stay open.
    */
   function composable(sessionKey: string): boolean {
-    return !(CHANNEL_TYPES as readonly string[]).includes(sessionKey.split(":", 1)[0]);
+    return !isChannelSessionKey(sessionKey);
   }
 
   async function listThreadViews(url: URL) {

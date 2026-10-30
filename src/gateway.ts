@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { CHANNEL_TYPES, type ConfigStore, type ModelEntry, type ModelScope, type WorkspaceConfig } from "./config.ts";
+import { isChannelSessionKey, type ConfigStore, type ModelEntry, type ModelScope, type WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult, type TurnRewind } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
@@ -252,7 +252,7 @@ export class Gateway extends EventEmitter {
           rewind: incoming.rewind,
           // Someone comes back to a Telegram or Discord conversation hours later;
           // a dashboard, CLI or cron thread is done when its caller is.
-          compactWhenIdle: () => this.isOpenChannelConversation(thread.id),
+          compactWhenIdle: this.openChannelConversation(thread.id),
           deliver: incoming.deliver,
         },
         events,
@@ -425,10 +425,13 @@ export class Gateway extends EventEmitter {
 
   /** A Telegram or Discord conversation still attached to its chat: neither
    * replaced by /new nor archived. */
-  private isOpenChannelConversation(id: string): boolean {
-    const thread = this.threads.get(id);
-    return !!thread && this.threads.isCurrent(id) && !thread.archiveRequested
-      && (CHANNEL_TYPES as readonly string[]).includes(thread.sessionKey.split(":", 1)[0]);
+  private openChannelConversation(id: string): () => boolean {
+    // Built here, not inline in handle(): a closure there would share its scope
+    // and pin the turn's text and images until the idle timer fires.
+    return () => {
+      const thread = this.threads.get(id);
+      return !!thread && this.threads.isCurrent(id) && !thread.archiveRequested && isChannelSessionKey(thread.sessionKey);
+    };
   }
 
   private idleMs(): number {

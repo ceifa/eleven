@@ -59,6 +59,11 @@ export function runtimeTools(provider: string): readonly WorkspaceTool[] {
 export const CHANNEL_TYPES = ["telegram", "discord"] as const;
 export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
+/** Whether a conversation lives on a chat platform, rather than the dashboard or the CLI. */
+export function isChannelSessionKey(sessionKey: string): boolean {
+  return (CHANNEL_TYPES as readonly string[]).includes(sessionKey.split(":", 1)[0]);
+}
+
 /** A "$VAR" value whose variable wasn't found in the environment. */
 export function isUnresolved(value: string | undefined): boolean {
   return !value || value.startsWith("$");
@@ -158,7 +163,7 @@ export interface ModelEntry {
 }
 
 /** Claude Code accepts a compaction window only inside this range. */
-export const COMPACT_AT_RANGE = [100_000, 1_000_000] as const;
+const COMPACT_AT_RANGE = [100_000, 1_000_000] as const;
 
 /** An account names a directory under eleven's state dir. */
 export const ACCOUNT_NAME = /^[a-z0-9][a-z0-9_-]*$/i;

@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ConfigStore, ModelEntry, ModelScope, WorkspaceConfig } from "./config.ts";
+import { isChannelSessionKey, type ConfigStore, type ModelEntry, type ModelScope, type WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult, type TurnRewind } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
@@ -250,6 +250,9 @@ export class Gateway extends EventEmitter {
           text: incoming.text,
           images: incoming.images,
           rewind: incoming.rewind,
+          // Someone comes back to a Telegram or Discord conversation hours later;
+          // a dashboard, CLI or cron thread is done when its caller is.
+          compactWhenIdle: this.openChannelConversation(thread.id),
           deliver: incoming.deliver,
         },
         events,
@@ -418,6 +421,17 @@ export class Gateway extends EventEmitter {
         ? formatProviderUsage(report.usage)
         : `**${report.provider}${report.account ? ` (${report.account})` : ""}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
       .join("\n\n");
+  }
+
+  /** A Telegram or Discord conversation still attached to its chat: neither
+   * replaced by /new nor archived. */
+  private openChannelConversation(id: string): () => boolean {
+    // Built here, not inline in handle(): a closure there would share its scope
+    // and pin the turn's text and images until the idle timer fires.
+    return () => {
+      const thread = this.threads.get(id);
+      return !!thread && this.threads.isCurrent(id) && !thread.archiveRequested && isChannelSessionKey(thread.sessionKey);
+    };
   }
 
   private idleMs(): number {

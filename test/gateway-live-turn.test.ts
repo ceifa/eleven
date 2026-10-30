@@ -142,3 +142,34 @@ test("a turn that ends takes its panels with it", async () => {
   const thread = gateway.threads.current("telegram:main:-1001:topic:7");
   assert.equal(gateway.liveTurn(thread!.id), undefined);
 });
+
+test("only an open Telegram or Discord conversation may be compacted while idle", async () => {
+  const gateway = new Gateway(config as never);
+  let allowed: (() => boolean) | undefined;
+  const runner = gateway.runner as unknown as { submit: (id: string, request: { compactWhenIdle?: () => boolean }) => Promise<unknown> };
+  runner.submit = async (_id, request) => {
+    allowed = request.compactWhenIdle;
+    return undefined;
+  };
+  const ask = async (sessionKey: string) => {
+    allowed = undefined;
+    await gateway.handle({ sessionKey, text: "hi", runtime: { channel: sessionKey.split(":", 1)[0] } });
+    return allowed?.() ?? false;
+  };
+
+  assert.equal(await ask("telegram:main:-1001:topic:9"), true);
+  assert.equal(await ask("discord:discord:1:2"), true);
+  assert.equal(await ask("dashboard:agent:5b1f7a52-6a43-4f0e-9d0e-1d2f4a7c9e10"), false);
+  assert.equal(await ask("cli:agent:5b1f7a52-6a43-4f0e-9d0e-1d2f4a7c9e11"), false);
+
+  // Asked again when the timer fires: a conversation replaced or archived since is left alone.
+  await ask("telegram:main:-1001:topic:10");
+  const replaced = allowed!;
+  gateway.newThread("telegram:main:-1001:topic:10");
+  assert.equal(replaced(), false);
+  await ask("discord:discord:1:3");
+  const archived = allowed!;
+  const thread = gateway.threads.current("discord:discord:1:3")!;
+  gateway.threads.update(thread.id, { archiveRequested: true });
+  assert.equal(archived(), false);
+});

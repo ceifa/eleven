@@ -179,7 +179,7 @@ const compacted = [
 test("a large idle Claude conversation is compacted before its cache expires, and the next turn resumes the compaction", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(300_000));
-  const request = setup("idle-compaction");
+  const request = { ...setup("idle-compaction"), compactWhenIdle: () => true };
   const runner = new Runner();
   const models = [{ model: "claude-code/default" }];
   const first = await runner.submit("idle-compaction", { ...request, models, text: "Work on it" });
@@ -198,14 +198,24 @@ test("a large idle Claude conversation is compacted before its cache expires, an
   assert.equal(queries[2].options.resume, compaction.options.sessionId);
 });
 
-test("a small Claude conversation, or one that gets a new message first, is not compacted", async (t) => {
+test("a Claude conversation that is small, gets a new message first, or may not compact while idle is left alone", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  for (const [name, context, interrupt] of [["small", 50_000, false], ["busy", 300_000, true]] as const) {
+  let open = true;
+  const cases = [
+    ["small", 50_000, false, () => true],
+    ["dashboard", 300_000, false, undefined],
+    ["archived since", 300_000, false, () => open],
+    // Last: its second turn leaves a timer of its own pending.
+    ["busy", 300_000, true, () => true],
+  ] as const;
+  for (const [name, context, interrupt, compactWhenIdle] of cases) {
     const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(context));
-    const request = setup(`no-idle-compaction-${name}`);
+    const request = { ...setup(`no-idle-compaction-${name.replace(" ", "-")}`), compactWhenIdle };
     const runner = new Runner();
     const models = [{ model: "claude-code/default" }];
+    open = true;
     const first = await runner.submit(name, { ...request, models, text: "Work on it" });
+    open = false;
     if (interrupt) {
       t.mock.timers.tick(30 * 60_000);
       await runner.submit(name, { ...request, sessionFile: first!.sessionFile, models, text: "One more thing" });

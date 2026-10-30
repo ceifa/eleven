@@ -97,6 +97,9 @@ export interface TurnRequest extends SessionTarget {
   /** Discard a failed attempt before this turn starts — a manual restart runs
    * the request as if it had never been tried. */
   rewind?: TurnRewind;
+  /** Whether the conversation may be compacted while it sits idle (see
+   * scheduleIdleCompaction) — asked again when the time comes. Absent means never. */
+  compactWhenIdle?: () => boolean;
   /** Channel delivery of the finished turn. Runs inside the thread's turn lane
    * (before onTurnEnd fires and before the next queued turn can start), so a
    * durable in-flight ledger keyed on the hooks covers the send itself. */
@@ -702,7 +705,7 @@ export class Runner {
         if (collected.length || attemptHadToolActivity) {
           if (model.provider === CLAUDE_CODE_PROVIDER) {
             await commitClaudeSession(session.sessionId);
-            this.scheduleIdleCompaction(threadId, warm, entry.account);
+            if (request.compactWhenIdle?.()) this.scheduleIdleCompaction(threadId, warm, entry.account, request.compactWhenIdle);
           }
           warm.lastUsedAt = Date.now();
           return { sessionFile: sessionManager.getSessionFile()!, text: collected.join("\n\n"), model: modelRef(model), status: "completed" };
@@ -929,13 +932,13 @@ export class Runner {
   /** Compact the thread's Claude conversation shortly before its prompt cache
    * expires, unless another turn comes first (see claudeIdleCompactionAt).
    * Timers live in memory: a restart skips the ones still waiting. */
-  private scheduleIdleCompaction(threadId: string, warm: WarmSession, account: string | undefined) {
+  private scheduleIdleCompaction(threadId: string, warm: WarmSession, account: string | undefined, allowed: () => boolean) {
     const at = claudeIdleCompactionAt(warm.session.sessionId);
     if (at === undefined) return;
     warm.idleCompaction = setTimeout(() => {
       warm.idleCompaction = undefined;
       this.runWhenIdle(threadId, async () => {
-        if (this.warm.get(threadId) !== warm) return;
+        if (this.warm.get(threadId) !== warm || !allowed()) return;
         if (!(await runOnAccount(account, () => compactClaudeSession(warm.session.sessionId)))) return;
         warm.sessionManager.appendCustomEntry(CLAUDE_COMPACTION_ENTRY_TYPE, { reason: "idle" });
         log.info(`compacted the idle Claude conversation of ${threadId} before its cache expired`);

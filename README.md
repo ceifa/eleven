@@ -95,9 +95,11 @@ that point (`{ "model": "kiro/claude-opus-5-5", "compactAt": 250000 }`, from
 window). When a long conversation (over 100,000 tokens) switches models — a
 fallback taking over, or a sequence edited — the incoming model has none of it
 cached, so it gets the recent part plus the path of the full transcript instead
-of re-reading everything. A Claude Code conversation over 200,000 tokens that
-goes quiet is compacted by Claude itself shortly before its prompt cache
-expires, so coming back does not pay to re-read it all.
+of re-reading everything. A Telegram or Discord conversation on Claude Code
+that goes quiet with over 200,000 tokens is compacted by Claude itself shortly
+before its prompt cache expires, so coming back does not pay to re-read it all;
+dashboard and CLI threads, and conversations replaced or archived meanwhile, are
+left alone.
 
 ### Discord
 

@@ -328,9 +328,10 @@ export function runWithClaudeSession<T>(sessionId: string, operation: () => Prom
 }
 
 /** Below this, re-reading a conversation after its cache expired is cheap
- * enough that compacting it would mostly lose context — Claude Code's own
- * idle-compaction floor. */
-const IDLE_COMPACTION_MIN_TOKENS = 200_000;
+ * enough that compacting it would mostly lose context. Replaying a month of
+ * real conversations, the ones that stay idle near 200K are the ones a
+ * compaction pays back least. */
+const IDLE_COMPACTION_MIN_TOKENS = 300_000;
 /** Long enough before the cache expires for the compaction request to land
  * while it is still warm. */
 const IDLE_COMPACTION_LEAD_MS = 2 * 60_000;

@@ -178,7 +178,7 @@ const compacted = [
 
 test("a large idle Claude conversation is compacted before its cache expires, and the next turn resumes the compaction", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(300_000));
+  const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(350_000));
   const request = { ...setup("idle-compaction"), compactWhenIdle: () => true };
   const runner = new Runner();
   const models = [{ model: "claude-code/default" }];
@@ -202,11 +202,11 @@ test("a Claude conversation that is small, gets a new message first, or may not 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let open = true;
   const cases = [
-    ["small", 50_000, false, () => true],
-    ["dashboard", 300_000, false, undefined],
-    ["archived since", 300_000, false, () => open],
+    ["small", 250_000, false, () => true],
+    ["dashboard", 350_000, false, undefined],
+    ["archived since", 350_000, false, () => open],
     // Last: its second turn leaves a timer of its own pending.
-    ["busy", 300_000, true, () => true],
+    ["busy", 350_000, true, () => true],
   ] as const;
   for (const [name, context, interrupt, compactWhenIdle] of cases) {
     const queries = installClaudeDouble((prompt) => prompt === "/compact" ? compacted : answer(context));

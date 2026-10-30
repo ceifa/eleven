@@ -8,6 +8,7 @@ import { openLightbox } from "./lightbox.js";
 import { keep, readSnapshot } from "./snapshot.js";
 import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
 import { connectWaveform, WAVEFORM_BAR_COUNT } from "./waveform.js";
+import { openVoiceConversation } from "./voice.js";
 
 const view = document.getElementById("view");
 const state = {
@@ -256,6 +257,25 @@ function flare(el, cls) {
 }
 
 /* ---------- live updates ---------- */
+
+let voiceConversation;
+function startVoice(thread) {
+  if (isThreadLive(thread.id)) return toast("Wait for the current turn to finish before starting voice.", true);
+  stopRecording();
+  voiceConversation ??= openVoiceConversation({ thread, h, prefs,
+    refresh: () => { if (state.activeThread?.id === thread.id) void openThread(thread.id); void refreshThreads(); },
+    closed: () => { voiceConversation = undefined; },
+  });
+}
+
+async function newVoiceThread(workspace) {
+  try {
+    const thread = await api.send("POST", "/voice/thread", { workspace });
+    await refreshThreads();
+    await openThread(thread.id);
+    startVoice(thread);
+  } catch (error) { toast(error.message, true); }
+}
 
 let liveTimer;
 // The app shell this page is running, as the server stamped it on the first
@@ -2002,7 +2022,10 @@ function threadComposer(thread) {
       }, h("span", { class: "stop-square", "aria-hidden": "true" })),
     ),
     media.recorderBar,
-    h("div", { class: "composer-hint" }, "Enter to send · Shift+Enter for a new line · paste or drop to attach"),
+    h("div", { class: "composer-footer" },
+      h("div", { class: "composer-hint" }, "Enter to send · Shift+Enter for a new line · paste or drop to attach"),
+      h("button", { class: "voice-launch", type: "button", onclick: () => startVoice(thread) }, h("span", { html: MIC_ICON, "aria-hidden": "true" }), "Voice conversation"),
+    ),
   );
   return form;
 }
@@ -2104,7 +2127,7 @@ function renderThreadPane() {
   const thread = state.activeThread;
   pane.classList.remove("is-composing");
   // Anything below that replaces the pane takes a running recorder's UI with it.
-  if (!thread || renderedThreadId !== thread.id) stopRecording();
+  if (!thread || renderedThreadId !== thread.id) { stopRecording(); void voiceConversation?.close(); }
   if (!thread) {
     renderedThreadId = undefined;
     renderedHead = undefined;
@@ -2861,6 +2884,7 @@ function newThreadDialog(preferred) {
         h("div", { class: "new-thread-actions" },
           h("span", { class: "composer-hint" }, "Enter to start · paste or drop to attach"),
           h("button", { class: "btn btn-ghost", type: "button", onclick: cancel }, "Cancel"),
+          h("button", { class: "btn", type: "button", onclick: () => newVoiceThread(workspace) }, "Talk instead"),
           startButton,
         ),
   );
@@ -3944,6 +3968,11 @@ async function viewSettings() {
             onchange: saveField((n, v) => (n.transcription = v ? { command: v } : undefined)) },
             c.transcription?.command ?? ""),
           "Runs locally for each incoming voice note. {{file}} is the audio path; stdout becomes the message text. Leave empty to disable."),
+        sectionLabel("Local voice replies"),
+        labeled("Speech command",
+          h("textarea", { class: "textarea w-full font-mono text-xs", rows: "3", placeholder: "my-tts --out {{file}}",
+            onchange: saveField((n, v) => (n.speech = v ? { command: v } : undefined)) }, c.speech?.command ?? ""),
+          "Optional. Reads plain text on stdin and writes WAV audio to {{file}}. Used by Voice conversation when Local voice is selected. Device voice needs no command."),
       ),
     ),
   );

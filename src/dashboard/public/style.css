@@ -2602,3 +2602,42 @@ video.msg-media { max-width: 22rem; }
     .thread-head .thread-menu > summary:hover { background: color-mix(in oklab, var(--color-base-200) 90%, transparent); color: var(--color-base-content); }
   }
 }
+
+/* ---------- hands-free conversation ---------- */
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.voice-launch { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; min-height: 44px; padding: .35rem .6rem; color: var(--color-accent); white-space: nowrap; font-size: .8rem; }
+.voice-launch:hover { color: var(--color-base-content); }
+.voice-launch:focus-visible, .voice-dialog button:focus-visible, .voice-dialog select:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 4px; }
+.voice-dialog { margin: auto; width: min(560px, 100%); max-height: var(--app-h); padding: 0; color: var(--color-base-content); background: var(--color-base-100); border: 1px solid var(--color-base-300); border-radius: var(--radius-box); }
+.voice-dialog::backdrop { background: oklch(8% .01 20 / .9); }
+.voice-content { min-height: min(680px, var(--app-h)); padding: 2rem; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 1rem; }
+.voice-workspace { font-size: .8rem; opacity: .6; overflow-wrap: anywhere; }
+.voice-status { font-family: "Grenze", serif; font-size: clamp(2.5rem, 8vw, 3.5rem); line-height: 1; }
+.voice-detail { max-width: 32ch; min-height: 3em; font-size: .95rem; opacity: .75; }
+.voice-beacon { --voice-color: var(--color-base-300); display: flex; align-items: center; justify-content: center; gap: 10px; height: 125px; flex-shrink: 0; }
+.voice-beacon i { display: block; width: 12px; height: 24px; border-radius: 10px; background: var(--voice-color); transition: background .2s; }
+.voice-beacon i:nth-child(2), .voice-beacon i:nth-child(4) { height: 48px; }
+.voice-beacon i:nth-child(3) { height: 78px; }
+.voice-dialog[data-state="listening"] .voice-beacon { --voice-color: var(--color-success); }
+.voice-dialog[data-state="thinking"] .voice-beacon, .voice-dialog[data-state="transcribing"] .voice-beacon { --voice-color: var(--color-accent); }
+.voice-dialog[data-state="speaking"] .voice-beacon { --voice-color: var(--color-primary); }
+.voice-dialog[data-state="listening"] .voice-beacon i, .voice-dialog[data-state="speaking"] .voice-beacon i { animation: voice-pulse 1s ease-in-out infinite alternate; }
+.voice-dialog .voice-beacon i:nth-child(even) { animation-delay: -.6s; }
+.voice-caption { width: 100%; max-height: 5.5em; overflow: auto; overflow-wrap: anywhere; font-size: .95rem; opacity: .8; }
+.voice-options { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; margin-top: auto; }
+.voice-options .select { min-height: 44px; max-width: 100%; }
+.voice-actions { width: 100%; display: flex; flex-direction: column; gap: .75rem; }
+.voice-actions .voice-action { min-height: 60px; width: 100%; justify-content: center; font-size: 1.05rem; }
+.voice-safety { max-width: 48ch; font-size: .75rem; opacity: .55; line-height: 1.5; }
+@keyframes voice-pulse { to { transform: scaleY(.5); opacity: .65; } }
+@media (max-width: 768px) {
+  .composer-footer { justify-content: center; }
+  .composer-footer .composer-hint { display: none; }
+  .voice-launch { width: 100%; }
+  .voice-dialog { width: 100%; max-width: 100%; height: var(--app-h); max-height: var(--app-h); border: 0; border-radius: 0; }
+  .voice-content { min-height: 100%; padding: max(1.25rem, env(safe-area-inset-top)) 1.25rem max(1.25rem, env(safe-area-inset-bottom)); }
+  .new-thread-actions { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-dialog .voice-beacon i { animation: none; transition: none; }
+}

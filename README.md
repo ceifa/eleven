@@ -15,6 +15,7 @@ The idea is simple: eleven makes your local agent reachable from anywhere, throu
 - **Workspaces**: a directory + tool policy (`read`-only to full `bash`) + optional model override. pi loads the workspace's `AGENTS.md` and `.agents/skills` natively, so your agent's persona lives in the repo, not in eleven.
 - **Dashboard** (`127.0.0.1:1111`): configure channels, providers, workspaces, approve pairings, and browse or join any thread with live streaming. Threads are named after the conversation they belong to — the forum topic, the group, the person — searchable full-text across every transcript, stoppable mid-turn, and restartable in place — "New thread here" is `/new` for the conversation you are reading, so a forum topic can be started over without leaving the browser — and every thread can show the skills its workspace loads. Its composer attaches files (pick, drop, or paste a screenshot) and records voice messages, transcribed the same way a Telegram voice note is.
 - **On a phone**: the same dashboard on a 390px screen — the list and the conversation become two screens the back gesture moves between, the composer stays above the keyboard, and it installs to the home screen as a PWA (Settings → App). Its interface is cached, so it opens with no signal; the conversations in it still need the daemon.
+- **Voice conversation**: hands-free talk with a workspace from the dashboard — speak, pause, hear the reply, speak again. Built for a phone in the car: no taps between turns, a tone when it is listening, and the agent's turn keeps running if you pause. It uses the transcription command for your side and either the device's own voice or a `speech` command you configure for the agent's. The page has to stay open and the screen on: a browser cannot keep the microphone in the background or take Bluetooth buttons.
 - **Models**: any provider pi supports, plus the official Claude Code runtime.
 - **Usage**: where the tokens actually went — per day, per model and per thread, with the cache hit rate, the list price at each provider's published rates, and how many prompt tokens came in cold because a turn idled past the cache TTL or fell down the sequence onto another model. Read off the transcripts on disk, so there is no meter to keep in sync, and whatever quota windows a provider reports sit on the same page.
 
@@ -47,6 +48,7 @@ Config lives in `~/.config/eleven/eleven.json`, but the dashboard edits it for y
   ],
   "autoFailover": false,
   "transcription": { "command": "whisper --file {{file}}" },
+  "speech": { "command": "my-tts --out {{file}}" },
   "session": { "idleDays": 7, "retentionDays": 30 },
   "workspaces": {
     "agent": {
@@ -86,7 +88,8 @@ inherited sequence outright. `tools` narrows capabilities (`read`, `bash`,
 list is always intersected with the running model's. `users` and `groups` are
 the allowlists — empty means deny, and pairing fills them in from the
 dashboard. Values written as `"$VAR"` are read from the environment at load
-time.
+time. `speech` is optional: it gets the reply as plain text on stdin and
+writes WAV audio to `{{file}}`.
 
 ### Discord
 

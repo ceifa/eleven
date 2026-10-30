@@ -38,6 +38,7 @@ const SHELL = [
   "/message-display.js",
   "/nav-drag.js",
   "/waveform.js",
+  "/voice.js",
   "/lightbox.js",
   "/snapshot.js",
   "/style.css",

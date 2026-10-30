@@ -68,7 +68,7 @@ async function withDashboard(run: (base: string, thread: { id: string }, turns: 
   const turns: Turn[] = [];
   const config = {
     raw: { workspaces, dashboard: { host: "127.0.0.1", port } },
-    resolved: { workspaces, dashboard: { host: "127.0.0.1", port }, models: [], transcription: { command: "echo transcribed {{file}}" } },
+    resolved: { workspaces, dashboard: { host: "127.0.0.1", port }, models: [], transcription: { command: "echo transcribed {{file}}" }, speech: { command: "{ printf 'RIFF\\0\\0\\0\\0WAVE'; cat; } > {{file}}" } },
     channels: () => [],
     turnModels: () => [],
     configuredModelRefs: () => [],
@@ -224,6 +224,35 @@ test("a cross-origin page cannot upload into the media store", async () => {
       body: PNG,
     });
     assert.equal(response.status, 403);
+  });
+});
+
+test("a conversation's recording is transcribed and then thrown away", async () => {
+  await withDashboard(async (base) => {
+    const stored = await upload(base, "conversation.webm", "audio/webm", Buffer.from("not really opus"));
+    const response = await send(`${base}/api/voice/transcribe`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: stored.id }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(json(response).text, /^transcribed .*conversation\.webm$/);
+    // The turn gets the text alone, so nothing would ever point back at the audio.
+    assert.ok(!existsSync(join(STATE_DIR, "media", stored.id)));
+  });
+});
+
+test("a reply is spoken through the configured command as WAV", async () => {
+  await withDashboard(async (base) => {
+    assert.deepEqual(json(await send(`${base}/api/voice`)), { transcription: true, speech: true });
+    const response = await send(`${base}/api/voice/speech`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "  tudo certo  " }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers["content-type"], "audio/wav");
+    assert.equal(response.body.subarray(12).toString(), "tudo certo");
   });
 });
 

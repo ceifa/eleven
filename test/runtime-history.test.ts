@@ -198,3 +198,48 @@ test("a provider picking up an answered Claude turn gets the head of large outpu
   assert.match(sent, /Run the tool again/);
   assert.equal((await readToolResult(first!.sessionFile, "native-call"))?.output, long);
 });
+
+for (const runtime of ["history-reader/m", "claude-code/default"]) {
+  test(`${runtime} receives a durable date update after midnight without changing its prefix`, async (t) => {
+    const previousTZ = process.env.TZ;
+    process.env.TZ = "America/Sao_Paulo";
+    t.after(() => { if (previousTZ === undefined) delete process.env.TZ; else process.env.TZ = previousTZ; });
+    t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-02T02:59:00Z") });
+    const inputs: { options: Options; prompt: SDKUserMessage }[] = [];
+    installClaude(inputs, nativeMessages.slice(-1));
+    received.length = 0;
+    const runner = new Runner();
+    const workspace = join(scratch, `date-${runtime.split("/")[0]}`);
+    mkdirSync(workspace);
+    const request = {
+      runtime: { channel: "test", workspace: "test", workspacePath: workspace },
+      sessionDir: join(workspace, "sessions"), workspacePath: workspace, tools: [], models: [{ model: runtime }],
+    };
+    const first = await runner.submit("date-thread", { ...request, text: "first" });
+    const sessionFile = first!.sessionFile;
+    t.mock.timers.setTime(new Date("2026-11-02T02:59:30Z").getTime());
+    await runner.submit("date-thread", { ...request, sessionFile, text: "same day" });
+    const firstPrefix = structuredClone(received[0]);
+    t.mock.timers.setTime(new Date("2026-11-02T03:01:00Z").getTime());
+    await runner.submit("date-thread", { ...request, sessionFile, text: "next day" });
+    if (runtime.startsWith("claude-code")) {
+      assert.deepEqual(inputs[2].options.systemPrompt, inputs[0].options.systemPrompt);
+      assert.ok(inputs[2].options.resume, "a date change must not force a bootstrap");
+      assert.deepEqual(inputs[1].prompt.message.content, [{ type: "text", text: "same day" }]);
+      assert.match(JSON.stringify(inputs[0].prompt.message.content), /Sunday, November 1/);
+      assert.match(JSON.stringify(inputs[2].prompt.message.content), /Monday, November 2/);
+    } else {
+      assert.deepEqual(received[2].slice(0, firstPrefix.length), firstPrefix, "all old provider messages keep their cacheable prefix");
+      assert.match(JSON.stringify(received[2].at(-1)), /Monday, November 2/);
+    }
+    // A cold host uses the date still in the active context, not process-local state.
+    runner.dropSession("date-thread");
+    await new Runner().submit("date-thread", { ...request, sessionFile, text: "after restart" });
+    const dates = SessionManager.open(sessionFile).buildSessionContext().messages
+      .filter((message) => message.role === "custom" && message.customType === "eleven:date");
+    assert.equal(dates.length, 2);
+    const timeline = await readThreadTimeline(sessionFile);
+    assert.equal(timeline.filter((row) => row.kind === "message" && row.role === "user").length, 4);
+    assert.doesNotMatch(JSON.stringify(timeline), /Today:/, "host context is not a user message in the UI");
+  });
+}

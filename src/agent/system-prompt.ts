@@ -37,20 +37,12 @@ override this section on any conflict.`;
  * Workspace AGENTS.md flows in separately through pi's context-file loading.
  */
 export function buildSystemPrompt(runtime: RuntimeContext, prompt: PromptConfig = {}): string {
-  const timeZone = process.env.TZ ?? "America/Sao_Paulo";
-  // Date only, not time-of-day: the system prompt is the cache prefix for the
-  // whole conversation, so anything here that changes per-request (a clock)
-  // would bust the provider prompt cache every turn. Date changes once a day.
-  // The agent can read the exact time with `date` when it actually needs it.
-  const today = new Date().toLocaleDateString("en-US", { dateStyle: "full", timeZone });
-
   const parts = [
     prompt.systemPrompt?.trim() || BUILTIN_SYSTEM_PROMPT,
     [
       "## Runtime",
       `- Channel: ${runtime.channel}${runtime.conversation ? ` (${runtime.conversation})` : ""}`,
       `- Workspace: ${runtime.workspace} at ${runtime.workspacePath} (your working directory)`,
-      `- Today: ${today} (${timeZone})`,
       ...(runtime.capabilities?.length ? [`- Channel capabilities: ${runtime.capabilities.join(", ")}`] : []),
     ].join("\n"),
     ...(prompt.appends ?? []).map((a) => a.trim()).filter(Boolean),

@@ -18,6 +18,7 @@ import type { Gateway } from "../gateway.ts";
 import type { Channels } from "../channels/index.ts";
 import { collectStoredMedia, formatInboundBody, resolveMediaPath, saveInboundMedia, validMime, type StoredAttachment } from "../media-store.ts";
 import { readThreadTimeline, readToolResult } from "../threads/reader.ts";
+import { threadSnapshot, THREAD_SNAPSHOT_TAIL, THREAD_SNAPSHOT_MAX_TAIL } from "../threads/snapshot.ts";
 import { addSample, buildUsageReport, cacheWasteOf, emptyBucket, promptTokens, readSessionUsage, startOfLocalDay } from "../threads/usage.ts";
 import { conversationIdentity } from "../threads/conversation.ts";
 import { displayTitle } from "../threads/title.ts";
@@ -321,7 +322,10 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
     if (runningOnly) threads = threads.filter((thread) => thread.running);
     if (since !== undefined) threads = threads.filter((thread) => thread.lastActivityAt >= since);
     const query = url.searchParams.get("q")?.trim();
-    if (query) return searchThreads(threads, query, limit ?? SEARCH_THREAD_LIMIT);
+    if (query) {
+      z.string().max(200).parse(query);
+      return searchThreads(threads, query, Math.min(limit ?? SEARCH_THREAD_LIMIT, 100));
+    }
     return limit ? threads.slice(0, limit) : threads;
   }
 
@@ -345,7 +349,8 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
       const batch = await Promise.all(
         pool.slice(index, index + SEARCH_BATCH).map(async (thread) => {
           const named = matcher.test(`${thread.title ?? ""}\n${thread.conversation}\n${thread.workspace}`);
-          const matches = thread.sessionFile ? await searchTranscript(thread.sessionFile, matcher, SEARCH_SNIPPETS) : [];
+          const sessionFile = gateway.threads.get(thread.id)?.sessionFile;
+          const matches = sessionFile ? await searchTranscript(sessionFile, matcher, SEARCH_SNIPPETS) : [];
           return matches.length || named ? { ...thread, matches } : undefined;
         }),
       );
@@ -544,6 +549,16 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
           "x-content-type-options": "nosniff",
           "cache-control": "private, max-age=86400",
         }, avatar.bytes);
+      }
+      if (method === "GET" && path.match(/^\/threads\/[^/]+\/read$/)) {
+        const thread = resolveThreadRef(path.split("/")[2]);
+        const tail = z.coerce.number().int().min(1).max(THREAD_SNAPSHOT_MAX_TAIL)
+          .parse(url.searchParams.get("tail") ?? THREAD_SNAPSHOT_TAIL);
+        const timeline = thread.sessionFile ? await readThreadTimeline(thread.sessionFile) : [];
+        return send(200, {
+          thread: { id: thread.id, workspace: thread.workspace, title: displayTitle(thread.title), conversation: identityOf(thread.sessionKey).label },
+          ...threadSnapshot(timeline, tail),
+        });
       }
       if (method === "GET" && path.match(/^\/threads\/[^/]+\/run$/)) {
         const thread = resolveThreadRef(path.split("/")[2]);

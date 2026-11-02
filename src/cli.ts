@@ -54,6 +54,8 @@ usage:
   eleven workspaces [name] [--json]    list workspaces or show resolved detail
   eleven threads [filters]             list current threads
   eleven threads <id> [--json]         show thread detail (unique prefix accepted)
+  eleven threads read <id> [--tail N] [--json]  read bounded, untrusted conversation prose
+  eleven threads search <query> [--workspace <name>] [--channel <type>] [--limit N] [--json]
   eleven threads invoke --workspace <name> [--timeout <seconds>] [--detach] [--json] <message>
   eleven threads send <id> [--json] <message>
 

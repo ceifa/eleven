@@ -1,6 +1,7 @@
 import { text as readStream } from "node:stream/consumers";
 import { homedir } from "node:os";
 import { ConfigStore } from "./config.ts";
+import { THREAD_CONTEXT_WARNING, THREAD_SNAPSHOT_MAX_TAIL, type threadSnapshot } from "./threads/snapshot.ts";
 
 type Json = Record<string, unknown>;
 
@@ -84,6 +85,54 @@ export async function runClientCommand(command: string | undefined, inputArgs: s
   if (command !== "threads") return false;
   const args = [...inputArgs];
   const action = args[0];
+  if (action === "read") {
+    args.shift();
+    const json = takeFlag(args, "--json");
+    const tail = takeOption(args, "--tail");
+    const ref = args.shift();
+    rejectArgs(args);
+    if (!ref) throw new Error("threads read requires a thread id");
+    const params = new URLSearchParams();
+    if (tail !== undefined) {
+      const count = parsePositiveInteger(tail, "tail");
+      if (count > THREAD_SNAPSHOT_MAX_TAIL) throw new Error(`tail must be at most ${THREAD_SNAPSHOT_MAX_TAIL}`);
+      params.set("tail", String(count));
+    }
+    const snapshot = await api<ReturnType<typeof threadSnapshot> & { thread: Pick<ThreadView, "id" | "workspace" | "title" | "conversation"> }>(`/threads/${encodeURIComponent(ref)}/read?${params}`);
+    if (json) return printJson(snapshot);
+    console.log(snapshot.warning);
+    console.log(`thread: ${snapshot.thread.id} · ${snapshot.thread.workspace} · ${snapshot.thread.title ?? snapshot.thread.conversation}`);
+    console.log(`captured: ${snapshot.capturedAt}${snapshot.truncated ? " · older messages or text omitted" : ""}`);
+    for (const message of snapshot.messages) console.log(`\n[${message.role}${message.timestamp ? ` · ${message.timestamp}` : ""}]\n${message.text}`);
+    return true;
+  }
+
+  if (action === "search") {
+    args.shift();
+    const json = takeFlag(args, "--json");
+    const workspace = takeOption(args, "--workspace");
+    const channel = takeOption(args, "--channel");
+    const limit = takeOption(args, "--limit");
+    const query = args.join(" ").trim();
+    if (!query || query.length > 200 || args.some((arg) => arg.startsWith("--"))) {
+      throw new Error("threads search requires a query of 1-200 characters and supports --workspace, --channel, --limit, --json");
+    }
+    const count = limit === undefined ? 20 : parsePositiveInteger(limit, "limit");
+    if (count > 100) throw new Error("limit must be at most 100");
+    const params = new URLSearchParams({ q: query, limit: String(count) });
+    if (workspace) params.set("workspace", workspace);
+    if (channel) params.set("channel", channel);
+    const threads = await api<(ThreadView & { matches: { role: string; snippet: string }[] })[]>(`/threads?${params}`);
+    if (json) return printJson({ warning: THREAD_CONTEXT_WARNING, threads });
+    console.log(THREAD_CONTEXT_WARNING);
+    if (!threads.length) console.log("no threads");
+    for (const thread of threads) {
+      console.log(`\n${thread.id} · ${thread.workspace} · ${thread.title ?? thread.conversation}`);
+      for (const match of thread.matches) console.log(`  [${match.role}] ${match.snippet}`);
+    }
+    return true;
+  }
+
   if (action === "invoke") {
     args.shift();
     let workspace: string | undefined;

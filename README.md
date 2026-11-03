@@ -88,6 +88,18 @@ the allowlists — empty means deny, and pairing fills them in from the
 dashboard. Values written as `"$VAR"` are read from the environment at load
 time.
 
+Final chat answers are committed to local state before sending. A restart resumes
+saved delivery without asking the model to repeat its work. Confirmed chunks of
+long answers are checkpointed; safe failures retry with backoff. Ambiguous sends
+and revoked destinations are quarantined instead of being sent automatically.
+Pending/blocked delivery counts and the last error appear in the thread API's
+`delivery` field; the payload remains in `pending-turns.json` for inspection.
+Check the platform before manually releasing or dropping a quarantined entry.
+There is no exactly-once guarantee across a platform acknowledgement and the
+local checkpoint, and early progress messages or tool-initiated sends do not
+have this durability contract. The ledger format changes on first write; preserve
+a backup before downgrading to an older eleven version.
+
 ### Discord
 
 Create an application in the [Developer Portal](https://discord.com/developers/applications),

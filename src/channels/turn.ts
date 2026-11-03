@@ -99,6 +99,7 @@ export interface ChatTurn<R> {
   text: string;
   images: ImageContent[];
   retry?: TurnRetry;
+  replyTo?: string;
   /** What the gateway needs beyond the message itself. */
   incoming: Pick<IncomingMessage, "workspaceHint" | "modelScopes" | "appends" | "customTools" | "runtime">;
   /** Texts any route already delivered to this conversation — shared with the
@@ -130,7 +131,10 @@ export async function runChatTurn<R>(turn: ChatTurn<R>): Promise<{ models: Model
   const blocks: string[] = [];
   let current = "";
   const delivery = createTurnDelivery(
-    (text, silent) => turn.send(text, { silent, reply: true }),
+    (text, silent) => {
+      if (turn.gateway.hasPendingReply(sessionKey)) throw new Error("an earlier final answer awaits delivery");
+      return turn.send(text, { silent, reply: true });
+    },
     sent,
     (error) => log.warn(`mid-turn flush failed: ${error}`),
   );
@@ -183,18 +187,15 @@ export async function runChatTurn<R>(turn: ChatTurn<R>): Promise<{ models: Model
         onToolCall: (name, args) => status.tool(name, summarizeToolArgs(args)),
         onRetry: (notice) => status.retry(notice),
       },
-      // The final send runs inside the turn's durable window: the pending
-      // ledger releases only after this settles, so a daemon death before the
-      // chat confirms the send wakes the conversation instead of silently
-      // losing the reply. A steered message never gets here — the owning
-      // turn's deliver ships the combined result (and clears `sent`).
-      deliver: async (result) => {
-        await status.finish(result.status === "stopped" ? "stopped" : "completed");
+      // Replace interrupted-generation recovery with saved literal delivery.
+      deliver: async (result, threadId) => {
         await delivery.settled();
         const final = delivery.remaining(blocks, result.text);
         const duplicate = !!final && sent.has(final);
-        if (final && !duplicate) await turn.send(final, { reply: true });
+        turn.gateway.queueReply(threadId, sessionKey, final && !duplicate ? final : "", turn.replyTo);
         sent.clear();
+        try { await status.finish(result.status === "stopped" ? "stopped" : "completed"); }
+        catch (error) { log.warn(`status completion failed: ${error}`); }
       },
     });
   } catch (error) {

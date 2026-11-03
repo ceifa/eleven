@@ -293,6 +293,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       text,
       images,
       retry,
+      replyTo: target.triggerMessageId?.toString(),
       incoming: {
         workspaceHint: deps.workspace(),
         // Most specific first: a topic's model settings beat its owner's.

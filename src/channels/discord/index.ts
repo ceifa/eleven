@@ -1,9 +1,11 @@
+import { DeliveryBlocked } from "../replies.ts";
+import { canRetrySend } from "./rest.ts";
 import type { ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
 import { AVATARS_DIR } from "../../paths.ts";
 import { AvatarCache, type Avatar } from "../avatars.ts";
 import { BotPool } from "../bots.ts";
-import type { Channel, ChannelStatus, DeliveryTarget } from "../index.ts";
+import type { Channel, ChannelStatus, DeliveryTarget, ReplyOptions } from "../index.ts";
 import type { PairingRequest, PairingStore } from "../pairing.ts";
 import { startDiscordBot, type BotHandle } from "./bot.ts";
 import { parseDiscordSessionKey } from "./session-key.ts";
@@ -32,12 +34,16 @@ export class DiscordChannel implements Channel {
     await this.pool.get(request.bot)?.welcome(request);
   }
 
-  async sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
+  async sendToSession(sessionKey: string, text: string, options: ReplyOptions = {}): Promise<DeliveryTarget> {
     const target = parseDiscordSessionKey(sessionKey);
     if (!target) throw new Error("thread has no Discord delivery target");
     const handle = this.pool.get(target.channel);
     if (!handle) throw new Error(`Discord channel ${target.channel} is not running`);
-    await handle.send(sessionKey, text);
+    try { await handle.send(sessionKey, text, options); }
+    catch (error) {
+      if (options.onChunk && !canRetrySend(error)) throw new DeliveryBlocked(`Discord send needs inspection: ${error}`);
+      throw error;
+    }
     return { channel: "discord", bot: target.channel, chatId: target.guildId ?? target.userId!, topic: target.channelId };
   }
 

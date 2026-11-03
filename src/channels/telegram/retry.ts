@@ -40,6 +40,8 @@ function transient(error: unknown): boolean {
   return true; // network-level errors
 }
 
+export const canRetrySend = (error: unknown) => preConnect(error) || retryAfterMs(error) !== undefined;
+
 /** Errors that mean "already in the desired state" — safe to ignore. */
 export function isNoop(error: unknown): boolean {
   const description = (error as GrammyError)?.description ?? "";
@@ -61,7 +63,7 @@ export async function withRetry<T>(kind: "send" | "idempotent", label: string, f
       return await fn();
     } catch (error) {
       lastError = error;
-      const retriable = kind === "send" ? preConnect(error) || retryAfterMs(error) !== undefined : transient(error);
+      const retriable = kind === "send" ? canRetrySend(error) : transient(error);
       if (!retriable || attempt === MAX_ATTEMPTS) throw error;
       const delay = retryAfterMs(error) ?? Math.min(BASE_DELAY_MS * 2 ** (attempt - 1), MAX_DELAY_MS);
       log.warn(`${label} failed (attempt ${attempt}), retrying in ${delay}ms: ${error}`);

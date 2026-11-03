@@ -18,6 +18,8 @@ export interface ButtonSpec {
 }
 
 export interface DiscordSendOptions {
+  sentChunks?: number;
+  onChunk?: (sentChunks: number) => void;
   /** The message this one answers; the first chunk replies to it. */
   replyTo?: string;
   /** Rows of buttons, hung under the last chunk. */
@@ -49,6 +51,7 @@ export async function sendMessage(rest: DiscordRest, channelId: string, markdown
   }
   let last: APIMessage | undefined;
   for (const [index, content] of chunks.entries()) {
+    if (index < (options.sentChunks ?? 0)) continue;
     const first = index === 0;
     last = await rest.request<APIMessage>("POST", `/channels/${channelId}/messages`, {
       creates: true,
@@ -63,6 +66,7 @@ export async function sendMessage(rest: DiscordRest, channelId: string, markdown
         components: index === chunks.length - 1 ? components(options.buttons) : undefined,
       },
     });
+    options.onChunk?.(index + 1);
   }
   return last;
 }

@@ -23,7 +23,7 @@ import { logger } from "../../log.ts";
 import { keyedLane, lruTouch } from "../../util.ts";
 import { capped } from "../avatars.ts";
 import type { BotDeps } from "../bots.ts";
-import type { ChannelDestination, CreatedConversation } from "../index.ts";
+import type { ChannelDestination, CreatedConversation, ReplyOptions } from "../index.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
@@ -83,7 +83,7 @@ export interface BotHandle {
   /** Drop a conversation's buffered input before it becomes a turn. */
   discardBurst(sessionKey: string): boolean;
   /** Deliver literal text to a conversation, by session key. */
-  send(sessionKey: string, markdown: string): Promise<void>;
+  send(sessionKey: string, markdown: string, options?: ReplyOptions): Promise<void>;
   openThread(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation>;
   prompt(sessionKey: string, text: string): Promise<void>;
   archive(sessionKey: string): Promise<void>;
@@ -593,6 +593,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       text,
       images,
       retry,
+      replyTo: target.triggerMessageId,
       incoming: {
         workspaceHint: deps.workspace(),
         // Most specific first: a thread's model settings beat its channel's,
@@ -709,7 +710,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     if (!THREADS.has(channels.get(target.channelId)!.type)) throw new Error("only threads can be archived");
     const thread = deps.gateway.threads.current(sessionKey);
     if (thread && !thread.archiveRequested) deps.gateway.threads.update(thread.id, { archiveRequested: true });
-    if (thread && deps.gateway.isThreadRunning(thread.id)) return;
+    if (thread && (deps.gateway.isThreadRunning(thread.id) || deps.gateway.hasPendingReply(sessionKey))) return;
     await rest.request("PATCH", `/channels/${target.channelId}`, { body: { archived: true } });
     if (thread) deps.gateway.threads.update(thread.id, { persistent: false, archiveRequested: false });
   }
@@ -740,10 +741,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     await runTurn(target, WAKE_PROMPT, []);
   }
 
-  async function send(sessionKey: string, markdown: string) {
+  async function send(sessionKey: string, markdown: string, options?: ReplyOptions) {
     const target = await targetOf(sessionKey);
     if (!target) throw new Error("thread has no Discord delivery target");
-    await sendMessage(rest, target.channelId, markdown);
+    await sendMessage(rest, target.channelId, markdown, options);
   }
 
   async function welcome(request: PairingRequest) {

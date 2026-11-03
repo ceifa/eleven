@@ -91,11 +91,9 @@ export interface IncomingMessage {
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
-  /** Deliver the finished turn to the channel. The runner runs it inside the
-   * thread's turn lane, so the pending ledger releases only after the send
-   * settles — a daemon death between "model done" and "reply sent" wakes the
-   * conversation instead of silently losing the reply. */
-  deliver?: (result: TurnResult) => Promise<void>;
+  /** Commit the finished turn inside its producing thread's lane. The ID
+   * stays fixed even if the conversation rotates while delivery settles. */
+  deliver?: (result: TurnResult, threadId: string) => Promise<void>;
 }
 
 /**
@@ -128,10 +126,9 @@ export class Gateway extends EventEmitter {
       const { startedAt, items } = this.liveTurns.get(threadId)!;
       this.emit("turn-start", { threadId, startedAt, items: [...items] });
     },
-    // Fired inside the turn lane, after channel delivery — so the ledger
-    // covers the send, and the next turn's begin cannot overlap this end.
-    onTurnEnd: (threadId) => {
-      this.pending.end(threadId);
+    // Live activity always ends; a failed durable handoff stays recoverable.
+    onTurnEnd: (threadId, preservePending) => {
+      if (!preservePending) this.pending.end(threadId);
       this.liveTurns.delete(threadId);
     },
     // The failure is already in the transcript; pin the thread to the file it
@@ -253,7 +250,7 @@ export class Gateway extends EventEmitter {
           // Someone comes back to a Telegram or Discord conversation hours later;
           // a dashboard, CLI or cron thread is done when its caller is.
           compactWhenIdle: this.openChannelConversation(thread.id),
-          deliver: incoming.deliver,
+          deliver: incoming.deliver && ((result) => incoming.deliver!(result, thread.id)),
         },
         events,
       );
@@ -269,6 +266,17 @@ export class Gateway extends EventEmitter {
       this.emit("turn-error", { threadId: thread.id, error: String(error) });
       throw error;
     }
+  }
+
+  queueReply(threadId: string, sessionKey: string, text: string, replyTo?: string) {
+    const thread = this.threads.get(threadId);
+    if (!thread || thread.sessionKey !== sessionKey) throw new Error("reply conversation is missing");
+    this.pending.complete(thread.id, sessionKey, text, replyTo);
+    this.emit("reply-queued");
+  }
+
+  hasPendingReply(sessionKey: string) {
+    return this.pending.hasReply(sessionKey);
   }
 
   /**

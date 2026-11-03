@@ -267,6 +267,7 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
       sessionFile: detail ? thread.sessionFile : undefined,
       current,
       running,
+      delivery: gateway.pending.replyStatus(thread.sessionKey),
       state: running ? "running" : current ? "current" : "old",
       source,
       // Whether a turn may be typed into this thread from here. See composable().

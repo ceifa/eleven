@@ -94,8 +94,10 @@ anything on `turn_start`, for example. eleven exposes a handshake for that:
 
 ```ts
 interface ElevenHost {
-  version: 2;
+  version: 3;
   panels(panels: unknown, options?: { scope?: string }): boolean;
+  conversation(): { wake(text: string): Promise<boolean> } | undefined;
+  inDirectory<T>(cwd: string, operation: () => T): T;
 }
 
 globalThis.eleven?.panels(panels, { scope: "tasks" });
@@ -108,6 +110,18 @@ plain pi, so the same extension file runs with or without eleven.
 The handshake lives on `globalThis` because pi loads workspace extensions
 itself, and a file in a workspace directory has no import path back to the
 eleven hosting it. Check `version` before calling.
+
+The other two members serve work an extension runs on its own. `conversation()`
+returns a handle on the conversation the current turn belongs to, and `wake(text)`
+runs `text` there later, as if it had arrived in the chat, steered into a running
+turn if there is one. It exists only for Telegram and Discord conversations; a
+dashboard or CLI thread gets `undefined`, and the extension has to finish inside
+the tool call. A wake into a thread that `/new` or an archive has since replaced
+resolves `false`. Until `wake` is called the handle keeps the conversation's warm
+session through idle eviction, because a nested Claude Code session needs its
+owner's registration. `inDirectory(cwd, fn)` makes model sessions spawned inside
+`fn` work in `cwd`, which is how a subagent runs in a git worktree of its own on
+a runtime eleven bridges.
 
 It gives an extension no new permissions. The extension already runs
 in-process with whatever tools the workspace granted. eleven validates its

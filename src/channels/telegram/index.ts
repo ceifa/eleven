@@ -1,4 +1,5 @@
 import { DeliveryBlocked } from "../replies.ts";
+import { logger } from "../../log.ts";
 import { canRetrySend } from "./retry.ts";
 import type { ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
@@ -14,6 +15,8 @@ import { AVATARS_DIR } from "../../paths.ts";
 // People and groups change their pictures now and then; a day behind is fine
 // for a face in a list. A custom emoji's id names one image forever.
 const CHAT_PHOTO_TTL_MS = 24 * 60 * 60 * 1000;
+
+const log = logger("telegram");
 
 /** Telegram, one polling bot per channel configured across workspaces. */
 export class TelegramChannel implements Channel {
@@ -67,8 +70,14 @@ export class TelegramChannel implements Channel {
   wakeInterrupted(turns: { sessionKey: string }[]) {
     for (const { sessionKey } of turns) {
       const owner = [...this.pool.bots].find(([name]) => sessionKey.startsWith(`telegram:${name}:`));
-      if (owner) void owner[1].handle.wake(sessionKey);
+      if (owner) void owner[1].handle.wake(sessionKey).catch((error) => log.warn(String(error)));
     }
+  }
+
+  wake(sessionKey: string, text: string): Promise<void> {
+    const owner = [...this.pool.bots].find(([name]) => sessionKey.startsWith(`telegram:${name}:`));
+    if (!owner) return Promise.reject(new Error(`no running Telegram bot owns ${sessionKey}`));
+    return owner[1].handle.wake(sessionKey, text);
   }
 
   /** The picture Telegram draws for a conversation: a forum topic's custom

@@ -198,3 +198,24 @@ test("a final handoff cannot clear recovery for a newer conversation thread", ()
   assert.deepEqual(gateway.pending.drain(), [{ threadId: newer.id, lastAliveAt: 200 }]);
   assert.equal(gateway.pending.replies()[0].text, "old answer");
 });
+
+test("a chat turn can wake its conversation later, until the conversation moves on", async () => {
+  const gateway = new Gateway(config as never);
+  const woken: [string, string][] = [];
+  gateway.waker = async (sessionKey, text) => { woken.push([sessionKey, text]); };
+  const runner = gateway.runner as unknown as { submit: (id: string, request: { wake?: (text: string) => Promise<void> }) => Promise<unknown> };
+  let wake: ((text: string) => Promise<void>) | undefined;
+  runner.submit = async (_threadId, request) => { wake = request.wake; return undefined; };
+
+  await send(gateway, "run the audit in the background");
+  await wake!("audit finished");
+  assert.deepEqual(woken, [["telegram:main:-1001:topic:7", "audit finished"]]);
+
+  // /new: the background work belongs to a thread that is no longer open.
+  gateway.newThread("telegram:main:-1001:topic:7");
+  await assert.rejects(wake!("too late"), /no longer the open conversation/);
+  assert.equal(woken.length, 1);
+
+  await gateway.handle({ sessionKey: "dashboard:agent:x", text: "hi", runtime: { channel: "dashboard" } as never });
+  assert.equal(wake, undefined, "a dashboard thread has no chat to wake");
+});

@@ -1,4 +1,5 @@
 import { DeliveryBlocked } from "../replies.ts";
+import { logger } from "../../log.ts";
 import { canRetrySend } from "./rest.ts";
 import type { ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
@@ -9,6 +10,8 @@ import type { Channel, ChannelStatus, DeliveryTarget, ReplyOptions } from "../in
 import type { PairingRequest, PairingStore } from "../pairing.ts";
 import { startDiscordBot, type BotHandle } from "./bot.ts";
 import { parseDiscordSessionKey } from "./session-key.ts";
+
+const log = logger("discord");
 
 // People and servers change their pictures now and then; a day behind is fine
 // for a face in a list.
@@ -78,7 +81,11 @@ export class DiscordChannel implements Channel {
   }
 
   wakeInterrupted(turns: { sessionKey: string }[]): void {
-    for (const { sessionKey } of turns) void this.owner(sessionKey)?.wake(sessionKey);
+    for (const { sessionKey } of turns) void this.owner(sessionKey)?.wake(sessionKey).catch((error) => log.warn(String(error)));
+  }
+
+  wake(sessionKey: string, text: string): Promise<void> {
+    return this.requiredOwner(sessionKey).wake(sessionKey, text);
   }
 
   /** A DM's face is the person's avatar. Every server conversation is a

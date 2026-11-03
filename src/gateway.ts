@@ -138,6 +138,9 @@ export class Gateway extends EventEmitter {
     },
   });
 
+  /** Runs a turn nobody typed in a chat conversation. The daemon sets it:
+   *  the channels own delivery, and the gateway does not know them. */
+  waker?: (sessionKey: string, text: string) => Promise<void>;
   private config: ConfigStore;
   private liveTurns = new Map<string, LiveTurn>();
 
@@ -251,6 +254,7 @@ export class Gateway extends EventEmitter {
           // a dashboard, CLI or cron thread is done when its caller is.
           compactWhenIdle: this.openChannelConversation(thread.id),
           deliver: incoming.deliver && ((result) => incoming.deliver!(result, thread.id)),
+          wake: this.wakeFor(thread),
         },
         events,
       );
@@ -436,6 +440,19 @@ export class Gateway extends EventEmitter {
     return () => {
       const thread = this.threads.get(id);
       return !!thread && this.threads.isCurrent(id) && !thread.archiveRequested && isChannelSessionKey(thread.sessionKey);
+    };
+  }
+
+  /** How work a turn left running reports back later — only into the same
+   * chat conversation, and only while it is still open. */
+  private wakeFor(thread: ThreadEntry): ((text: string) => Promise<void>) | undefined {
+    const waker = this.waker;
+    if (!waker || !isChannelSessionKey(thread.sessionKey)) return undefined;
+    const open = this.openChannelConversation(thread.id);
+    const { id, sessionKey } = thread;
+    return async (text) => {
+      if (!open()) throw new Error(`thread ${id.slice(0, 8)} is no longer the open conversation in ${sessionKey}`);
+      await waker(sessionKey, text);
     };
   }
 

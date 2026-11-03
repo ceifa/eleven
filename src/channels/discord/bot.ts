@@ -79,7 +79,7 @@ export interface BotHandle {
   username?: string;
   connected(): boolean;
   /** Re-prompt a conversation (by session key) that a restart interrupted. */
-  wake(sessionKey: string): Promise<void>;
+  wake(sessionKey: string, text?: string): Promise<void>;
   /** Drop a conversation's buffered input before it becomes a turn. */
   discardBurst(sessionKey: string): boolean;
   /** Deliver literal text to a conversation, by session key. */
@@ -730,15 +730,13 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     return channel.id;
   }
 
-  /** Resume a conversation a restart cut off. */
-  async function wake(sessionKey: string) {
-    const target = await targetOf(sessionKey).catch((error) => (log.warn(`cannot wake ${sessionKey}: ${error}`), undefined));
-    if (!target) {
-      log.warn(`cannot wake ${sessionKey}: unrecognized session key`);
-      return;
-    }
-    log.info(`waking interrupted turn in ${sessionKey}`);
-    await runTurn(target, WAKE_PROMPT, []);
+  /** Start a turn nobody typed. By default it resumes a conversation a restart
+   * cut off. */
+  async function wake(sessionKey: string, text = WAKE_PROMPT) {
+    const target = await targetOf(sessionKey);
+    if (!target) throw new Error(`cannot wake ${sessionKey}: unrecognized session key`);
+    log.info(`waking ${sessionKey}`);
+    await runTurn(target, text, []);
   }
 
   async function send(sessionKey: string, markdown: string, options?: ReplyOptions) {

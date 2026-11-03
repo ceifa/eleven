@@ -96,6 +96,7 @@ export async function startDaemon() {
     new TelegramChannel(config, gateway, pairing),
     new DiscordChannel(config, gateway, pairing),
   ]);
+  gateway.waker = (sessionKey, text) => channels.wake(sessionKey, text);
   const replies = new ReplyDelivery(gateway.pending, (key, text, options) => channels.sendReply(key, text, options));
   gateway.on("reply-queued", () => replies.kick());
   replies.kick();

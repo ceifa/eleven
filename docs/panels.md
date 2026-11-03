@@ -122,8 +122,11 @@ result without a new user message. Dashboard, CLI and cron callers finish
 inside their tool call instead.
 
 Background work belongs to its session. `/new` aborts every handle's signal;
-finishing an ordinary turn does not. `progress` draws a separate status message
-whose Stop button aborts only that handle. Call `finish` after the workers wind
+finishing an ordinary turn does not. `progress` draws the run in the status
+card of the turn that started it, under the turn's own panels, with a Stop
+button that aborts only that handle. The card keeps updating after the turn is
+done until every run on it settles; a turn failing or being stopped does not
+settle its runs. Call `finish` after the workers wind
 down, even after failure, then `wake(text)` to report the result. A session reset
 also revokes delivery already on its way to the channel, so an old result cannot
 enter the new session. An undeliverable wake resolves `false`.

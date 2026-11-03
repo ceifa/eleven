@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import type { InlineKeyboardMarkup, ReplyParameters } from "@grammyjs/types";
-import { compact, formatDuration, plainStatus, renderStatusText, TurnStatus } from "../turn-status.ts";
+import { compact, plainStatus, TurnStatus } from "../turn-status.ts";
 import { isNoop, withRetry } from "./retry.ts";
 
 // A DM tolerates roughly one message per second; a group is flood-limited at
@@ -16,7 +16,6 @@ export interface TelegramStatusOptions {
   throttleMs?: number;
   toolRenderDelayMs?: number;
   idleRenderDelayMs?: number;
-  background?: { title: string; stopId: string };
 }
 
 interface TelegramStatusCard {
@@ -64,20 +63,16 @@ export class TelegramTurnStatus extends TurnStatus<TelegramStatusCard> {
       },
     }, {
       render: (view) => {
-        if (!options.background) {
-          const text = plainStatus(view);
-          return text ? { text } : undefined;
-        }
-        const icon = view.outcome === "completed" ? "✅" : view.outcome === "failed" ? "❌" : view.outcome === "stopped" ? "⏹" : "⚙️";
-        const header = `${icon} ${compact(options.background.title)} · ${view.outcome ?? "running"} · ${formatDuration(view.elapsedMs ?? 0)}`;
-        return {
-          text: renderStatusText(header, view.panels),
-          reply_markup: { inline_keyboard: view.outcome ? [] : [[{ text: "⏹ Stop", callback_data: options.background.stopId }]] },
-        };
+        const text = plainStatus(view);
+        if (!text) return undefined;
+        if (!view.runs?.length) return { text };
+        // A run's Stop goes with it; an empty keyboard is what clears the last one.
+        const stops = view.runs.filter((run) => !run.outcome)
+          .map((run) => [{ text: `⏹ Stop ${compact(run.title, 40)}`, callback_data: run.stopId }]);
+        return { text, reply_markup: { inline_keyboard: stops } };
       },
-      throttleMs: options.throttleMs ?? (options.background || group ? GROUP_THROTTLE_MS : THROTTLE_MS),
+      throttleMs: options.throttleMs ?? (group ? GROUP_THROTTLE_MS : THROTTLE_MS),
       rateKey: `telegram:${chatId}`,
-      keepOnFinish: !!options.background,
       toolRenderDelayMs: options.toolRenderDelayMs,
       idleRenderDelayMs: options.idleRenderDelayMs,
     });

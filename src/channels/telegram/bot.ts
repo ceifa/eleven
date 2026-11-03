@@ -283,6 +283,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     const replyParameters = target.triggerMessageId !== undefined
       ? { message_id: target.triggerMessageId, allow_sending_without_reply: true }
       : undefined;
+    const status = new TelegramTurnStatus(bot.api, chatId, { topic, replyParameters });
 
     // Whatever owns this conversation: the person in a DM, the group in a group.
     // Both carry topics — a bot with topic mode enabled has them in its DMs too
@@ -302,8 +303,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       replyTo: target.triggerMessageId?.toString(),
       incoming: {
         expectedThreadId,
-        createBackground: (options) => background.create(sessionKey, options, (stopId) =>
-          new TelegramTurnStatus(bot.api, chatId, { topic, replyParameters, background: { title: options.title, stopId } })),
+        createBackground: (options) => background.create(sessionKey, options, (stopId) => status.attach(options.title, stopId)),
         workspaceHint: deps.workspace(),
         // Most specific first: a topic's model settings beat its owner's.
         modelScopes: [topicConfig, owner],
@@ -316,7 +316,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
         },
       },
       sent,
-      status: new TelegramTurnStatus(bot.api, chatId, { topic, replyParameters }),
+      status,
       send: (markdown, options) => sendRich(bot.api, chatId, markdown, {
         messageThreadId: topic,
         replyParameters: options.reply ? replyParameters : undefined,

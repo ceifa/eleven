@@ -1,4 +1,5 @@
 import { PanelBoard, type Panel, type PanelRow, type PanelRowState, type PanelUpdate } from "../agent/panels.ts";
+import type { BackgroundStatus } from "../agent/host-api.ts";
 import { keyedLane } from "../util.ts";
 import { logger } from "../log.ts";
 
@@ -40,14 +41,25 @@ export interface RetryStatus {
   errorMessage: string;
 }
 
+/** Background work the turn started, drawn under the turn's own panels. */
+export interface RunView {
+  title: string;
+  /** What its Stop button carries; the button goes once the run settles. */
+  stopId: string;
+  panels: readonly Panel[];
+  outcome?: TurnOutcome;
+  elapsedMs: number;
+}
+
 /** What a status card shows at one moment. `running` is set until the turn has
- *  an outcome. */
+ *  an outcome; runs can outlive it. */
 export interface StatusView {
   panels: readonly Panel[];
   outcome?: TurnOutcome;
   running?: RunningStatus;
   retry?: RetryStatus;
   elapsedMs?: number;
+  runs?: readonly RunView[];
 }
 
 /** The one message a status card lives in, as a channel posts, edits and
@@ -71,13 +83,24 @@ export interface TurnStatusOptions<R> {
   toolRenderDelayMs?: number;
   /** Hold-off before an event-less turn reports that it is working. */
   idleRenderDelayMs?: number;
-  keepOnFinish?: boolean;
+}
+
+interface Run {
+  title: string;
+  stopId: string;
+  board: PanelBoard;
+  startedAt: number;
+  endedAt?: number;
+  outcome?: TurnOutcome;
 }
 
 /** One quiet, editable message for a turn's panels, the top-level tool
  * currently running, and provider retries. Panels and retries are a durable
  * record of the turn; a message that only ever showed tool status is deleted
- * when the turn ends — the reply (or failure notice) that follows supersedes it. */
+ * when the turn ends — the reply (or failure notice) that follows supersedes it.
+ *
+ * Background runs the turn started draw here too, under the turn's own panels:
+ * the card keeps updating after the turn is done, until every run settles. */
 export class TurnStatus<R = string> {
   private readonly board = new PanelBoard();
   /** Tools whose own rows are on screen — their argument preview adds nothing. */
@@ -94,13 +117,13 @@ export class TurnStatus<R = string> {
   private draining: Promise<void> | undefined;
   private outcome: TurnOutcome | undefined;
   private dead = false;
+  private readonly runs: Run[] = [];
   private readonly surface: StatusSurface<R>;
   private readonly render: (view: StatusView) => R | undefined;
   private readonly throttleMs: number;
   private readonly rateKey: string | undefined;
   private readonly toolRenderDelayMs: number;
   private readonly idleRenderDelayMs: number;
-  private readonly keepOnFinish: boolean;
 
   constructor(surface: StatusSurface<R>, options: TurnStatusOptions<R>) {
     this.surface = surface;
@@ -109,7 +132,6 @@ export class TurnStatus<R = string> {
     this.rateKey = options.rateKey;
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
     this.idleRenderDelayMs = options.idleRenderDelayMs ?? IDLE_FIRST_RENDER_DELAY_MS;
-    this.keepOnFinish = options.keepOnFinish ?? false;
   }
 
   /** The turn began. Arms the bare "working" header for a turn that produces no
@@ -149,6 +171,31 @@ export class TurnStatus<R = string> {
     this.rearm();
   }
 
+  /** Draw a background run this turn started. Its panels and outcome are its
+   *  own: the turn ending, failing or being stopped settles none of it. */
+  attach(title: string, stopId: string): BackgroundStatus {
+    const run: Run = { title, stopId, board: new PanelBoard(), startedAt: Date.now() };
+    this.runs.push(run);
+    this.rearm();
+    return {
+      panels: (update) => {
+        if (this.dead || run.outcome) return;
+        run.board.apply(update);
+        this.rearm();
+      },
+      finish: async (outcome) => {
+        if (run.outcome) return;
+        run.outcome = outcome;
+        run.endedAt = Date.now();
+        if (outcome !== "completed") run.board.settle();
+        if (this.dead) return;
+        if (!this.outcome) return this.rearm();
+        if (!this.runsLive) this.stopTimers();
+        await this.queueRender();
+      },
+    };
+  }
+
   async finish(outcome: TurnOutcome): Promise<void> {
     if (this.dead || this.outcome) return;
     if (!this.worthKeeping) {
@@ -161,20 +208,32 @@ export class TurnStatus<R = string> {
       }).catch((error) => log.warn(`status cleanup failed: ${error}`));
       return;
     }
-    this.stopTimers();
+    // The elapsed ticker keeps running for the runs still on the card.
+    if (!this.runsLive) this.stopTimers();
     this.outcome = outcome;
     if (outcome !== "completed") this.board.settle();
     await this.queueRender();
   }
 
+  /** The turn is over. A card still drawing runs stays live until they settle. */
   cancel(): void {
+    if (this.outcome && this.runsLive) return;
     this.dead = true;
     this.stopTimers();
   }
 
-  /** Panels and retries outlive the turn; bare tool status does not. */
+  /** Panels, retries and runs outlive the turn; bare tool status does not. */
   private get worthKeeping(): boolean {
-    return this.keepOnFinish || this.board.changed || !!this.currentRetry;
+    return this.board.changed || !!this.currentRetry || this.runs.length > 0;
+  }
+
+  private get runsLive(): boolean {
+    return this.runs.some((run) => !run.outcome);
+  }
+
+  /** Something on the card is still moving. */
+  private get live(): boolean {
+    return !this.dead && (!this.outcome || this.runsLive);
   }
 
   private stopTimers(): void {
@@ -194,8 +253,8 @@ export class TurnStatus<R = string> {
   }
 
   private schedule(): void {
-    if (this.timer || this.dead || this.outcome) return;
-    const hold = this.board.changed || this.currentRetry
+    if (this.timer || !this.live) return;
+    const hold = this.board.changed || this.currentRetry || this.runs.length
       ? FIRST_RENDER_DELAY_MS
       : this.currentTool
         ? this.toolRenderDelayMs
@@ -216,7 +275,22 @@ export class TurnStatus<R = string> {
     const running = this.outcome
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
-    const card = this.render({ panels: this.board.panels, outcome: this.outcome, running, retry: this.currentRetry, elapsedMs: Date.now() - this.startedAt });
+    const now = Date.now();
+    const runs = this.runs.map((run): RunView => ({
+      title: run.title,
+      stopId: run.stopId,
+      panels: run.board.panels,
+      outcome: run.outcome,
+      elapsedMs: (run.endedAt ?? now) - run.startedAt,
+    }));
+    const card = this.render({
+      panels: this.board.panels,
+      outcome: this.outcome,
+      running,
+      retry: this.currentRetry,
+      elapsedMs: now - this.startedAt,
+      ...(runs.length ? { runs } : {}),
+    });
     const key = typeof card === "string" ? card : JSON.stringify(card);
     if (card === undefined || key === this.lastKey || key === this.pending?.key || this.dead) return this.draining ?? Promise.resolve();
     this.pending = { card, key }; // latest wins while the chat is slow
@@ -256,12 +330,12 @@ export class TurnStatus<R = string> {
   private async post(card: R): Promise<void> {
     await this.surface.post(card);
     this.posted = true;
-    if (this.dead || this.outcome) return;
+    if (!this.live) return;
     // From here on the running header shows elapsed time — keep it honest
     // between events. queueRender directly: the tick always exceeds the
     // throttle, which drain() enforces anyway.
     this.ticker ??= setInterval(() => {
-      if (!this.dead && !this.outcome) void this.queueRender();
+      if (this.live) void this.queueRender();
     }, ELAPSED_TICK_MS);
     this.ticker.unref();
   }
@@ -269,7 +343,15 @@ export class TurnStatus<R = string> {
 
 /** The card as plain text, for chats that draw nothing richer. */
 export function plainStatus(view: StatusView): string | undefined {
-  return renderTurnStatus(view.panels, view.outcome, view.running, view.retry) || undefined;
+  const turn = renderTurnStatus(view.panels, view.outcome, view.running, view.retry);
+  const runs = (view.runs ?? []).map((run) => [runHeadline(run), ...run.panels.map((panel) => renderPanel(panel))].join("\n\n"));
+  return clip([turn, ...runs].filter(Boolean).join("\n\n")) || undefined;
+}
+
+export const RUN_ICONS: Record<TurnOutcome | "running", string> = { running: "⚙️", completed: "✅", failed: "❌", stopped: "⏹" };
+
+function runHeadline(run: RunView): string {
+  return `${RUN_ICONS[run.outcome ?? "running"]} ${compact(run.title)} · ${run.outcome ?? "running"} · ${formatDuration(run.elapsedMs)}`;
 }
 
 export function renderTurnStatus(
@@ -298,7 +380,10 @@ export function renderTurnStatus(
 }
 
 export function renderStatusText(header: string, panels: readonly Panel[]): string {
-  const text = [header, ...panels.map((panel) => renderPanel(panel))].join("\n\n");
+  return clip([header, ...panels.map((panel) => renderPanel(panel))].join("\n\n"));
+}
+
+function clip(text: string): string {
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
 }
 

@@ -124,7 +124,16 @@ const host: ElevenHost = {
     const abort = () => controller.abort();
     sessionSignal?.addEventListener("abort", abort, { once: true });
     if (sessionSignal?.aborted) abort();
+    // Claimed now, while the turn that started the run still owns its card:
+    // the run is drawn there, and the card must know before the turn ends.
     let status: BackgroundStatus | undefined;
+    if (createBackground && !controller.signal.aborted) {
+      try {
+        status = createBackground({ title: options.title?.trim() || "Background work", stop: abort });
+      } catch (error) {
+        log.warn(`background status failed: ${error}`);
+      }
+    }
     let finished = false;
     const finish = async (outcome: BackgroundOutcome) => {
       if (finished) return;
@@ -140,11 +149,10 @@ const host: ElevenHost = {
     return {
       signal: controller.signal,
       progress(panels) {
-        if (finished || controller.signal.aborted || !createBackground) return false;
+        if (finished || controller.signal.aborted || !status) return false;
         const update = readPanels(panels, "background");
         if (!update) return false;
         try {
-          status ??= createBackground({ title: options.title?.trim() || "Background work", stop: abort });
           status.panels(update);
           return true;
         } catch (error) {

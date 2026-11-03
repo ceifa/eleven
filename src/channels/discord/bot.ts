@@ -585,6 +585,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     const sessionKey = sessionKeyFor(target);
     const { channelId } = target;
     const { tool, sent } = toolFor(sessionKey, channelId);
+    const status = new DiscordTurnStatus(rest, channelId, target.triggerMessageId);
 
     // Whatever owns this conversation: the person in a DM, the server in a
     // server — where each channel and thread is a topic of its own.
@@ -603,8 +604,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       replyTo: target.triggerMessageId,
       incoming: {
         expectedThreadId,
-        createBackground: (options) => background.create(sessionKey, options, (stopId) =>
-          new DiscordTurnStatus(rest, channelId, target.triggerMessageId, { title: options.title, stopId })),
+        createBackground: (options) => background.create(sessionKey, options, (stopId) => status.attach(options.title, stopId)),
         workspaceHint: deps.workspace(),
         // Most specific first: a thread's model settings beat its channel's,
         // which beat its category's and its server's.
@@ -623,7 +623,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
         },
       },
       sent,
-      status: new DiscordTurnStatus(rest, channelId, target.triggerMessageId),
+      status,
       send: (markdown, options) => sendMessage(rest, channelId, markdown, {
         replyTo: options.reply ? target.triggerMessageId : undefined,
         buttons: options.buttons,

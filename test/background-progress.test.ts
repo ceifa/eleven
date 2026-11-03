@@ -99,43 +99,111 @@ test("run buttons are scoped to their chat and removed at completion", async () 
   assert.equal(statuses.stop("chat-a", button), false);
 });
 
-test("Discord background cards name the run and stop it, not the conversation's turn", async () => {
-  const running = renderDiscordCard({ panels, running: { elapsedMs: 65_000 }, elapsedMs: 65_000 }, { title: "Workflow abc", stopId: "run-stop" });
-  assert.match(JSON.stringify(running), /Workflow abc/);
-  assert.match(JSON.stringify(running), /1m05s/);
-  assert.match(JSON.stringify(running), /run-stop/);
-  assert.ok(!JSON.stringify(running).includes(`"custom_id":"${STOP_BUTTON_ID}"`));
-  const done = renderDiscordCard({ panels, outcome: "stopped", elapsedMs: 65_000 }, { title: "Workflow abc", stopId: "run-stop" });
-  assert.ok(!JSON.stringify(done).includes("custom_id"));
-  assert.match(JSON.stringify(done), /stopped/);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const requests: string[] = [];
-  const status = new DiscordTurnStatus({ request: async (method: string, url: string) => {
-    requests.push(`${method} ${url}`);
-    return { id: "message" };
-  } } as never, "channel", undefined, { title: "Workflow abc", stopId: "run-stop" });
+function recordingStatus() {
+  const cards: string[] = [];
+  const posts: string[] = [];
+  const status = new TurnStatus({
+    post: async (card) => { posts.push(card); cards.push(card); },
+    edit: async (card) => { cards.push(card); },
+    remove: async () => assert.fail("a card drawing a run was removed"),
+  }, { render: plainStatus, throttleMs: 1 });
+  return { status, cards, posts };
+}
+
+test("a run keeps drawing in the card of the turn that started it after the turn ends", async () => {
+  const { status, cards, posts } = recordingStatus();
   status.start();
-  await status.finish("stopped");
-  assert.deepEqual(requests, ["POST /channels/channel/messages"], "background work must not leave the bot typing");
+  const run = status.attach("Workflow abc", "run-stop");
+  run.panels({ scope: "background", panels });
+  await status.finish("completed");
+  status.cancel();
+  run.panels({ scope: "background", panels: [{ title: "Agents", rows: [{ text: "Audit", state: "done" }] }] });
+  await sleep(300);
+  await run.finish("completed");
+  assert.equal(posts.length, 1, "the run must not open a message of its own");
+  assert.match(cards.at(-1)!, /^✅ Turn completed/);
+  assert.match(cards.at(-1)!, /✅ Workflow abc · completed/);
+  assert.match(cards.at(-1)!, /✅ Audit/);
+  assert.equal((status as unknown as { ticker?: NodeJS.Timeout }).ticker, undefined);
+  const settled = cards.length;
+  run.panels({ scope: "background", panels });
+  await sleep(50);
+  assert.equal(cards.length, settled, "a settled run draws nothing more");
 });
 
-test("Telegram background progress edits one message and clears its stop keyboard", async () => {
+test("a stopped or failed turn leaves its runs running", async () => {
+  const { status, cards } = recordingStatus();
+  const run = status.attach("Workflow abc", "run-stop");
+  run.panels({ scope: "background", panels });
+  await status.finish("stopped");
+  status.cancel();
+  assert.match(cards.at(-1)!, /⏹ Turn stopped/);
+  assert.match(cards.at(-1)!, /⚙️ Workflow abc · running/);
+  assert.match(cards.at(-1)!, /⏳ Audit/);
+  await run.finish("failed");
+  assert.match(cards.at(-1)!, /❌ Workflow abc · failed/);
+  assert.match(cards.at(-1)!, /⏹ Audit/);
+});
+
+test("Discord turn cards carry a Stop per live run, apart from the turn's own", () => {
+  const run = { title: "Workflow abc", stopId: "run-stop", panels, elapsedMs: 65_000 };
+  const json = (view: Parameters<typeof renderDiscordCard>[0]) => JSON.stringify(renderDiscordCard(view));
+  const during = json({ panels: [], running: { elapsedMs: 1_000 }, runs: [run] });
+  assert.match(during, new RegExp(`"custom_id":"${STOP_BUTTON_ID}"`));
+  assert.match(during, /"custom_id":"run-stop"/);
+  const after = json({ panels: [], outcome: "completed", runs: [run] });
+  assert.match(after, /Done/);
+  assert.match(after, /Workflow abc\*\* · running/);
+  assert.match(after, /1m05s/);
+  assert.match(after, /"custom_id":"run-stop"/);
+  assert.ok(!after.includes(`"custom_id":"${STOP_BUTTON_ID}"`), "a finished turn has nothing of its own to stop");
+  assert.match(after, /"accent_color":5793266/, "a card with live runs still reads as running");
+  const settled = json({ panels: [], outcome: "completed", runs: [{ ...run, outcome: "completed" }] });
+  assert.ok(!settled.includes("custom_id"));
+  assert.match(settled, /Workflow abc\*\* · completed/);
+});
+
+test("Discord background runs leave no typing indicator behind the finished turn", async () => {
+  const requests: string[] = [];
+  let typing = 0;
+  const status = new DiscordTurnStatus({ request: async (method: string, url: string) => {
+    if (url.endsWith("/typing")) typing++;
+    else requests.push(`${method} ${url}`);
+    return { id: "message" };
+  } } as never, "channel");
+  status.start();
+  const run = status.attach("Workflow abc", "run-stop");
+  await status.finish("completed");
+  status.cancel();
+  const typed = typing;
+  await run.finish("completed");
+  assert.equal(typing, typed);
+  assert.deepEqual(new Set(requests), new Set(["POST /channels/channel/messages", "PATCH /channels/channel/messages/message"]));
+});
+
+test("Telegram draws a run in the turn's message and clears its stop keyboard", async () => {
   const calls: { method: string; payload: any }[] = [];
   const api = { raw: {
     sendMessage: async (payload: unknown) => { calls.push({ method: "post", payload }); return { message_id: 123 }; },
     editMessageText: async (payload: unknown) => { calls.push({ method: "edit", payload }); },
   } };
-  const status = new TelegramTurnStatus(api as never, 901, { throttleMs: 1, topic: 7, background: { title: "Workflow abc", stopId: "run-stop" } });
-  status.panels({ scope: "bg", panels });
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  await status.finish("stopped");
-  assert.deepEqual(calls.map((call) => call.method), ["post", "edit"]);
+  const status = new TelegramTurnStatus(api as never, 901, { throttleMs: 1, topic: 7 });
+  const run = status.attach("Workflow abc", "run-stop");
+  run.panels({ scope: "background", panels });
+  await sleep(350);
+  await status.finish("completed");
+  status.cancel();
+  await run.finish("stopped");
+  assert.deepEqual(calls.filter((call) => call.method === "post").length, 1);
   assert.equal(calls[0].payload.message_thread_id, 7);
   assert.equal(calls[0].payload.reply_markup.inline_keyboard[0][0].callback_data, "run-stop");
-  assert.equal(calls[1].payload.message_id, 123);
-  assert.deepEqual(calls[1].payload.reply_markup.inline_keyboard, []);
-  assert.match(calls[1].payload.text, /Workflow abc · stopped/);
-  assert.match(calls[1].payload.text, /⏹ Audit/);
+  const last = calls.at(-1)!;
+  assert.equal(last.payload.message_id, 123);
+  assert.deepEqual(last.payload.reply_markup.inline_keyboard, []);
+  assert.match(last.payload.text, /Workflow abc · stopped/);
+  assert.match(last.payload.text, /⏹ Audit/);
 });
 
 test("concurrent cards share a serialized chat edit budget", async () => {
@@ -153,10 +221,12 @@ test("concurrent cards share a serialized chat edit budget", async () => {
   assert.ok(times[1] - times[0] >= 40, `posts only ${times[1] - times[0]}ms apart`);
 });
 
-test("a background card first posted at completion does not leave an elapsed ticker alive", async () => {
+test("a card first posted at completion does not leave an elapsed ticker alive", async () => {
   const status = new TurnStatus({ post: async () => {}, edit: async () => {}, remove: async () => {} },
-    { render: plainStatus, throttleMs: 1, keepOnFinish: true });
-  status.panels({ scope: "bg", panels });
+    { render: plainStatus, throttleMs: 1 });
+  const run = status.attach("Workflow abc", "run-stop");
+  run.panels({ scope: "bg", panels });
+  await run.finish("completed");
   await status.finish("completed");
   assert.equal((status as unknown as { ticker?: NodeJS.Timeout }).ticker, undefined);
 });

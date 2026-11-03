@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { obj, str } from "@earendil-works/pi-schema";
 import { createProseBlocks, followProse } from "../src/agent/runner.ts";
 
 /** Drives the accumulator the way the session's event stream does. */
@@ -118,7 +118,7 @@ test("a Pi-native model's narration goes out when it is written, not with the an
     name: "work",
     label: "work",
     description: "does the work",
-    parameters: Type.Object({}),
+    parameters: obj({}),
     execute: async () => {
       timeline.push("tool ran");
       return { content: [{ type: "text", text: "done" }], details: undefined };

@@ -1,19 +1,22 @@
-import { Type } from "typebox";
+import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 
-const parameters = Type.Object({
-  text: Type.String({ description: "Markdown text shown above the buttons" }),
-  buttons: Type.Array(
-    Type.Array(
-      Type.Object({
-        label: Type.String(),
-        url: Type.Optional(Type.String()),
-        data: Type.Optional(Type.String({ description: "sent back to you as text when pressed (defaults to the label)" })),
-      }),
+// Extra arguments a model adds are ignored, not refused.
+const OPEN = { open: true };
+
+const parameters = obj({
+  text: str({ description: "Markdown text shown above the buttons" }),
+  buttons: arr(
+    arr(
+      obj({
+        label: str(),
+        url: opt(str()),
+        data: opt(str({ description: "sent back to you as text when pressed (defaults to the label)" })),
+      }, OPEN),
     ),
     { description: "Button rows" },
   ),
-});
+}, OPEN);
 
 /**
  * The channel tool a dashboard turn gets: a message with buttons to click. The

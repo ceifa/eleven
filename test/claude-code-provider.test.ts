@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Type } from "typebox";
+import { obj, str } from "@earendil-works/pi-schema";
 import { normalizeContext, type AssistantMessage, type Context, type Message, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -252,7 +252,7 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("hello")], tools: [] };
     // An empty context.tools means a truly tool-less internal request. Main
     // agent turns carry their active tools, so include Read here.
-    context.tools = [{ name: "read", description: "read", parameters: Type.Object({}) }];
+    context.tools = [{ name: "read", description: "read", parameters: obj({}) }];
     const events = [];
     for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId, reasoning: "high" })) {
       events.push(event);
@@ -397,7 +397,7 @@ test("Claude turns fork deterministically from the last committed transcript pre
     const context: Context = {
       systemPrompt: "eleven prompt",
       messages: nextInput,
-      tools: [{ name: "read", description: "read", parameters: Type.Object({}) }],
+      tools: [{ name: "read", description: "read", parameters: obj({}) }],
     };
     for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 
@@ -415,7 +415,7 @@ test("a prompt or tool change mid-conversation reaches the child without breakin
     name: "telegram",
     label: "Telegram",
     description: "send to Telegram",
-    parameters: Type.Object({ text: Type.String() }),
+    parameters: obj({ text: str() }),
     execute: async () => ({ content: [{ type: "text", text: "sent" }], details: undefined }),
   } as never;
   const firstInput = [user("one")];
@@ -432,7 +432,7 @@ test("a prompt or tool change mid-conversation reaches the child without breakin
       role: "system" as const,
       content: "",
       sections: { skills: "<skills>new</skills>" },
-      toolsAdded: [{ name: "telegram", description: "send", parameters: Type.Object({ text: Type.String() }) }],
+      toolsAdded: [{ name: "telegram", description: "send", parameters: obj({ text: str() }) }],
       timestamp: 2,
     };
     const context = { ...opening, messages: [...opening.messages, ...firstInput, assistant("answer one"), update, user("two")] };
@@ -527,8 +527,8 @@ test("workflow subagents inherit only native read tools from the owner runtime",
       systemPrompt: "workflow subagent",
       messages: [user("research")],
       tools: [
-        { name: "read", description: "read", parameters: Type.Object({}) },
-        { name: "structured_output", description: "output", parameters: Type.Object({}) },
+        { name: "read", description: "read", parameters: obj({}) },
+        { name: "structured_output", description: "output", parameters: obj({}) },
       ],
     };
     await runWithClaudeSession(ownerId, async () => {
@@ -548,7 +548,7 @@ test("invalid MCP tool setup terminates the provider stream with an error", asyn
     name: "bad tool",
     label: "Bad",
     description: "invalid name",
-    parameters: Type.Object({}),
+    parameters: obj({}),
     execute: async () => ({ content: [], details: undefined }),
   } as never;
   registerClaudeSession(piSessionId, { cwd: "/tmp", customTools: [invalid] });
@@ -561,7 +561,7 @@ test("invalid MCP tool setup terminates the provider stream with an error", asyn
     const context: Context = {
       systemPrompt: "eleven prompt",
       messages: [user("hello")],
-      tools: [{ name: "bad tool", description: "bad", parameters: Type.Object({}) }],
+      tools: [{ name: "bad tool", description: "bad", parameters: obj({}) }],
     };
     const events = [];
     for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) events.push(event);
@@ -578,7 +578,7 @@ test("only active Eleven custom tools are exposed through the Eleven MCP namespa
     name: "telegram",
     label: "Telegram",
     description: "send to Telegram",
-    parameters: Type.Object({ text: Type.String() }),
+    parameters: obj({ text: str() }),
     execute: async () => ({ content: [{ type: "text", text: "sent" }], details: undefined }),
   } as never;
   let captured: { options: Record<string, unknown> } | undefined;
@@ -592,7 +592,7 @@ test("only active Eleven custom tools are exposed through the Eleven MCP namespa
     const context: Context = {
       systemPrompt: "eleven prompt",
       messages: [user("send it")],
-      tools: [{ name: "telegram", description: "send", parameters: Type.Object({ text: Type.String() }) }],
+      tools: [{ name: "telegram", description: "send", parameters: obj({ text: str() }) }],
     };
     for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: piSessionId })) { /* drain */ }
 

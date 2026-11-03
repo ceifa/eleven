@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -7,6 +8,8 @@ import { MEDIA_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
 
 const log = logger("media-store");
+
+const SCAN_CHUNK_BYTES = 256 * 1024;
 
 /**
  * Persist an inbound attachment and return its absolute path. The path goes
@@ -50,20 +53,46 @@ export async function sweepMedia(retentionMs: number): Promise<number> {
  * in the session JSONL — so scanning the transcript is the reverse index.
  */
 export async function deleteReferencedMedia(sessionFile: string): Promise<number> {
-  let raw: string;
+  let files: Set<string>;
   try {
-    raw = await readFile(sessionFile, "utf8");
+    files = await referencedMedia(sessionFile);
   } catch {
     return 0; // no session file — nothing referenced
   }
-  // Stored names are shell-safe (uuid prefix + safeFilename), so they never
-  // contain JSON escapes and a plain text match finds every reference.
-  const dir = MEDIA_DIR.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const files = new Set(raw.match(new RegExp(`${dir}/[\\w.-]+`, "g")) ?? []);
   const results = await Promise.allSettled([...files].map((file) => rm(file, { force: true })));
   const removed = results.filter((r) => r.status === "fulfilled").length;
   if (removed) log.info(`removed ${removed} media file(s) of deleted session`);
   return removed;
+}
+
+/** A transcript can run to hundreds of megabytes of screenshots, so it is
+ * scanned in chunks that overlap by more than any stored path is long. */
+async function referencedMedia(sessionFile: string): Promise<Set<string>> {
+  // Stored names are shell-safe (uuid prefix + safeFilename), so they never
+  // contain JSON escapes and a plain text match finds every reference.
+  const dir = MEDIA_DIR.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`${dir}/[\\w.-]+`, "g");
+  const overlap = MEDIA_DIR.length + 128;
+  const files = new Set<string>();
+  const handle = await open(sessionFile, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+    const decoder = new StringDecoder("utf8");
+    let text = "";
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, SCAN_CHUNK_BYTES);
+      text += bytesRead ? decoder.write(buffer.subarray(0, bytesRead)) : decoder.end();
+      for (const match of text.matchAll(pattern)) {
+        // One running into the chunk's end may go on; the overlap reads it again whole.
+        if (bytesRead && match.index + match[0].length === text.length) continue;
+        files.add(match[0]);
+      }
+      if (!bytesRead) return files;
+      text = text.slice(-overlap);
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 function safeFilename(filename: string): string {

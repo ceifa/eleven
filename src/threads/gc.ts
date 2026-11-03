@@ -1,13 +1,30 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { REQUESTS_DIR, THREADS_DIR } from "../paths.ts";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { requestLogFile } from "./request-log.ts";
 import type { ThreadStore } from "./store.ts";
 import { cleanupClaudeGarbage, cleanupClaudeSessions } from "../agent/claude-code.ts";
 import { logger } from "../log.ts";
+import { readFileSlice } from "../util.ts";
 
 const log = logger("threads/gc");
+
+/** Room for a session header line; the transcript after it can run to hundreds of megabytes. */
+const HEADER_BYTES = 64 * 1024;
+
+/** The pi session id a transcript belongs to, from its header line alone, or
+ * from the file name pi gives it when the header is unreadable. */
+export async function sessionIdOf(sessionFile: string): Promise<string | undefined> {
+  try {
+    const head = await readFileSlice(sessionFile, 0, HEADER_BYTES);
+    const newline = head.indexOf(0x0a);
+    const header = JSON.parse(head.toString("utf8", 0, newline === -1 ? head.length : newline)) as { type?: unknown; id?: unknown };
+    if (header.type === "session" && typeof header.id === "string") return header.id;
+  } catch {
+    // fall back to the file name
+  }
+  return sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
+}
 
 /**
  * Delete thread files older than the retention window: prune the index, then
@@ -19,13 +36,9 @@ const log = logger("threads/gc");
 export async function collectGarbage(threads: ThreadStore, retentionMs: number, idleMs: number): Promise<number> {
   await cleanupClaudeGarbage();
   const pruned = threads.prune(retentionMs, idleMs);
-  await Promise.allSettled(pruned.flatMap((thread) => {
-    if (!thread.sessionFile) return [];
-    let sessionId: string | undefined;
-    try { sessionId = SessionManager.open(thread.sessionFile).getSessionId(); } catch {
-      sessionId = thread.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
-    }
-    return sessionId ? [cleanupClaudeSessions(sessionId)] : [];
+  await Promise.allSettled(pruned.map(async (thread) => {
+    const sessionId = thread.sessionFile && await sessionIdOf(thread.sessionFile);
+    if (sessionId) await cleanupClaudeSessions(sessionId);
   }));
   const cutoff = Date.now() - retentionMs;
   const keep = new Set<string>();

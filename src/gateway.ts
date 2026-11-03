@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { isChannelSessionKey, type ConfigStore, type ModelEntry, type ModelScope, type WorkspaceConfig } from "./config.ts";
 import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult, type TurnRewind } from "./agent/runner.ts";
 import { findModel } from "./agent/pi.ts";
@@ -9,7 +9,7 @@ import type { RuntimeContext } from "./agent/system-prompt.ts";
 import { ThreadStore, type ThreadEntry } from "./threads/store.ts";
 import { RequestLog } from "./threads/request-log.ts";
 import { PendingTurns } from "./threads/pending.ts";
-import { collectGarbage } from "./threads/gc.ts";
+import { collectGarbage, sessionIdOf } from "./threads/gc.ts";
 import { retitle } from "./threads/title.ts";
 import { deleteReferencedMedia, sweepMedia } from "./media-store.ts";
 import { rm } from "node:fs/promises";
@@ -313,10 +313,7 @@ export class Gateway extends EventEmitter {
     await this.runner.discard(id);
     if (thread.sessionFile) {
       await deleteReferencedMedia(thread.sessionFile);
-      let sessionId: string | undefined;
-      try { sessionId = SessionManager.open(thread.sessionFile).getSessionId(); } catch {
-        sessionId = thread.sessionFile.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
-      }
+      const sessionId = await sessionIdOf(thread.sessionFile);
       if (sessionId) await cleanupClaudeSessions(sessionId);
       await rm(thread.sessionFile, { force: true });
     }

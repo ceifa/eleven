@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, rename, rm, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { REQUESTS_DIR } from "../paths.ts";
@@ -18,6 +18,11 @@ export interface ProviderRequestMeta {
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_INDEXED_THREADS = 64;
 const NEWLINE = Buffer.from("\n");
+const CLOSING_BRACE = 0x7d;
+const CHUNK_BYTES = 256 * 1024;
+/** record() writes the meta ahead of the payload, so this much of a line holds it. */
+const META_BYTES = 1024;
+const META = /^\{"id":("(?:[^"\\]|\\.)*"),"at":(\d+),"model":("(?:[^"\\]|\\.)*")/;
 
 /** Where a thread's provider-request log lives (gc deletes these with the thread). */
 export function requestLogFile(threadId: string): string {
@@ -105,24 +110,14 @@ export class RequestLog {
   private async load(threadId: string): Promise<ThreadIndex> {
     const cached = lruTouch(this.index, threadId);
     if (cached) return cached;
-    const index: ThreadIndex = { entries: [], bytes: 0 };
+    let index: ThreadIndex = { entries: [], bytes: 0 };
     try {
-      const raw = await readFile(requestLogFile(threadId));
-      let start = 0;
-      while (start < raw.length) {
-        let end = raw.indexOf(0x0a, start);
-        if (end === -1) end = raw.length;
-        if (end > start) {
-          try {
-            const { id, at, model } = JSON.parse(raw.toString("utf8", start, end)) as ProviderRequestMeta;
-            index.entries.push({ id, at, model, bytes: end - start, offset: start });
-          } catch {
-            // skip malformed lines
-          }
-        }
-        start = end + 1;
+      const handle = await open(requestLogFile(threadId), "r");
+      try {
+        index = await indexLines(handle);
+      } finally {
+        await handle.close();
       }
-      index.bytes = raw.length;
     } catch {
       // no file yet
     }
@@ -141,21 +136,77 @@ export class RequestLog {
     const keep = index.entries.slice(Math.floor(index.entries.length / 2));
     if (keep.length === index.entries.length) return; // nothing to drop
     const file = requestLogFile(threadId);
+    // Still .jsonl, so gc sweeps one a crash left behind.
+    const packed = file.replace(/\.jsonl$/, ".trim.jsonl");
     // Copy each kept entry by its own offset and re-pack contiguously. A raw
     // tail slice would preserve any junk between lines (e.g. a crash-truncated
     // partial line load() skipped) while the recomputed offsets assume none,
-    // drifting get() reads out of alignment.
-    const raw = await readFile(file);
-    const parts: Buffer[] = [];
+    // drifting get() reads out of alignment. Copied through a fixed buffer: the
+    // kept entries can be far larger than the file cap.
+    const source = await open(file, "r");
+    const target = await open(packed, "w");
+    const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
     let offset = 0;
-    const repacked = keep.map((entry) => {
-      parts.push(raw.subarray(entry.offset, entry.offset + entry.bytes), NEWLINE);
-      const moved = { ...entry, offset };
-      offset += entry.bytes + 1;
-      return moved;
-    });
-    await writeFile(file, Buffer.concat(parts));
+    const repacked: IndexedMeta[] = [];
+    try {
+      for (const entry of keep) {
+        for (let copied = 0; copied < entry.bytes;) {
+          const { bytesRead } = await source.read(chunk, 0, Math.min(CHUNK_BYTES, entry.bytes - copied), entry.offset + copied);
+          if (!bytesRead) throw new Error(`${file} shrank while trimming`);
+          await target.write(chunk, 0, bytesRead);
+          copied += bytesRead;
+        }
+        await target.write(NEWLINE);
+        repacked.push({ ...entry, offset });
+        offset += entry.bytes + 1;
+      }
+    } finally {
+      await Promise.all([source.close(), target.close()]);
+    }
+    await rename(packed, file);
     index.entries = repacked;
     index.bytes = offset;
   }
+}
+
+/** A payload can run to tens of megabytes, so the log is streamed and each
+ * line is read only as far as the meta record() writes ahead of it. */
+async function indexLines(handle: FileHandle): Promise<ThreadIndex> {
+  const index: ThreadIndex = { entries: [], bytes: 0 };
+  // A line cut short by a crash ends anywhere but the payload's closing brace.
+  const addLine = (head: Buffer, offset: number, bytes: number, last: number | undefined) => {
+    const meta = last === CLOSING_BRACE && META.exec(head.toString("utf8"));
+    // skip malformed lines
+    if (meta) index.entries.push({ id: JSON.parse(meta[1]), at: Number(meta[2]), model: JSON.parse(meta[3]), bytes, offset });
+  };
+  const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+  let lineStart = 0;
+  let head = Buffer.alloc(0);
+  let last: number | undefined;
+  for (;;) {
+    const { bytesRead } = await handle.read(chunk, 0, CHUNK_BYTES, index.bytes);
+    if (!bytesRead) break;
+    const raw = chunk.subarray(0, bytesRead);
+    let from = 0;
+    for (;;) {
+      const newline = raw.indexOf(0x0a, from);
+      const end = newline === -1 ? raw.length : newline;
+      if (head.length < META_BYTES) {
+        const piece = raw.subarray(from, Math.min(end, from + META_BYTES - head.length));
+        head = head.length ? Buffer.concat([head, piece]) : piece;
+      }
+      if (newline === -1) break;
+      const lineEnd = index.bytes + newline;
+      if (lineEnd > lineStart) addLine(head, lineStart, lineEnd - lineStart, newline ? raw[newline - 1] : last);
+      lineStart = lineEnd + 1;
+      head = Buffer.alloc(0);
+      from = newline + 1;
+    }
+    // `chunk` is reused by the next read; a head spanning reads needs its own copy.
+    head = Buffer.from(head);
+    last = raw[bytesRead - 1];
+    index.bytes += bytesRead;
+  }
+  if (index.bytes > lineStart) addLine(head, lineStart, index.bytes - lineStart, last);
+  return index;
 }

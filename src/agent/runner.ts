@@ -33,6 +33,7 @@ import {
   unregisterClaudeSession,
 } from "./claude-code.ts";
 import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
+import { dateContextMessage } from "./turn-context.ts";
 import {
   TOOL_CALLS_ENTRY_TYPE,
   TURN_ERROR_ENTRY_TYPE,
@@ -833,6 +834,7 @@ export class Runner {
       extensionFactories: [{
         name: "eleven-runtime",
         factory: (pi: ExtensionAPI) => {
+          pi.on("before_agent_start", () => ({ message: dateContextMessage(session.messages) }));
           pi.on("context", (event) => ({ messages: boundRuntimeResults(withToolResults(event.messages)) }));
           pi.on("session_before_compact", (event) =>
             handoff.current ? { compaction: handoffCompaction(event.preparation, handoff.current, sessionManager.getSessionFile()) } : undefined);

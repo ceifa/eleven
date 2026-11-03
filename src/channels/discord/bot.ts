@@ -24,6 +24,7 @@ import { keyedLane, lruTouch } from "../../util.ts";
 import { capped } from "../avatars.ts";
 import type { BotDeps } from "../bots.ts";
 import type { ChannelDestination, CreatedConversation, ReplyOptions } from "../index.ts";
+import { BackgroundStatuses, BACKGROUND_STOP_PREFIX } from "../background.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
@@ -79,7 +80,7 @@ export interface BotHandle {
   username?: string;
   connected(): boolean;
   /** Re-prompt a conversation (by session key) that a restart interrupted. */
-  wake(sessionKey: string): Promise<void>;
+  wake(sessionKey: string, text?: string, threadId?: string): Promise<void>;
   /** Drop a conversation's buffered input before it becomes a turn. */
   discardBurst(sessionKey: string): boolean;
   /** Deliver literal text to a conversation, by session key. */
@@ -158,6 +159,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   // transcription); turns run outside it, so a message landing mid-turn still
   // reaches the runner and steers.
   const lanes = new Map<string, Promise<unknown>>();
+  const background = new BackgroundStatuses();
   const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
   const alreadyHandled = createSeenMessages();
   const archiveTimer = setInterval(() => void flushArchives(), 60_000);
@@ -519,6 +521,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
 
     if (interaction.type === InteractionType.MessageComponent) {
       const data = interaction.data.custom_id;
+      if (data.startsWith(BACKGROUND_STOP_PREFIX)) {
+        await respond({ type: InteractionResponseType.DeferredMessageUpdate });
+        background.stop(sessionKeyFor(target), data);
+        return;
+      }
       if (data === STOP_BUTTON_ID) {
         // The card redraws itself as stopped once the turn winds down; the
         // press only needs acknowledging.
@@ -574,7 +581,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
 
   /** `retry` is set by a manual failover: its own model plan for this turn
    * alone, and the failed attempt a restart branches away first. */
-  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry) {
+  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry, expectedThreadId?: string) {
     const sessionKey = sessionKeyFor(target);
     const { channelId } = target;
     const { tool, sent } = toolFor(sessionKey, channelId);
@@ -595,6 +602,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       retry,
       replyTo: target.triggerMessageId,
       incoming: {
+        expectedThreadId,
+        createBackground: (options) => background.create(sessionKey, options, (stopId) =>
+          new DiscordTurnStatus(rest, channelId, target.triggerMessageId, { title: options.title, stopId })),
         workspaceHint: deps.workspace(),
         // Most specific first: a thread's model settings beat its channel's,
         // which beat its category's and its server's.
@@ -730,15 +740,13 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     return channel.id;
   }
 
-  /** Resume a conversation a restart cut off. */
-  async function wake(sessionKey: string) {
-    const target = await targetOf(sessionKey).catch((error) => (log.warn(`cannot wake ${sessionKey}: ${error}`), undefined));
-    if (!target) {
-      log.warn(`cannot wake ${sessionKey}: unrecognized session key`);
-      return;
-    }
-    log.info(`waking interrupted turn in ${sessionKey}`);
-    await runTurn(target, WAKE_PROMPT, []);
+  /** Start a turn nobody typed. By default it resumes a conversation a restart
+   * cut off. */
+  async function wake(sessionKey: string, text = WAKE_PROMPT, threadId?: string) {
+    const target = await targetOf(sessionKey);
+    if (!target) throw new Error(`cannot wake ${sessionKey}: unrecognized session key`);
+    log.info(`waking ${sessionKey}`);
+    await runTurn(target, text, [], undefined, threadId);
   }
 
   async function send(sessionKey: string, markdown: string, options?: ReplyOptions) {

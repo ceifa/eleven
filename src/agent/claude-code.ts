@@ -39,6 +39,7 @@ import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
 import { readToolPanels, type PanelUpdate } from "./panels.ts";
+import { nestedDirectory } from "./host-api.ts";
 
 const log = logger("claude-code");
 
@@ -502,10 +503,20 @@ export function nativeToolsForPolicy(policy: WorkspaceTool[] | undefined, exclud
   return exclude.length ? enabled.filter((name) => !exclude.includes(name)) : [...enabled];
 }
 
-function nativeToolsForNestedContext(toolNames: string[]): string[] {
-  return toolNames.some((name) => ["read", "grep", "find", "ls"].includes(name))
-    ? ["Read", "Glob", "Grep"]
-    : [];
+/** Pi's tools, as the natives a nested session gets for them. */
+const PI_TO_NATIVE: Record<string, readonly string[]> = {
+  read: ["Read", "Glob", "Grep"],
+  grep: ["Read", "Glob", "Grep"],
+  find: ["Read", "Glob", "Grep"],
+  ls: ["Read", "Glob", "Grep"],
+  edit: ["Edit"],
+  write: ["Write"],
+  bash: ["Bash"],
+};
+
+export function nativeToolsForNestedContext(toolNames: string[], granted: readonly string[]): string[] {
+  const wanted = new Set(toolNames.flatMap((name) => PI_TO_NATIVE[name] ?? []));
+  return granted.filter((name) => wanted.has(name));
 }
 
 /** A deterministic UUID for one transactional Claude attempt. Each successful
@@ -641,6 +652,9 @@ async function consumeClaudeQuery(
   // AgentSession call stack. It must not inherit tools or mutate the durable
   // conversational Claude lineage.
   const isolated = requestSessionId !== ownerSessionId;
+  // A nested session may work in a directory of its own (a subagent's git
+  // worktree); the conversation itself always runs in the workspace.
+  const cwd = (isolated && nestedDirectory()) || registration.cwd;
   const abortController = new AbortController();
   /**
    * Stop the turn. Killing the transport outright is what eleven used to do,
@@ -724,7 +738,7 @@ async function consumeClaudeQuery(
     if (attemptId === baseId) attemptId = randomUUID();
     if (!recovering) {
       try {
-        await deps.deleteSession(attemptId, { dir: registration.cwd });
+        await deps.deleteSession(attemptId, { dir: cwd });
       } catch {
         // Never append into a stale deterministic fork whose deletion failed.
         attemptId = randomUUID();
@@ -749,16 +763,15 @@ async function consumeClaudeQuery(
     const activeCustomNames = new Set(toolNames);
     const customTools = isolated ? [] : registration.customTools.filter((tool) => activeCustomNames.has(tool.name));
     // Standalone calls are either Pi compaction (no tools) or sessions an
-    // extension spawned inside a tool call, which get the native read tools
-    // when they declared pi's. They share the owner's cwd through
-    // AsyncLocalStorage but never its side-effectful MCP tools or session state.
-    const nativeTools = isolated
-      ? nativeToolsForNestedContext(toolNames)
-      : nativeToolsForPolicy(registration.workspaceTools, registration.excludeNativeTools);
+    // extension spawned inside a tool call, which get the natives matching the
+    // pi tools they declared, within what the workspace grants. They never get
+    // the owner's side-effectful MCP tools or session state.
+    const granted = nativeToolsForPolicy(registration.workspaceTools, registration.excludeNativeTools);
+    const nativeTools = isolated ? nativeToolsForNestedContext(toolNames, granted) : granted;
     const mcpServer = buildMcpServer(customTools, ownerSessionId, markTool);
     const qualifiedTools = mcpToolNames(customTools);
     const shape: ClaudeRequestShape = {
-      cwd: registration.cwd, model: model.id, systemPrompt, nativeTools, customTools,
+      cwd, model: model.id, systemPrompt, nativeTools, customTools,
       reasoning: options?.reasoning, compactAt: isolated ? undefined : registration.compactAt,
     };
     // When the request now being written was sent, as near as the stream shows:
@@ -808,7 +821,7 @@ async function consumeClaudeQuery(
     const logicalPayload = {
       runtime: "claude-code",
       model: model.id,
-      cwd: registration.cwd,
+      cwd,
       resume: baseId,
       sessionId: attemptId,
       tools: nativeTools,
@@ -1029,7 +1042,7 @@ async function consumeClaudeQuery(
     if (live && registration.live === live) registration.live = undefined;
     options?.signal?.removeEventListener("abort", onAbort);
     try { sdk?.close(); } catch { /* already closed */ }
-    if (isolated && attemptId) await deps.deleteSession(attemptId, { dir: registration.cwd }).catch(() => {});
+    if (isolated && attemptId) await deps.deleteSession(attemptId, { dir: cwd }).catch(() => {});
   }
 }
 function buildMcpServer(

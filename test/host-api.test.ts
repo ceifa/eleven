@@ -1,6 +1,6 @@
 import { deepStrictEqual, strictEqual } from "node:assert/strict";
 import { describe, test } from "node:test";
-import { runWithPanelSink } from "../src/agent/host-api.ts";
+import { nestedDirectory, runInTurn } from "../src/agent/host-api.ts";
 import type { PanelUpdate } from "../src/agent/panels.ts";
 
 /* The gap this closes: a pi extension can only speak from inside a tool's
@@ -13,14 +13,14 @@ const plan = [{ title: "Plan", rows: [{ text: "carried over", state: "idle" }] }
 
 const collect = (run: () => void) => {
   const seen: PanelUpdate[] = [];
-  runWithPanelSink((update) => seen.push(update), run);
+  runInTurn({ panels: (update) => seen.push(update) }, run);
   return seen;
 };
 
 describe("the eleven host handshake", () => {
   test("is on globalThis, versioned so an extension can feature-detect", () => {
     strictEqual(typeof host().panels, "function");
-    strictEqual(host().version, 2);
+    strictEqual(host().version, 4);
   });
 
   test("publishes into the turn that owns the call stack", () => {
@@ -32,8 +32,8 @@ describe("the eleven host handshake", () => {
     // The sink has to survive an await: an extension handler is deep inside pi's
     // own async agent loop by the time it runs.
     const seen: PanelUpdate[] = [];
-    await runWithPanelSink(
-      (update) => seen.push(update),
+    await runInTurn(
+      { panels: (update) => seen.push(update) },
       async () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
         host().panels(plan, { scope: "s" });
@@ -61,8 +61,46 @@ describe("the eleven host handshake", () => {
   });
 
   test("a sink that throws does not take the caller down with it", () => {
-    runWithPanelSink(() => { throw new Error("channel is broken"); }, () => {
+    runInTurn({ panels: () => { throw new Error("channel is broken"); } }, () => {
       strictEqual(host().panels(plan, { scope: "s" }), false);
+    });
+  });
+
+  test("hands background work the conversation its turn belongs to, past the turn's end", async () => {
+    const woken: string[] = [];
+    const conversation = runInTurn({ panels: () => {}, wake: async (text) => { woken.push(text); } }, () => host().conversation());
+    // The turn is over; the handle still reaches its conversation.
+    strictEqual(await conversation!.wake("  workflow done  "), true);
+    strictEqual(await conversation!.wake("   "), false);
+    deepStrictEqual(woken, ["workflow done"]);
+  });
+
+  test("holds the conversation's runtime until the background work wakes it", async () => {
+    let held = 0;
+    const conversation = runInTurn(
+      { panels: () => {}, wake: async () => {}, hold: () => (held++, () => { held--; }) },
+      () => host().conversation(),
+    );
+    strictEqual(held, 1);
+    await conversation!.wake("done");
+    strictEqual(held, 0);
+  });
+
+  test("has no conversation to offer outside a turn, or when the turn cannot be woken", () => {
+    strictEqual(host().conversation(), undefined);
+    strictEqual(runInTurn({ panels: () => {} }, () => host().conversation()), undefined);
+  });
+
+  test("a failed wake resolves false instead of throwing into the extension", async () => {
+    const conversation = runInTurn({ panels: () => {}, wake: async () => { throw new Error("thread moved on"); } }, () => host().conversation());
+    strictEqual(await conversation!.wake("done"), false);
+  });
+
+  test("carries a directory to the sessions spawned under it, across awaits", async () => {
+    strictEqual(nestedDirectory(), undefined);
+    await host().inDirectory("/tmp/wt/../wt", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      strictEqual(nestedDirectory(), "/tmp/wt");
     });
   });
 });

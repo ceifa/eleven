@@ -218,7 +218,7 @@ test("a turn that produces no event at all still reports that it is working", as
 
 test("a provider retry is announced live and kept after the turn", async () => {
   const { calls, api } = fakeApi();
-  const progress = new TelegramTurnStatus(api, 5);
+  const progress = new TelegramTurnStatus(api, 6);
   progress.retry({ attempt: 1, maxAttempts: 3, errorMessage: "API Error: 529 Overloaded" });
   await new Promise((resolve) => setTimeout(resolve, 300));
   await progress.finish("completed");

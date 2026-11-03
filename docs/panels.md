@@ -94,8 +94,15 @@ anything on `turn_start`, for example. eleven exposes a handshake for that:
 
 ```ts
 interface ElevenHost {
-  version: 2;
+  version: 4;
   panels(panels: unknown, options?: { scope?: string }): boolean;
+  conversation(options?: { title?: string }): {
+    signal: AbortSignal;
+    progress(panels: unknown): boolean;
+    finish(outcome: "completed" | "failed" | "stopped"): Promise<void>;
+    wake(text: string): Promise<boolean>;
+  } | undefined;
+  inDirectory<T>(cwd: string, operation: () => T): T;
 }
 
 globalThis.eleven?.panels(panels, { scope: "tasks" });
@@ -108,6 +115,21 @@ plain pi, so the same extension file runs with or without eleven.
 The handshake lives on `globalThis` because pi loads workspace extensions
 itself, and a file in a workspace directory has no import path back to the
 eleven hosting it. Check `version` before calling.
+
+`conversation()` holds the originating session alive until `finish` or `wake`.
+It is available only in Telegram and Discord, where eleven can deliver a later
+result without a new user message. Dashboard, CLI and cron callers finish
+inside their tool call instead.
+
+Background work belongs to its session. `/new` aborts every handle's signal;
+finishing an ordinary turn does not. `progress` draws a separate status message
+whose Stop button aborts only that handle. Call `finish` after the workers wind
+down, even after failure, then `wake(text)` to report the result. A session reset
+also revokes delivery already on its way to the channel, so an old result cannot
+enter the new session. An undeliverable wake resolves `false`.
+
+`inDirectory(cwd, fn)` carries a subagent's worktree directory to runtimes eleven
+bridges; pi's own tools already take a directory.
 
 It gives an extension no new permissions. The extension already runs
 in-process with whatever tools the workspace granted. eleven validates its

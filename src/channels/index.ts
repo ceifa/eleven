@@ -59,6 +59,9 @@ export interface Channel {
   discardPending(sessionKey: string): boolean;
   /** Re-prompt conversations a restart interrupted. */
   wakeInterrupted(turns: { sessionKey: string }[]): void;
+  /** Start a turn in the conversation carrying `text`, as if it had arrived
+   *  there — steered into the turn already running, if one is. */
+  wake(sessionKey: string, text: string, threadId?: string): Promise<void>;
   /** The picture the platform draws for a conversation it knows. */
   avatar(sessionKey: string): Promise<Avatar | undefined>;
   /** Tell an approved requester they're in. */
@@ -131,6 +134,12 @@ export class Channels {
 
   discardPending(sessionKey: string): boolean {
     return this.owner(sessionKey)?.discardPending(sessionKey) ?? false;
+  }
+
+  async wake(sessionKey: string, text: string, threadId?: string): Promise<void> {
+    const owner = this.owner(sessionKey);
+    if (!owner) throw new Error(`no channel owns ${sessionKey}`);
+    await owner.wake(sessionKey, text, threadId);
   }
 
   wakeInterrupted(turns: { sessionKey: string }[]): void {

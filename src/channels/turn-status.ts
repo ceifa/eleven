@@ -1,4 +1,5 @@
 import { PanelBoard, type Panel, type PanelRow, type PanelRowState, type PanelUpdate } from "../agent/panels.ts";
+import { keyedLane } from "../util.ts";
 import { logger } from "../log.ts";
 
 const log = logger("status");
@@ -21,6 +22,7 @@ const MAX_TEXT = 4_000;
  * is per chat, not per turn: two turns running in the same group each kept their
  * own cadence, doubled the rate, and tripped it. One budget, shared. */
 const lastEditAt = new Map<string, number>();
+const editLanes = new Map<string, Promise<unknown>>();
 
 export type TurnOutcome = "completed" | "failed" | "stopped";
 
@@ -45,6 +47,7 @@ export interface StatusView {
   outcome?: TurnOutcome;
   running?: RunningStatus;
   retry?: RetryStatus;
+  elapsedMs?: number;
 }
 
 /** The one message a status card lives in, as a channel posts, edits and
@@ -68,6 +71,7 @@ export interface TurnStatusOptions<R> {
   toolRenderDelayMs?: number;
   /** Hold-off before an event-less turn reports that it is working. */
   idleRenderDelayMs?: number;
+  keepOnFinish?: boolean;
 }
 
 /** One quiet, editable message for a turn's panels, the top-level tool
@@ -96,6 +100,7 @@ export class TurnStatus<R = string> {
   private readonly rateKey: string | undefined;
   private readonly toolRenderDelayMs: number;
   private readonly idleRenderDelayMs: number;
+  private readonly keepOnFinish: boolean;
 
   constructor(surface: StatusSurface<R>, options: TurnStatusOptions<R>) {
     this.surface = surface;
@@ -104,6 +109,7 @@ export class TurnStatus<R = string> {
     this.rateKey = options.rateKey;
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
     this.idleRenderDelayMs = options.idleRenderDelayMs ?? IDLE_FIRST_RENDER_DELAY_MS;
+    this.keepOnFinish = options.keepOnFinish ?? false;
   }
 
   /** The turn began. Arms the bare "working" header for a turn that produces no
@@ -168,7 +174,7 @@ export class TurnStatus<R = string> {
 
   /** Panels and retries outlive the turn; bare tool status does not. */
   private get worthKeeping(): boolean {
-    return this.board.changed || !!this.currentRetry;
+    return this.keepOnFinish || this.board.changed || !!this.currentRetry;
   }
 
   private stopTimers(): void {
@@ -210,7 +216,7 @@ export class TurnStatus<R = string> {
     const running = this.outcome
       ? undefined
       : { tool: this.currentTool, elapsedMs: Date.now() - this.startedAt };
-    const card = this.render({ panels: this.board.panels, outcome: this.outcome, running, retry: this.currentRetry });
+    const card = this.render({ panels: this.board.panels, outcome: this.outcome, running, retry: this.currentRetry, elapsedMs: Date.now() - this.startedAt });
     const key = typeof card === "string" ? card : JSON.stringify(card);
     if (card === undefined || key === this.lastKey || key === this.pending?.key || this.dead) return this.draining ?? Promise.resolve();
     this.pending = { card, key }; // latest wins while the chat is slow
@@ -223,19 +229,21 @@ export class TurnStatus<R = string> {
   private async drain(): Promise<void> {
     try {
       while (this.pending && !this.dead) {
-        const { card, key } = this.pending;
-        this.pending = undefined;
-        // Wait out whichever came last: this card's own edit or another turn's
-        // in the same group.
-        const floor = Math.max(this.lastSentAt, (this.rateKey && lastEditAt.get(this.rateKey)) || 0);
-        const wait = floor ? Math.max(0, floor + this.throttleMs - Date.now()) : 0;
-        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
-        if (this.dead) return;
-        if (!this.posted) await this.post(card);
-        else await this.surface.edit(card);
-        this.lastKey = key;
-        this.lastSentAt = Date.now();
-        if (this.rateKey) lastEditAt.set(this.rateKey, this.lastSentAt);
+        const write = async () => {
+          const floor = Math.max(this.lastSentAt, (this.rateKey && lastEditAt.get(this.rateKey)) || 0);
+          const wait = floor ? Math.max(0, floor + this.throttleMs - Date.now()) : 0;
+          if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+          if (this.dead || !this.pending) return;
+          const { card, key } = this.pending;
+          this.pending = undefined;
+          if (!this.posted) await this.post(card);
+          else await this.surface.edit(card);
+          this.lastKey = key;
+          this.lastSentAt = Date.now();
+          if (this.rateKey) lastEditAt.set(this.rateKey, this.lastSentAt);
+        };
+        if (this.rateKey) await keyedLane(editLanes, this.rateKey, write);
+        else await write();
       }
     } catch (error) {
       this.dead = true;
@@ -248,6 +256,7 @@ export class TurnStatus<R = string> {
   private async post(card: R): Promise<void> {
     await this.surface.post(card);
     this.posted = true;
+    if (this.dead || this.outcome) return;
     // From here on the running header shows elapsed time — keep it honest
     // between events. queueRender directly: the tick always exceeds the
     // throttle, which drain() enforces anyway.
@@ -285,7 +294,11 @@ export function renderTurnStatus(
   // A bare running header is the whole point of an event-less turn: it says the
   // message arrived. Only a call with nothing at all to report renders empty.
   if (!panels.length) return outcome || running || retry ? head : "";
-  const text = [head, ...panels.map((panel) => renderPanel(panel))].join("\n\n");
+  return renderStatusText(head, panels);
+}
+
+export function renderStatusText(header: string, panels: readonly Panel[]): string {
+  const text = [header, ...panels.map((panel) => renderPanel(panel))].join("\n\n");
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}…`;
 }
 

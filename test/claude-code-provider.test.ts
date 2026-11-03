@@ -10,6 +10,7 @@ import {
   claudeShell,
   cleanToolName,
   createClaudeCodeProvider,
+  nativeToolsForNestedContext,
   nativeToolsForPolicy,
   registerClaudeSession,
   RESUME_PROMPT,
@@ -540,6 +541,40 @@ test("workflow subagents inherit only native read tools from the owner runtime",
   } finally {
     unregisterClaudeSession(ownerId);
   }
+});
+
+test("a writing subagent gets the matching natives, in the directory it was given, within the workspace grant", async () => {
+  // Regression: a nested session got Read/Glob/Grep whatever it declared, and
+  // always ran in the workspace, so a workflow agent could neither write nor
+  // work in a worktree of its own.
+  const ownerId = "aaaaaaaa-8888-4888-8888-888888888888";
+  const subagentId = "bbbbbbbb-9999-4999-8999-999999999999";
+  const captured: { options: Record<string, unknown> }[] = [];
+  const deleted: unknown[] = [];
+  registerClaudeSession(ownerId, { cwd: "/tmp", customTools: [], workspaceTools: ["read", "edit", "bash"] });
+  try {
+    const provider = createClaudeCodeProvider({
+      query: scriptedQuery(successfulMessages.slice(1), (input) => { captured.push(input as never); }),
+      deleteSession: (async (_id: string, options: unknown) => { deleted.push(options); }) as never,
+      state: fakeState(),
+    });
+    const tools = ["read", "edit", "write", "bash"].map((name) => ({ name, description: name, parameters: obj({}) }));
+    const context: Context = { systemPrompt: "workflow subagent", messages: [user("fix it")], tools };
+    await runWithClaudeSession(ownerId, () => globalThis.eleven!.inDirectory("/tmp/worktree-a", async () => {
+      for await (const _event of provider.streamSimple(model, normalizeContext(context), { sessionId: subagentId })) { /* drain */ }
+    }));
+    assert.deepEqual(captured[0]?.options.tools, ["Read", "Glob", "Grep", "Edit", "Bash"], "write is not granted to this workspace");
+    assert.equal(captured[0]?.options.cwd, "/tmp/worktree-a");
+    assert.ok(deleted.every((options) => (options as { dir: string }).dir === "/tmp/worktree-a"));
+  } finally {
+    unregisterClaudeSession(ownerId);
+  }
+});
+
+test("nativeToolsForNestedContext maps pi's tools and never exceeds the grant", () => {
+  assert.deepEqual(nativeToolsForNestedContext(["ls"], ["Read", "Glob", "Grep", "Bash"]), ["Read", "Glob", "Grep"]);
+  assert.deepEqual(nativeToolsForNestedContext(["bash", "structured_output"], ["Read", "Glob", "Grep"]), []);
+  assert.deepEqual(nativeToolsForNestedContext([], ["Read", "Bash"]), []);
 });
 
 test("invalid MCP tool setup terminates the provider stream with an error", async () => {

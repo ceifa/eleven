@@ -193,3 +193,34 @@ test("only Claude tool history from answered turns is shortened in model context
   assert.equal(result("pending"), original("pending"), "a turn that did not finish keeps its whole output for a continuation");
   assert.equal(boundRuntimeResults([human("hi", 1), answer("hello")]).length, 2);
 });
+
+test("idle eviction spares a warm session that background work still holds", async () => {
+  // Regression: a workflow left running after its turn lost the conversation's
+  // claude-code registration ten minutes in, and every later subagent failed.
+  const { Runner } = await import("../src/agent/runner.ts");
+  const runner = new Runner() as unknown as {
+    warm: Map<string, { lastUsedAt: number }>;
+    hold(threadId: string): () => void;
+    dropSession(threadId: string): void;
+    evictIdleSessions(): void;
+    evictOldestSession(except: string): void;
+  };
+  const dropped: string[] = [];
+  runner.dropSession = (threadId) => {
+    dropped.push(threadId);
+    runner.warm.delete(threadId);
+  };
+  runner.warm.set("held", { lastUsedAt: 0 });
+  const release = runner.hold("held");
+  const second = runner.hold("held");
+  runner.evictIdleSessions();
+  runner.evictOldestSession("other");
+  assert.deepEqual(dropped, []);
+  release();
+  release();
+  runner.evictIdleSessions();
+  assert.deepEqual(dropped, [], "one of two holds is still out");
+  second();
+  runner.evictIdleSessions();
+  assert.deepEqual(dropped, ["held"]);
+});

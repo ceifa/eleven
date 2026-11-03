@@ -47,7 +47,7 @@ import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 import { readToolPanels, type PanelUpdate } from "./panels.ts";
-import { runWithPanelSink } from "./host-api.ts";
+import { runInTurn } from "./host-api.ts";
 import { LoadedImages, loadImages, storeImages } from "../media-store.ts";
 
 const log = logger("runner");
@@ -109,6 +109,10 @@ export interface TurnRequest extends SessionTarget {
    * (before onTurnEnd fires and before the next queued turn can start), so a
    * durable handoff can replace generation recovery with literal delivery. */
   deliver?: (result: TurnResult) => Promise<void>;
+  /** Start a later turn in this conversation (see host-api.ts). */
+  wake?: (text: string) => Promise<void>;
+  sessionSignal?: AbortSignal;
+  createBackground?: import("./host-api.ts").BackgroundStatusFactory;
 }
 
 export interface TurnEvents {
@@ -363,6 +367,8 @@ export class Runner {
   private lanes = new Map<string, Promise<unknown>>();
   private active = new Map<string, ActiveTurn>();
   private warm = new Map<string, WarmSession>();
+  /** Threads whose warm session background work still runs on (see hold). */
+  private holds = new Map<string, number>();
   private hooks: RunnerHooks;
 
   constructor(hooks: RunnerHooks = {}) {
@@ -381,12 +387,16 @@ export class Runner {
     return keyedLane(this.lanes, threadId, async () => {
       let deliveryPending = false;
       try {
-        // Everything the turn reaches runs inside its panel sink: pi's agent
+        // Everything the turn reaches runs inside its turn context: pi's agent
         // loop, its extension handlers, every tool execution. That is what lets
         // a workspace extension publish panels from outside a tool call
         // (host-api.ts) and still be routed to the right conversation.
-        const result = await runWithPanelSink(
-          (update) => events.onPanels?.(update),
+        const result = await runInTurn(
+          {
+            panels: (update) => events.onPanels?.(update), wake: request.wake,
+            sessionSignal: request.sessionSignal, createBackground: request.createBackground,
+            hold: () => this.hold(threadId),
+          },
           () => this.runTurn(threadId, request, events),
         );
         // Inside the lane but outside runTurn: a delivery failure must not
@@ -976,11 +986,26 @@ export class Runner {
     this.warm.delete(threadId);
   }
 
+  /** Keep a thread's warm session through idle eviction until released: work
+   * a turn left running in the background (a nested model session on the
+   * claude-code runtime) needs the conversation's runtime registration alive. */
+  private hold(threadId: string): () => void {
+    this.holds.set(threadId, (this.holds.get(threadId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this.holds.get(threadId) ?? 1) - 1;
+      if (left > 0) this.holds.set(threadId, left);
+      else this.holds.delete(threadId);
+    };
+  }
+
   private evictIdleSessions() {
     const cutoff = Date.now() - SESSION_IDLE_MS;
     const imagesCutoff = Date.now() - IMAGES_IDLE_MS;
     for (const [threadId, warm] of this.warm) {
-      if (this.active.has(threadId)) continue;
+      if (this.active.has(threadId) || this.holds.has(threadId)) continue;
       if (warm.lastUsedAt < cutoff && !warm.idleCompaction) this.dropSession(threadId);
       else if (warm.lastUsedAt < imagesCutoff) warm.images.clear();
     }
@@ -989,7 +1014,7 @@ export class Runner {
   /** The warm map is LRU-ordered (lruTouch), so the first evictable key is the oldest. */
   private evictOldestSession(except: string) {
     for (const threadId of this.warm.keys()) {
-      if (threadId === except || this.active.has(threadId)) continue;
+      if (threadId === except || this.active.has(threadId) || this.holds.has(threadId)) continue;
       this.dropSession(threadId);
       return;
     }

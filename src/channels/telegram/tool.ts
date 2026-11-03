@@ -1,41 +1,44 @@
 import { InputFile, type Api } from "grammy";
 import type { InlineKeyboardButton } from "@grammyjs/types";
-import { Type } from "typebox";
+import { arr, bool, num, obj, oneOf, opt, str, union, type Static } from "@earendil-works/pi-schema";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { extname } from "node:path";
 import { fitsOneRichMessage, sendRich, type RichMedia } from "./rich.ts";
 import { withRetry, isNoop } from "./retry.ts";
 import { logger } from "../../log.ts";
 
+// Extra arguments a model adds are ignored, not refused.
+const OPEN = { open: true };
+
 const log = logger("telegram/tool");
 
-const parameters = Type.Object({
-  action: Type.Union([Type.Literal("send"), Type.Literal("react"), Type.Literal("delete")], {
+const parameters = obj({
+  action: oneOf(["send", "react", "delete"], {
     description: "send a message/media, react to a message, or delete one of your messages",
   }),
-  text: Type.Optional(Type.String({ description: "Markdown text (send). Sent with the media, in the same message, when media is given." })),
-  media: Type.Optional(
-    Type.Union([Type.String(), Type.Array(Type.String())], {
+  text: opt(str({ description: "Markdown text (send). Sent with the media, in the same message, when media is given." })),
+  media: opt(
+    union([str(), arr(str())], {
       description: "Absolute path of a local file to send (photo/video/audio/document), or several paths to send them as one collage",
     }),
   ),
-  asVoice: Type.Optional(Type.Boolean({ description: "Send audio as a voice note" })),
-  buttons: Type.Optional(
-    Type.Array(
-      Type.Array(
-        Type.Object({
-          label: Type.String(),
-          url: Type.Optional(Type.String()),
-          data: Type.Optional(Type.String({ description: "callback data (≤64 bytes); sent back to you as text when pressed" })),
-        }),
+  asVoice: opt(bool({ description: "Send audio as a voice note" })),
+  buttons: opt(
+    arr(
+      arr(
+        obj({
+          label: str(),
+          url: opt(str()),
+          data: opt(str({ description: "callback data (≤64 bytes); sent back to you as text when pressed" })),
+        }, OPEN),
       ),
       { description: "Inline keyboard rows (max 3 buttons per row)" },
     ),
   ),
-  messageId: Type.Optional(Type.Number({ description: "Target message id (react/delete)" })),
-  emoji: Type.Optional(Type.String({ description: "Reaction emoji (react); omit to clear" })),
-  silent: Type.Optional(Type.Boolean({ description: "Send without notification sound" })),
-});
+  messageId: opt(num({ description: "Target message id (react/delete)" })),
+  emoji: opt(str({ description: "Reaction emoji (react); omit to clear" })),
+  silent: opt(bool({ description: "Send without notification sound" })),
+}, OPEN);
 
 const MEDIA_KIND: Record<string, "photo" | "video" | "audio" | "document"> = {
   ".jpg": "photo", ".jpeg": "photo", ".png": "photo", ".webp": "photo", ".gif": "photo",
@@ -60,7 +63,7 @@ export function telegramTool(api: Api, chatId: number, messageThreadId?: number,
       "media files, inline buttons, reactions, or delete a message you sent. Your final answer " +
       "is delivered automatically — do NOT repeat content you already sent with this tool.",
     parameters,
-    async execute(_id, params) {
+    async execute(_id, params: Static<typeof parameters>) {
       const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
       try {
         switch (params.action) {

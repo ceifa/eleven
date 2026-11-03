@@ -1,46 +1,49 @@
-import { Type, type Static } from "typebox";
+import { arr, bool, obj, oneOf, opt, str, union, type Static } from "@earendil-works/pi-schema";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { isNoop, type DiscordRest } from "./rest.ts";
 import { sendMessage } from "./send.ts";
 
+// Extra arguments a model adds are ignored, not refused.
+const OPEN = { open: true };
+
 // Discord takes ten files per message.
 const MAX_FILES = 10;
 
-const threadParameters = Type.Object({
-  name: Type.String({ minLength: 1, maxLength: 100, description: "Short title for the separate conversation" }),
-  message: Type.String({ minLength: 1, description: "Self-contained task and context; the parent's history is NOT copied" }),
-  start: Type.Optional(Type.Boolean({ description: "Start an independent agent turn immediately (default false)" })),
-  persistent: Type.Optional(Type.Boolean({ description: "Keep this conversation's agent context across idle periods until explicitly archived (default false)" })),
-});
+const threadParameters = obj({
+  name: str({ minLength: 1, maxLength: 100, description: "Short title for the separate conversation" }),
+  message: str({ minLength: 1, description: "Self-contained task and context; the parent's history is NOT copied" }),
+  start: opt(bool({ description: "Start an independent agent turn immediately (default false)" })),
+  persistent: opt(bool({ description: "Keep this conversation's agent context across idle periods until explicitly archived (default false)" })),
+}, OPEN);
 export type DiscordThreadRequest = Static<typeof threadParameters>;
 
-const parameters = Type.Object({
-  action: Type.Union([Type.Literal("send"), Type.Literal("react"), Type.Literal("delete"), Type.Literal("thread")], {
+const parameters = obj({
+  action: oneOf(["send", "react", "delete", "thread"], {
     description: "send a message/files, react, delete your message, or open a separate thread",
   }),
-  thread: Type.Optional(threadParameters),
-  text: Type.Optional(Type.String({ description: "Markdown text (send). Sent in the same message as the files, when files are given." })),
-  media: Type.Optional(
-    Type.Union([Type.String(), Type.Array(Type.String())], {
+  thread: opt(threadParameters),
+  text: opt(str({ description: "Markdown text (send). Sent in the same message as the files, when files are given." })),
+  media: opt(
+    union([str(), arr(str())], {
       description: "Absolute path of a local file to send, or several paths (up to 10) to send them together",
     }),
   ),
-  buttons: Type.Optional(
-    Type.Array(
-      Type.Array(
-        Type.Object({
-          label: Type.String(),
-          url: Type.Optional(Type.String()),
-          data: Type.Optional(Type.String({ description: "custom data (≤100 chars); sent back to you as text when pressed" })),
-        }),
+  buttons: opt(
+    arr(
+      arr(
+        obj({
+          label: str(),
+          url: opt(str()),
+          data: opt(str({ description: "custom data (≤100 chars); sent back to you as text when pressed" })),
+        }, OPEN),
       ),
       { description: "Button rows (max 5 rows of 5)" },
     ),
   ),
-  messageId: Type.Optional(Type.String({ description: "Target message id (react/delete)" })),
-  emoji: Type.Optional(Type.String({ description: "Reaction emoji (react): a unicode emoji, or name:id for a custom one" })),
-  silent: Type.Optional(Type.Boolean({ description: "Send without a notification" })),
-});
+  messageId: opt(str({ description: "Target message id (react/delete)" })),
+  emoji: opt(str({ description: "Reaction emoji (react): a unicode emoji, or name:id for a custom one" })),
+  silent: opt(bool({ description: "Send without a notification" })),
+}, OPEN);
 
 /**
  * The channel tool a Discord-routed agent gets: proactive sends, files,
@@ -66,7 +69,7 @@ export function discordTool(
       "From a public thread, this creates a sibling under its parent channel. Not available in DMs or private threads. Your final answer is delivered " +
       "automatically — do NOT repeat content you already sent with this tool.",
     parameters,
-    async execute(_id, params) {
+    async execute(_id, params: Static<typeof parameters>) {
       const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
       try {
         switch (params.action) {

@@ -36,6 +36,11 @@ export class DiscordApiError extends Error {
   }
 }
 
+export class DiscordSendUncertain extends Error {}
+
+export const canRetrySend = (error: unknown) => !(error instanceof DiscordSendUncertain) &&
+  (preConnect(error) || error instanceof DiscordApiError && error.status === 429);
+
 export function isNoop(error: unknown): boolean {
   return error instanceof DiscordApiError && error.code !== undefined && NOOP_CODES.has(error.code);
 }
@@ -73,6 +78,8 @@ export class DiscordRest {
     const message = method === "POST" && /^\/channels\/\d+\/messages$/.test(path);
     if (message) options = { ...options, body: { ...options.body as object, nonce: randomBytes(12).toString("hex"), enforce_nonce: true } };
     const repeatable = message || !options.creates;
+    let uncertain = false;
+    const terminal = (error: unknown) => uncertain ? new DiscordSendUncertain(String(error), { cause: error }) : error;
     const deadline = path.startsWith("/interactions/") ? AbortSignal.timeout(INTERACTION_TIMEOUT_MS) : undefined;
     for (let attempt = 1; ; attempt++) {
       deadline?.throwIfAborted();
@@ -98,16 +105,18 @@ export class DiscordRest {
           if (!(error instanceof SyntaxError)) throw error;
         }
       } catch (error) {
-        if (deadline?.aborted || attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw error;
+        if (message && !preConnect(error)) uncertain = true;
+        if (deadline?.aborted || attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw terminal(error);
         await this.wait(path, attempt, undefined, error, deadline);
         continue;
       }
       if (response.ok) return body as T;
       // Discord's "already acknowledged" confirms the previous callback landed.
       if (deadline && attempt > 1 && body?.code === 40060) return undefined as T;
+      if (message && response.status >= 500) uncertain = true;
       const retryAfter = response.status === 429 ? retryAfterMs(response, body) : undefined;
       const retriable = retryAfter !== undefined || (response.status >= 500 && repeatable);
-      if (!retriable || attempt >= MAX_ATTEMPTS) throw new DiscordApiError(response.status, body);
+      if (!retriable || attempt >= MAX_ATTEMPTS) throw terminal(new DiscordApiError(response.status, body));
       await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`, deadline);
     }
   }

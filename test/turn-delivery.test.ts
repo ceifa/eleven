@@ -34,12 +34,14 @@ test("the final send waits for early delivery before deciding what reached the c
   const held = new Promise<void>((resolve) => { release = resolve; });
   const turn: ChatTurn<undefined> = {
     gateway: {
+      hasPendingReply: () => false,
+      queueReply: (_id: string, _key: string, text: string) => posted.push(text),
       handle: async (incoming) => {
         incoming.events!.onDelta!("early answer");
         incoming.events!.onAssistantText!();
         incoming.events!.onEarlyAnswer!("early answer");
         setTimeout(release, 10);
-        await incoming.deliver!({ text: "early answer", status: "completed" } as never);
+        await incoming.deliver!({ text: "early answer", status: "completed" } as never, "thread");
       },
     } as ChatTurn<undefined>["gateway"],
     sessionKey: "discord:test:1:2",

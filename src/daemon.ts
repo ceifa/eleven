@@ -2,6 +2,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigStore } from "./config.ts";
 import { Gateway } from "./gateway.ts";
+import { ReplyDelivery } from "./channels/replies.ts";
 import { Channels } from "./channels/index.ts";
 import { PairingStore } from "./channels/pairing.ts";
 import { TelegramChannel } from "./channels/telegram/index.ts";
@@ -95,6 +96,9 @@ export async function startDaemon() {
     new TelegramChannel(config, gateway, pairing),
     new DiscordChannel(config, gateway, pairing),
   ]);
+  const replies = new ReplyDelivery(gateway.pending, (key, text, options) => channels.sendReply(key, text, options));
+  gateway.on("reply-queued", () => replies.kick());
+  replies.kick();
   const dashboard = startDashboard(config, gateway, channels);
   // Off the startup path on purpose: pi resolves models from the bundled
   // catalog immediately, and this only widens it to what the providers list now.
@@ -114,6 +118,7 @@ export async function startDaemon() {
   const shutdown = async (signal: string) => {
     log.info(`${signal} received, shutting down`);
     stopCatalogRefresh();
+    replies.stop();
     await Promise.allSettled([channels.stop(), dashboard.close()]);
     rmSync(PID_FILE, { force: true });
     process.exit(0);

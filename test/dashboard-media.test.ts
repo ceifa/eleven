@@ -75,6 +75,7 @@ async function withDashboard(run: (base: string, thread: { id: string }, turns: 
     on: () => {},
   };
   const gateway = {
+    pending: { replyStatus: () => undefined },
     on: () => {},
     threads: {
       list: () => [thread],

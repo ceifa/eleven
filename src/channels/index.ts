@@ -1,3 +1,5 @@
+import { parseSessionKey, scopesOf } from "./session-key.ts";
+import { DeliveryRevoked } from "./replies.ts";
 import type { ConfigStore, ChannelType } from "../config.ts";
 import type { Avatar } from "./avatars.ts";
 import type { PairingRequest, PairingStore } from "./pairing.ts";
@@ -10,6 +12,12 @@ export interface ChannelStatus {
 }
 
 /** Where a literal delivery landed. */
+export interface ReplyOptions {
+  replyTo?: string;
+  sentChunks?: number;
+  onChunk?: (sentChunks: number) => void;
+}
+
 export interface DeliveryTarget {
   channel: ChannelType;
   bot: string;
@@ -39,7 +47,7 @@ export interface Channel {
   readonly type: ChannelType;
   status(): ChannelStatus[];
   /** Deliver literal operator-authored prose to the conversation. */
-  sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget>;
+  sendToSession(sessionKey: string, text: string, options?: ReplyOptions): Promise<DeliveryTarget>;
   openThread?(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation>;
   prompt?(sessionKey: string, text: string): Promise<void>;
   archive?(sessionKey: string): Promise<void>;
@@ -80,10 +88,17 @@ export class Channels {
     return this.list.flatMap((channel) => channel.status());
   }
 
-  async sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
+  async sendToSession(sessionKey: string, text: string, options?: ReplyOptions): Promise<DeliveryTarget> {
     const owner = this.owner(sessionKey);
     if (!owner) throw new Error("thread has no channel to deliver to");
-    return owner.sendToSession(sessionKey, text);
+    return owner.sendToSession(sessionKey, text, options);
+  }
+
+  async sendReply(sessionKey: string, text: string, options: ReplyOptions) {
+    const target = parseSessionKey(sessionKey);
+    const configured = target && this.config.channels().find(({ channel }) => channel.type === target.type && channel.name === target.channel)?.channel;
+    if (!target || !configured || !scopesOf(target, configured).owner) throw new DeliveryRevoked("delivery destination is no longer allowed");
+    return this.sendToSession(sessionKey, text, options);
   }
 
   async destinations(): Promise<ChannelDestination[]> {

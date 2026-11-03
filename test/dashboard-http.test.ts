@@ -130,6 +130,7 @@ async function withDashboard(
     topic: topicThread,
   };
   const gateway = {
+    pending: { replyStatus: () => undefined },
     on: () => {},
     handle: async (incoming: Spy["handled"][number]) => {
       spy.handled.push(incoming);

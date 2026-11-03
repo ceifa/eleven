@@ -1,9 +1,11 @@
+import { DeliveryBlocked } from "../replies.ts";
+import { canRetrySend } from "./retry.ts";
 import type { ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
 import type { PairingRequest, PairingStore } from "../pairing.ts";
 import { AvatarCache, type Avatar } from "../avatars.ts";
 import { BotPool } from "../bots.ts";
-import type { Channel, ChannelStatus, DeliveryTarget } from "../index.ts";
+import type { Channel, ChannelStatus, DeliveryTarget, ReplyOptions } from "../index.ts";
 import { startTelegramBot, type BotHandle } from "./bot.ts";
 import { parseTelegramSessionKey } from "./session-key.ts";
 import { sendRich } from "./rich.ts";
@@ -33,13 +35,22 @@ export class TelegramChannel implements Channel {
   }
 
   /** Deliver literal operator-authored prose to the Telegram conversation. */
-  async sendToSession(sessionKey: string, text: string): Promise<DeliveryTarget> {
+  async sendToSession(sessionKey: string, text: string, options: ReplyOptions = {}): Promise<DeliveryTarget> {
     const target = parseTelegramSessionKey(sessionKey);
     if (!target) throw new Error("thread has no Telegram delivery target");
     const { channel, chatId, topic } = target;
     const handle = this.pool.get(channel);
     if (!handle) throw new Error(`Telegram channel ${channel} is not running`);
-    await sendRich(handle.bot.api, chatId, text, { messageThreadId: topic });
+    try {
+      await sendRich(handle.bot.api, chatId, text, {
+        messageThreadId: topic,
+        replyParameters: options.replyTo ? { message_id: Number(options.replyTo), allow_sending_without_reply: true } : undefined,
+        sentChunks: options.sentChunks, onChunk: options.onChunk,
+      });
+    } catch (error) {
+      if (options.onChunk && !canRetrySend(error)) throw new DeliveryBlocked(`Telegram send needs inspection: ${error}`);
+      throw error;
+    }
     return { channel: "telegram", bot: channel, chatId, topic };
   }
 

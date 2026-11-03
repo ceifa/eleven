@@ -173,3 +173,28 @@ test("only an open Telegram or Discord conversation may be compacted while idle"
   gateway.threads.update(thread.id, { archiveRequested: true });
   assert.equal(archived(), false);
 });
+
+test("a failed durable handoff clears live activity but keeps interrupted generation recoverable", async () => {
+  const gateway = new Gateway(config as never);
+  let id = "";
+  stubTurn(gateway, (threadId, hooks) => {
+    id = threadId;
+    hooks.onTurnStart?.(threadId, undefined);
+    hooks.onTurnEnd?.(threadId, true);
+  });
+  await send(gateway, "save the finished answer");
+  assert.equal(gateway.liveTurn(id), undefined);
+  assert.ok(gateway.pending.drain().some((turn) => turn.threadId === id));
+});
+
+test("a final handoff cannot clear recovery for a newer conversation thread", () => {
+  const gateway = new Gateway(config as never);
+  const key = "telegram:main:123";
+  const old = gateway.newThread(key, "agent");
+  gateway.pending.begin(old.id, 100);
+  const newer = gateway.newThread(key, "agent");
+  gateway.pending.begin(newer.id, 200);
+  gateway.queueReply(old.id, key, "old answer");
+  assert.deepEqual(gateway.pending.drain(), [{ threadId: newer.id, lastAliveAt: 200 }]);
+  assert.equal(gateway.pending.replies()[0].text, "old answer");
+});

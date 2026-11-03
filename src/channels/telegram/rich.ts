@@ -18,6 +18,8 @@ export interface RichMedia {
 }
 
 export interface RichSendOptions {
+  sentChunks?: number;
+  onChunk?: (sentChunks: number) => void;
   messageThreadId?: number;
   replyParameters?: ReplyParameters;
   replyMarkup?: InlineKeyboardMarkup;
@@ -48,6 +50,7 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
   const chunks = splitRich(attachments ? `${attachments.blocks}\n\n${markdown}`.trim() : markdown);
   let last;
   for (const [index, chunk] of chunks.entries()) {
+    if (index < (options.sentChunks ?? 0)) continue;
     const isLast = index === chunks.length - 1;
     const send = (text: string) =>
       withRetry("send", "sendRichMessage", () =>
@@ -70,6 +73,7 @@ export async function sendRich(api: Api, chatId: number | string, markdown: stri
       if (!isRichMessageEmpty(error)) throw error;
       last = await send(escapeStructure(chunk));
     }
+    options.onChunk?.(index + 1);
   }
   return last;
 }

@@ -103,7 +103,7 @@ export interface TurnRequest extends SessionTarget {
   compactWhenIdle?: () => boolean;
   /** Channel delivery of the finished turn. Runs inside the thread's turn lane
    * (before onTurnEnd fires and before the next queued turn can start), so a
-   * durable in-flight ledger keyed on the hooks covers the send itself. */
+   * durable handoff can replace generation recovery with literal delivery. */
   deliver?: (result: TurnResult) => Promise<void>;
 }
 
@@ -343,7 +343,7 @@ export interface RunnerHooks {
   onTurnStart?: (threadId: string, sessionFile: string | undefined) => void;
   /** Fired when that turn settles — after its channel delivery, still inside
    * the turn lane, so begin/end pairs of consecutive turns never overlap. */
-  onTurnEnd?: (threadId: string) => void;
+  onTurnEnd?: (threadId: string, preservePending?: boolean) => void;
   /** Fired when a turn gives up, once the failure is in the transcript, with
    * the file it was written to. */
   onTurnFailed?: (threadId: string, sessionFile: string | undefined, message: string) => void;
@@ -373,6 +373,7 @@ export class Runner {
     const running = this.active.get(threadId);
     if (running && (await this.steerIntoTurn(threadId, running, request))) return undefined;
     return keyedLane(this.lanes, threadId, async () => {
+      let deliveryPending = false;
       try {
         // Everything the turn reaches runs inside its panel sink: pi's agent
         // loop, its extension handlers, every tool execution. That is what lets
@@ -384,10 +385,12 @@ export class Runner {
         );
         // Inside the lane but outside runTurn: a delivery failure must not
         // tear down the warm session like a model failure would.
+        deliveryPending = true;
         await request.deliver?.(result);
+        deliveryPending = false;
         return result;
       } finally {
-        this.hooks.onTurnEnd?.(threadId);
+        this.hooks.onTurnEnd?.(threadId, deliveryPending);
       }
     });
   }

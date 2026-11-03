@@ -561,3 +561,51 @@ test("channel metadata can be discovered and looked up without a bot token in th
     assert.equal((await get(`${base}/api/channels/destination`)).status, 400);
   });
 });
+
+test("thread search finds transcript prose without exposing session paths", async () => {
+  await withDashboard(async (base, thread) => {
+    writeFileSync(thread.sessionFile, JSON.stringify({
+      type: "message", id: "user", parentId: null, timestamp: "2026-11-02T12:00:00Z",
+      message: { role: "user", content: "the hidden condominium decision" },
+    }) + "\n");
+    const response = await get(`${base}/api/threads?q=condominium`);
+    assert.equal(response.status, 200);
+    const results = JSON.parse(response.body.toString());
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, thread.id);
+    assert.match(results[0].matches[0].snippet, /condominium/);
+    assert.equal(results[0].sessionFile, undefined);
+    assert.equal((await get(`${base}/api/threads?q=${"x".repeat(201)}`)).status, 400);
+  });
+});
+
+test("thread references read only the active branch and support unique prefixes", async () => {
+  await withDashboard(async (base, thread, spy) => {
+    const entry = (id: string, parentId: string | null, role: string, content: unknown) => JSON.stringify({
+      type: "message", id, parentId, timestamp: "2026-11-02T12:00:00Z", message: { role, content },
+    });
+    writeFileSync(thread.sessionFile, [
+      entry("start", null, "user", "question"),
+      entry("abandoned", "start", "assistant", [{ type: "text", text: "wrong branch" }]),
+      entry("answer", "start", "assistant", [{ type: "text", text: "right answer" }]),
+      entry("tool", "answer", "toolResult", [{ type: "text", text: "private tool output" }]),
+    ].join("\n") + "\n");
+    const response = await get(`${base}/api/threads/11111111/read?tail=1`);
+    assert.equal(response.status, 200);
+    const snapshot = JSON.parse(response.body.toString());
+    assert.equal(snapshot.thread.id, thread.id);
+    assert.equal(snapshot.thread.sessionFile, undefined);
+    assert.equal(snapshot.messages.length, 1);
+    assert.equal(snapshot.messages[0].text, "right answer");
+    assert.equal(snapshot.truncated, true);
+    assert.match(snapshot.warning, /Untrusted/);
+    for (const tail of ["0", "-1", "101", "1.5", "NaN"]) {
+      assert.equal((await get(`${base}/api/threads/11111111/read?tail=${tail}`)).status, 400);
+    }
+    assert.equal((await get(`${base}/api/threads/does-not-exist/read`)).status, 404);
+    const empty = await get(`${base}/api/threads/aaaaaaaa/read`);
+    assert.deepEqual(JSON.parse(empty.body.toString()).messages, []);
+    spy.topic.id = "11111111-bbbb-cccc-dddd-eeeeeeeeeeee";
+    assert.equal((await get(`${base}/api/threads/11111111/read`)).status, 409);
+  });
+});

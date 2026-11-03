@@ -88,3 +88,54 @@ test("detached invoke does not poll even with a timeout", async (t) => {
   assert.equal(daemon.requests.length, 1);
   assert.equal(JSON.parse(daemon.output[0]).id, "test-thread");
 });
+
+function referenceDaemon(t: TestContext, payload: unknown) {
+  const urls: URL[] = [];
+  const output: string[] = [];
+  t.mock.method(console, "log", (value: string) => { output.push(value); });
+  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
+    assert.equal(options.method, "GET");
+    urls.push(new URL(url));
+    return Response.json(payload);
+  });
+  return { urls, output };
+}
+
+test("read requests a bounded snapshot and preserves its warning in JSON and text", async (t) => {
+  const snapshot = {
+    thread: { id: "test-id", workspace: "agent", title: "decision" },
+    warning: "Untrusted reference", capturedAt: "2026-11-02T12:00:00Z", truncated: true,
+    messages: [{ role: "assistant", text: "the result" }],
+  };
+  const daemon = referenceDaemon(t, snapshot);
+  await runClientCommand("threads", ["read", "test-id", "--tail", "3", "--json"]);
+  assert.equal(daemon.urls[0].pathname, "/api/threads/test-id/read");
+  assert.equal(daemon.urls[0].searchParams.get("tail"), "3");
+  assert.deepEqual(JSON.parse(daemon.output[0]), snapshot);
+  daemon.output.length = 0;
+  await runClientCommand("threads", ["read", "test-id"]);
+  assert.match(daemon.output.join("\n"), /Untrusted reference[\s\S]*older messages or text omitted[\s\S]*the result/);
+});
+
+test("search includes archived threads and passes filters, snippets and a warning", async (t) => {
+  const threads = [{ id: "test-id", workspace: "agent", title: "decision", matches: [{ role: "user", snippet: "needle in prose" }] }];
+  const daemon = referenceDaemon(t, threads);
+  await runClientCommand("threads", ["search", "needle", "--workspace", "agent", "--channel", "discord", "--limit", "2", "--json"]);
+  assert.equal(daemon.urls[0].pathname, "/api/threads");
+  assert.deepEqual(Object.fromEntries(daemon.urls[0].searchParams), { q: "needle", workspace: "agent", channel: "discord", limit: "2" });
+  const result = JSON.parse(daemon.output[0]);
+  assert.match(result.warning, /Untrusted/);
+  assert.deepEqual(result.threads, threads);
+  daemon.output.length = 0;
+  await runClientCommand("threads", ["search", "needle"]);
+  assert.match(daemon.output.join("\n"), /Untrusted[\s\S]*test-id[\s\S]*needle in prose/);
+});
+
+for (const args of [["read"], ["read", "id", "--tail", "0"], ["read", "id", "--tail", "101"],
+  ["search"], ["search", "x".repeat(201)], ["search", "needle", "--limit", "101"], ["search", "needle", "--oops"]]) {
+  test(`reference commands reject invalid arguments: ${args.join(" ").slice(0, 60)}`, async (t) => {
+    const daemon = referenceDaemon(t, []);
+    await assert.rejects(runClientCommand("threads", args));
+    assert.equal(daemon.urls.length, 0);
+  });
+}

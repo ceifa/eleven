@@ -105,8 +105,8 @@ export class Gateway extends EventEmitter {
   readonly requests = new RequestLog();
   readonly pending = new PendingTurns();
   readonly runner = new Runner({
-    onProviderRequest: (threadId, model, payload) => {
-      const meta = this.requests.record(threadId, model, payload);
+    onProviderRequest: (threadId, model, payload, images) => {
+      const meta = this.requests.record(threadId, model, payload, images);
       this.pushLive(threadId, { kind: "request", id: meta.id, model, at: Date.now() });
       this.emit("provider-request", { threadId, id: meta.id, model });
     },

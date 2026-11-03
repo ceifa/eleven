@@ -1,9 +1,11 @@
-import { mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, renameSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdir, open, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { basename, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { MEDIA_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
 
@@ -239,4 +241,113 @@ export async function collectStoredMedia(attachments: StoredAttachment[], transc
 export function validMime(value: string | undefined): string | undefined {
   const mime = value?.split(";", 1)[0].trim().toLowerCase();
   return mime && /^[\w.+-]+\/[\w.+-]+$/.test(mime) ? mime : undefined;
+}
+
+/* ---------- images a transcript holds by reference ---------- */
+
+/** An image block whose bytes live in the media store: `data` stays empty on
+ *  disk and in memory, and is read back only for the request that sends it.
+ *  The absolute path is what deleteReferencedMedia finds in the transcript. */
+interface StoredImage extends ImageContent {
+  path: string;
+}
+
+type Block = TextContent | ImageContent;
+
+const IMAGE_EXTENSIONS: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+
+const isStored = (block: Block): block is StoredImage => block.type === "image" && !block.data && typeof (block as StoredImage).path === "string";
+
+function blocksOf(message: AgentMessage): Block[] | undefined {
+  const content = (message as { content?: unknown }).content;
+  return Array.isArray(content) ? (content as Block[]) : undefined;
+}
+
+/** Image data a thread has in hand, by stored path and by the data itself, so
+ *  its requests neither re-read a file nor log the base64 of one. */
+export class LoadedImages {
+  private byPath = new Map<string, string>();
+  private byData = new Map<string, string>();
+
+  set(path: string, data: string): void {
+    this.byPath.set(path, data);
+    this.byData.set(data, path);
+  }
+
+  get size(): number {
+    return this.byPath.size;
+  }
+
+  data(path: string): string | undefined {
+    return this.byPath.get(path);
+  }
+
+  /** Where an image sent as `data` (bare base64 or a data URL) is stored. */
+  path(data: string): string | undefined {
+    return this.byData.get(data.startsWith("data:") ? data.slice(data.indexOf(",") + 1) : data);
+  }
+
+  clear(): void {
+    this.byPath.clear();
+    this.byData.clear();
+  }
+}
+
+/**
+ * The message with its inline images moved to the media store, or undefined
+ * when it has none. Files are named by owner (deleting a thread deletes what
+ * its transcript references) and content. Synchronous so transcript order
+ * holds wherever it is called from.
+ */
+export function storeImages<T extends AgentMessage>(message: T, loaded: LoadedImages, owner: string): T | undefined {
+  const blocks = blocksOf(message);
+  if (!blocks?.some((block) => block.type === "image" && block.data)) return undefined;
+  mkdirSync(MEDIA_DIR, { recursive: true });
+  const content = blocks.map((block): Block => {
+    if (block.type !== "image" || !block.data) return block;
+    const bytes = Buffer.from(block.data, "base64");
+    // Anything that is not canonical base64 would not come back byte for byte.
+    if (bytes.toString("base64") !== block.data) return block;
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const path = join(MEDIA_DIR, `${owner.replaceAll(/[^\w-]/g, "_")}-${hash}.${IMAGE_EXTENSIONS[block.mimeType] ?? "bin"}`);
+    if (existsSync(path)) {
+      // Media retention runs on mtime.
+      const now = new Date();
+      utimesSync(path, now, now);
+    } else {
+      writeFileSync(`${path}.tmp`, bytes);
+      renameSync(`${path}.tmp`, path);
+    }
+    loaded.set(path, block.data);
+    const stored: StoredImage = { type: "image", data: "", mimeType: block.mimeType, path };
+    return stored;
+  });
+  return { ...message, content };
+}
+
+/** The messages with every stored image read back in. One the media store no
+ *  longer has becomes a note, so the request still goes out. */
+export async function loadImages(messages: AgentMessage[], loaded: LoadedImages): Promise<AgentMessage[]> {
+  if (!messages.some((message) => blocksOf(message)?.some(isStored))) return messages;
+  return await Promise.all(messages.map(async (message) => {
+    const blocks = blocksOf(message);
+    if (!blocks?.some(isStored)) return message;
+    const content = await Promise.all(blocks.map(async (block): Promise<Block> => {
+      if (!isStored(block)) return block;
+      let data = loaded.data(block.path);
+      if (data === undefined) {
+        try {
+          data = (await readFile(block.path)).toString("base64");
+        } catch {
+          return { type: "text", text: `[image no longer stored: ${block.path}]` };
+        }
+        loaded.set(block.path, data);
+        // Media retention runs on mtime: an image a thread still sends stays.
+        const now = new Date();
+        await utimes(block.path, now, now).catch(() => {});
+      }
+      return { type: "image", data, mimeType: block.mimeType };
+    }));
+    return { ...message, content } as AgentMessage;
+  }));
 }

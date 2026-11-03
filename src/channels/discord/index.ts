@@ -84,8 +84,8 @@ export class DiscordChannel implements Channel {
     for (const { sessionKey } of turns) void this.owner(sessionKey)?.wake(sessionKey).catch((error) => log.warn(String(error)));
   }
 
-  wake(sessionKey: string, text: string): Promise<void> {
-    return this.requiredOwner(sessionKey).wake(sessionKey, text);
+  wake(sessionKey: string, text: string, threadId?: string): Promise<void> {
+    return this.requiredOwner(sessionKey).wake(sessionKey, text, threadId);
   }
 
   /** A DM's face is the person's avatar. Every server conversation is a

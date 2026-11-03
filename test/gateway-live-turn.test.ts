@@ -219,3 +219,57 @@ test("a chat turn can wake its conversation later, until the conversation moves 
   await gateway.handle({ sessionKey: "dashboard:agent:x", text: "hi", runtime: { channel: "dashboard" } as never });
   assert.equal(wake, undefined, "a dashboard thread has no chat to wake");
 });
+
+test("/new ends all background handles from the old session without touching another chat", async () => {
+  const { runInTurn } = await import("../src/agent/host-api.ts");
+  const gateway = new Gateway(config as never);
+  const key = "telegram:main:-1001:topic:7";
+  const woken: string[] = [];
+  gateway.waker = async (_key, text) => { woken.push(text); };
+  const handles: NonNullable<ReturnType<NonNullable<typeof globalThis.eleven>["conversation"]>>[] = [];
+  gateway.runner.submit = async (_id, request) => {
+    handles.push(runInTurn({ panels: () => {}, wake: request.wake, sessionSignal: request.sessionSignal },
+      () => globalThis.eleven!.conversation()!));
+    return undefined;
+  };
+  await send(gateway, "first background run");
+  await send(gateway, "second background run");
+  await gateway.handle({ sessionKey: "telegram:main:another", text: "independent run", runtime: { channel: "telegram" } });
+  assert.ok(handles.every((handle) => !handle.signal.aborted), "finishing a turn does not stop background work");
+
+  gateway.newThread(key);
+  assert.deepEqual(handles.map((handle) => handle.signal.aborted), [true, true, false]);
+  assert.equal(await handles[0].wake("old result"), false);
+  assert.equal(await handles[1].wake("old result"), false);
+  assert.deepEqual(woken, []);
+
+  await send(gateway, "new session's run");
+  assert.equal(handles[3].signal.aborted, false);
+  await handles[2].wake("other chat finished");
+  await handles[3].wake("new session finished");
+  assert.deepEqual(woken, ["other chat finished", "new session finished"]);
+});
+
+test("a wake that was already in delivery when /new arrived cannot enter the new session", async () => {
+  const gateway = new Gateway(config as never);
+  const key = "telegram:main:-1001:topic:7";
+  let release!: () => void;
+  const delivery = new Promise<void>((resolve) => { release = resolve; });
+  let wake!: (text: string) => Promise<void>;
+  let submits = 0;
+  gateway.runner.submit = async (_id, request) => {
+    submits++;
+    wake = request.wake!;
+    return undefined;
+  };
+  gateway.waker = async (sessionKey, text, expectedThreadId) => {
+    await delivery;
+    await gateway.handle({ sessionKey, text, expectedThreadId, runtime: { channel: "telegram" } });
+  };
+  await send(gateway, "start background work");
+  const result = wake("old result");
+  gateway.newThread(key);
+  release();
+  await assert.rejects(result, /no longer the open conversation/);
+  assert.equal(submits, 1);
+});

@@ -126,9 +126,10 @@ describe("quiet panels and reporting tools", () => {
 
   /** The tool line only exists while the turn runs, so these read the live
    *  render rather than the finished one. */
+  let chatId = 10;
   const whileRunning = async (drive: (status: TelegramTurnStatus) => void) => {
     const { api, sent } = fakeApi();
-    const status = new TelegramTurnStatus(api, 1);
+    const status = new TelegramTurnStatus(api, chatId++);
     drive(status);
     await new Promise((resolve) => setTimeout(resolve, 400));
     status.cancel();

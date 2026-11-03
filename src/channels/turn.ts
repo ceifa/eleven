@@ -101,7 +101,7 @@ export interface ChatTurn<R> {
   retry?: TurnRetry;
   replyTo?: string;
   /** What the gateway needs beyond the message itself. */
-  incoming: Pick<IncomingMessage, "workspaceHint" | "modelScopes" | "appends" | "customTools" | "runtime">;
+  incoming: Pick<IncomingMessage, "workspaceHint" | "modelScopes" | "appends" | "customTools" | "runtime" | "createBackground" | "expectedThreadId">;
   /** Texts any route already delivered to this conversation — shared with the
    *  channel tool, cleared when the turn ends. */
   sent: Set<string>;

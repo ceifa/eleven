@@ -7,6 +7,7 @@ import type { InlineKeyboardMarkup } from "@grammyjs/types";
 import type { ChannelConfig, TopicConfig } from "../../config.ts";
 import { lruTouch } from "../../util.ts";
 import type { BotDeps } from "../bots.ts";
+import { BackgroundStatuses, BACKGROUND_STOP_PREFIX } from "../background.ts";
 import { Bursts } from "../burst.ts";
 import { COMMANDS, runCommand } from "../commands.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers, type ChatButton } from "../failover.ts";
@@ -58,7 +59,7 @@ export interface BotHandle {
   username?: string;
   lastPollAt: number;
   /** Re-prompt a conversation (by session key) that a restart interrupted. */
-  wake(sessionKey: string, text?: string): Promise<void>;
+  wake(sessionKey: string, text?: string, threadId?: string): Promise<void>;
   /** Drop a conversation's buffered input before it becomes a turn (a stop
    *  issued from outside Telegram — the dashboard — needs this too). */
   discardBurst(sessionKey: string): boolean;
@@ -98,6 +99,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   // Manual failover buttons hanging off failure messages, each holding what it
   // takes to run that turn again.
+  const background = new BackgroundStatuses();
   const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
 
   const alreadyHandled = createSeenMessages();
@@ -211,11 +213,15 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     if (!config || !from || !ctx.chat) return;
     // Same access policy as messages, minus the mention gate (a button press is explicit).
     if (senderAccess(ctx.chat, from.id, config) !== "ok") return;
+    const data = ctx.callbackQuery!.data ?? "";
+    const target = targetFromContext(ctx);
+    if (data.startsWith(BACKGROUND_STOP_PREFIX)) {
+      background.stop(sessionKeyFor(target.chatId, target.topic), data);
+      return;
+    }
     // A pressed keyboard has done its job: grey it out so the same action can't
     // be fired twice (and so the chat records which option was taken).
     void disablePressedKeyboard(ctx).catch((error) => log.warn(`disabling keyboard failed: ${error}`));
-    const data = ctx.callbackQuery!.data ?? "";
-    const target = targetFromContext(ctx);
     // Fire-and-forget: holding the prep lane for the whole turn would block
     // (and un-steer) every message behind it.
     if (data.startsWith(FAILOVER_PREFIX)) return void retryOnFallback(data, target);
@@ -268,7 +274,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
 
   /** `retry` is set by a manual failover: its own model plan for this turn
    * alone, and the failed attempt a restart branches away first. */
-  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry) {
+  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry, expectedThreadId?: string) {
     const { chatId, topic, isPrivate } = target;
     const sessionKey = sessionKeyFor(chatId, topic);
     void bot.api.sendChatAction(chatId, "typing", { message_thread_id: topic }).catch(() => {});
@@ -295,6 +301,9 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
       retry,
       replyTo: target.triggerMessageId?.toString(),
       incoming: {
+        expectedThreadId,
+        createBackground: (options) => background.create(sessionKey, options, (stopId) =>
+          new TelegramTurnStatus(bot.api, chatId, { topic, replyParameters, background: { title: options.title, stopId } })),
         workspaceHint: deps.workspace(),
         // Most specific first: a topic's model settings beat its owner's.
         modelScopes: [topicConfig, owner],
@@ -328,7 +337,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
   /** Start a turn nobody typed — reconstruct the target from the session key
    * alone (no live update to read). By default it resumes a conversation a
    * restart cut off. */
-  async function wake(sessionKey: string, text = WAKE_PROMPT) {
+  async function wake(sessionKey: string, text = WAKE_PROMPT, threadId?: string) {
     const target = parseTelegramSessionKey(sessionKey);
     if (!target || target.channel !== name) throw new Error(`cannot wake ${sessionKey}: unrecognized session key`);
     const { chatId, topic } = target;
@@ -338,7 +347,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps): Bo
     await runTurn(
       { chatId, topic, isPrivate, userId: isPrivate ? chatId : undefined },
       text,
-      [],
+      [], undefined, threadId,
     );
   }
 

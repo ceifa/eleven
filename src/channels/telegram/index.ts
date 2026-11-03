@@ -74,10 +74,10 @@ export class TelegramChannel implements Channel {
     }
   }
 
-  wake(sessionKey: string, text: string): Promise<void> {
+  wake(sessionKey: string, text: string, threadId?: string): Promise<void> {
     const owner = [...this.pool.bots].find(([name]) => sessionKey.startsWith(`telegram:${name}:`));
     if (!owner) return Promise.reject(new Error(`no running Telegram bot owns ${sessionKey}`));
-    return owner[1].handle.wake(sessionKey, text);
+    return owner[1].handle.wake(sessionKey, text, threadId);
   }
 
   /** The picture Telegram draws for a conversation: a forum topic's custom

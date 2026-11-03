@@ -27,7 +27,7 @@ const log = logger("host-api");
  */
 export interface ElevenHost {
   /** Bumped when the shape grows or changes. */
-  readonly version: 3;
+  readonly version: 4;
   /**
    * Replace this producer's panels in the turn currently running on this call
    * stack (see panels.ts). `scope` identifies the producer: its panels replace
@@ -44,10 +44,10 @@ export interface ElevenHost {
    * stack, or its conversation cannot take a turn nobody typed — the caller
    * then has to finish inside the tool call. `wake` resolves false when the
    * conversation has since moved on to a new thread, or delivery failed.
-   * Until `wake` is called the handle keeps the conversation's runtime alive
-   * through idle eviction, so background work must end with it.
+   * The handle keeps the runtime alive until `finish` or `wake`. Its signal
+   * aborts on /new or its own Stop button, independently of the turn's signal.
    */
-  conversation(): { wake(text: string): Promise<boolean> } | undefined;
+  conversation(options?: { title?: string }): BackgroundConversation | undefined;
   /**
    * Run `operation` so that the model sessions it spawns work in `cwd` instead
    * of the workspace — a subagent isolated in its own git worktree. Pi's own
@@ -56,11 +56,31 @@ export interface ElevenHost {
   inDirectory<T>(cwd: string, operation: () => T): T;
 }
 
+export type BackgroundOutcome = "completed" | "failed" | "stopped";
+
+export interface BackgroundStatus {
+  panels(update: PanelUpdate): void;
+  finish(outcome: BackgroundOutcome): Promise<void>;
+}
+
+export interface BackgroundConversation {
+  /** Aborted by this run's Stop button or by ending its originating session. */
+  readonly signal: AbortSignal;
+  progress(panels: unknown): boolean;
+  /** Settle the card and release the runtime after the workers wind down. */
+  finish(outcome: BackgroundOutcome): Promise<void>;
+  wake(text: string): Promise<boolean>;
+}
+
+export type BackgroundStatusFactory = (options: { title: string; stop: () => void }) => BackgroundStatus;
+
 /** What eleven knows about the turn on this call stack. */
 export interface TurnContext {
   panels: (update: PanelUpdate) => void;
   /** Start a turn in this conversation; absent when it cannot be woken. */
   wake?: (text: string) => Promise<void>;
+  sessionSignal?: AbortSignal;
+  createBackground?: BackgroundStatusFactory;
   /** Keep the conversation's runtime alive until the returned release runs. */
   hold?: () => () => void;
 }
@@ -80,7 +100,7 @@ export function nestedDirectory(): string | undefined {
 }
 
 const host: ElevenHost = {
-  version: 3,
+  version: 4,
   panels(panels, options = {}) {
     const sink = turnContext.getStore()?.panels;
     if (!sink) return false;
@@ -95,15 +115,48 @@ const host: ElevenHost = {
     }
     return true;
   },
-  conversation() {
+  conversation(options = {}) {
     const turn = turnContext.getStore();
-    const wake = turn?.wake;
+    const { wake, sessionSignal, createBackground } = turn ?? {};
     if (!wake) return undefined;
-    const release = turn.hold?.() ?? (() => {});
+    const release = turn?.hold?.() ?? (() => {});
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    sessionSignal?.addEventListener("abort", abort, { once: true });
+    if (sessionSignal?.aborted) abort();
+    let status: BackgroundStatus | undefined;
+    let finished = false;
+    const finish = async (outcome: BackgroundOutcome) => {
+      if (finished) return;
+      finished = true;
+      sessionSignal?.removeEventListener("abort", abort);
+      release();
+      try {
+        await status?.finish(outcome);
+      } catch (error) {
+        log.warn(`background status finish failed: ${error}`);
+      }
+    };
     return {
+      signal: controller.signal,
+      progress(panels) {
+        if (finished || controller.signal.aborted || !createBackground) return false;
+        const update = readPanels(panels, "background");
+        if (!update) return false;
+        try {
+          status ??= createBackground({ title: options.title?.trim() || "Background work", stop: abort });
+          status.panels(update);
+          return true;
+        } catch (error) {
+          log.warn(`background progress failed: ${error}`);
+          return false;
+        }
+      },
+      finish,
       async wake(text) {
         if (typeof text !== "string" || !text.trim()) return false;
-        release();
+        await finish(controller.signal.aborted ? "stopped" : "completed");
+        if (sessionSignal?.aborted) return false;
         try {
           await wake(text.trim());
           return true;

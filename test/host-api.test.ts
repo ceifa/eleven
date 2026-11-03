@@ -20,7 +20,7 @@ const collect = (run: () => void) => {
 describe("the eleven host handshake", () => {
   test("is on globalThis, versioned so an extension can feature-detect", () => {
     strictEqual(typeof host().panels, "function");
-    strictEqual(host().version, 3);
+    strictEqual(host().version, 4);
   });
 
   test("publishes into the turn that owns the call stack", () => {

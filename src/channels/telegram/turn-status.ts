@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
-import type { ReplyParameters } from "@grammyjs/types";
-import { plainStatus, TurnStatus } from "../turn-status.ts";
+import type { InlineKeyboardMarkup, ReplyParameters } from "@grammyjs/types";
+import { compact, formatDuration, plainStatus, renderStatusText, TurnStatus } from "../turn-status.ts";
 import { isNoop, withRetry } from "./retry.ts";
 
 // A DM tolerates roughly one message per second; a group is flood-limited at
@@ -16,10 +16,16 @@ export interface TelegramStatusOptions {
   throttleMs?: number;
   toolRenderDelayMs?: number;
   idleRenderDelayMs?: number;
+  background?: { title: string; stopId: string };
+}
+
+interface TelegramStatusCard {
+  text: string;
+  reply_markup?: InlineKeyboardMarkup;
 }
 
 /** The turn's status card as a quiet Telegram message. */
-export class TelegramTurnStatus extends TurnStatus {
+export class TelegramTurnStatus extends TurnStatus<TelegramStatusCard> {
   constructor(api: Api, chatId: number, options: TelegramStatusOptions = {}) {
     let messageId: number | undefined;
     // Telegram ids tell the two apart: a private chat's id is the user's own and
@@ -28,22 +34,22 @@ export class TelegramTurnStatus extends TurnStatus {
     // spaces those out on its own.
     const group = chatId < 0;
     super({
-      post: async (text) => {
+      post: async (card) => {
         const message = await withRetry("send", "send turn status", () =>
           api.raw.sendMessage({
             chat_id: chatId,
             message_thread_id: options.topic,
-            text,
+            ...card,
             reply_parameters: options.replyParameters,
             disable_notification: true,
           }),
         );
         messageId = message.message_id;
       },
-      edit: async (text) => {
+      edit: async (card) => {
         try {
           await withRetry("idempotent", "edit turn status", () =>
-            api.raw.editMessageText({ chat_id: chatId, message_id: messageId!, text }),
+            api.raw.editMessageText({ chat_id: chatId, message_id: messageId!, ...card }),
           );
         } catch (error) {
           if (!isNoop(error)) throw error;
@@ -57,9 +63,21 @@ export class TelegramTurnStatus extends TurnStatus {
         }
       },
     }, {
-      render: plainStatus,
-      throttleMs: options.throttleMs ?? (group ? GROUP_THROTTLE_MS : THROTTLE_MS),
-      rateKey: group ? `telegram:${chatId}` : undefined,
+      render: (view) => {
+        if (!options.background) {
+          const text = plainStatus(view);
+          return text ? { text } : undefined;
+        }
+        const icon = view.outcome === "completed" ? "✅" : view.outcome === "failed" ? "❌" : view.outcome === "stopped" ? "⏹" : "⚙️";
+        const header = `${icon} ${compact(options.background.title)} · ${view.outcome ?? "running"} · ${formatDuration(view.elapsedMs ?? 0)}`;
+        return {
+          text: renderStatusText(header, view.panels),
+          reply_markup: { inline_keyboard: view.outcome ? [] : [[{ text: "⏹ Stop", callback_data: options.background.stopId }]] },
+        };
+      },
+      throttleMs: options.throttleMs ?? (options.background || group ? GROUP_THROTTLE_MS : THROTTLE_MS),
+      rateKey: `telegram:${chatId}`,
+      keepOnFinish: !!options.background,
       toolRenderDelayMs: options.toolRenderDelayMs,
       idleRenderDelayMs: options.idleRenderDelayMs,
     });

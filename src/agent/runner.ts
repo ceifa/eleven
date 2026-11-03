@@ -111,6 +111,8 @@ export interface TurnRequest extends SessionTarget {
   deliver?: (result: TurnResult) => Promise<void>;
   /** Start a later turn in this conversation (see host-api.ts). */
   wake?: (text: string) => Promise<void>;
+  sessionSignal?: AbortSignal;
+  createBackground?: import("./host-api.ts").BackgroundStatusFactory;
 }
 
 export interface TurnEvents {
@@ -390,7 +392,11 @@ export class Runner {
         // a workspace extension publish panels from outside a tool call
         // (host-api.ts) and still be routed to the right conversation.
         const result = await runInTurn(
-          { panels: (update) => events.onPanels?.(update), wake: request.wake, hold: () => this.hold(threadId) },
+          {
+            panels: (update) => events.onPanels?.(update), wake: request.wake,
+            sessionSignal: request.sessionSignal, createBackground: request.createBackground,
+            hold: () => this.hold(threadId),
+          },
           () => this.runTurn(threadId, request, events),
         );
         // Inside the lane but outside runTurn: a delivery failure must not

@@ -47,13 +47,21 @@ const PANEL_STYLE = { title: (title: string) => `**${escapeMarkdown(title)}**`, 
  * the turn is going, the headline with what it is doing in small print, each
  * panel under a divider — and, while it runs, a button that stops it.
  */
-export function renderDiscordCard(view: StatusView): DiscordCard | undefined {
+export interface BackgroundCardOptions {
+  title: string;
+  stopId: string;
+}
+
+export function renderDiscordCard(view: StatusView, background?: BackgroundCardOptions): DiscordCard | undefined {
   const { panels, outcome, running, retry } = view;
   if (!panels.length && !outcome && !running && !retry) return undefined;
   const details: string[] = [];
-  if (running && running.elapsedMs >= ELAPSED_MIN_MS) details.push(formatDuration(running.elapsedMs));
+  if (background) details.push(formatDuration(view.elapsedMs ?? running?.elapsedMs ?? 0));
+  else if (running && running.elapsedMs >= ELAPSED_MIN_MS) details.push(formatDuration(running.elapsedMs));
   if (running?.tool) details.push(`🔧 ${escapeMarkdown(running.tool.name)}${running.tool.summary ? ` · ${escapeMarkdown(compact(running.tool.summary, 80))}` : ""}`);
-  const lines = [HEADLINE[outcome ?? "running"]];
+  const lines = [background
+    ? `${{ running: "⚙️", completed: "✅", failed: "❌", stopped: "⏹" }[outcome ?? "running"]} **${escapeMarkdown(compact(background.title))}** · ${outcome ?? "running"}`
+    : HEADLINE[outcome ?? "running"]];
   if (details.length) lines.push(`-# ${details.join(" · ")}`);
   if (retry) lines.push(`-# 🔁 Retry ${retry.attempt}/${retry.maxAttempts} · ${escapeMarkdown(compact(retry.errorMessage, 90))}`);
 
@@ -79,7 +87,7 @@ export function renderDiscordCard(view: StatusView): DiscordCard | undefined {
   if (!outcome) {
     components.push({
       type: ComponentType.ActionRow,
-      components: [{ type: ComponentType.Button, style: ButtonStyle.Secondary, label: "Stop", emoji: { name: "⏹" }, custom_id: STOP_BUTTON_ID }],
+      components: [{ type: ComponentType.Button, style: ButtonStyle.Secondary, label: "Stop", emoji: { name: "⏹" }, custom_id: background?.stopId ?? STOP_BUTTON_ID }],
     });
   }
   return { components };
@@ -91,8 +99,9 @@ export class DiscordTurnStatus extends TurnStatus<DiscordCard> {
   private typing: NodeJS.Timeout | undefined;
   private rest: DiscordRest;
   private channelId: string;
+  private background = false;
 
-  constructor(rest: DiscordRest, channelId: string, replyTo?: string) {
+  constructor(rest: DiscordRest, channelId: string, replyTo?: string, background?: BackgroundCardOptions) {
     let messageId: string | undefined;
     const tolerate = (error: unknown) => {
       if (!isNoop(error)) throw error;
@@ -112,13 +121,20 @@ export class DiscordTurnStatus extends TurnStatus<DiscordCard> {
       },
       edit: (card) => rest.request("PATCH", `/channels/${channelId}/messages/${messageId}`, { body: { ...card, flags: MessageFlags.IsComponentsV2 } }).then(() => {}, tolerate),
       remove: () => rest.request("DELETE", `/channels/${channelId}/messages/${messageId}`).then(() => {}, tolerate),
-    }, { render: renderDiscordCard, throttleMs: THROTTLE_MS, rateKey: `discord:${channelId}` });
+    }, {
+      render: (view) => renderDiscordCard(view, background),
+      throttleMs: background ? 3_000 : THROTTLE_MS,
+      rateKey: `discord:${channelId}`,
+      keepOnFinish: !!background,
+    });
     this.rest = rest;
     this.channelId = channelId;
+    if (background) this.background = true;
   }
 
   override start(): void {
     super.start();
+    if (this.background) return;
     const type = () => void this.rest.request("POST", `/channels/${this.channelId}/typing`).catch(() => {});
     type();
     this.typing = setInterval(type, TYPING_RENEW_MS);

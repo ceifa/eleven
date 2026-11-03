@@ -91,6 +91,8 @@ export interface IncomingMessage {
   /** Channel-resolved appends (e.g. group then topic) added after the workspace prompt. */
   appends?: string[];
   events?: TurnEvents;
+  createBackground?: import("./agent/host-api.ts").BackgroundStatusFactory;
+  expectedThreadId?: string;
   /** Commit the finished turn inside its producing thread's lane. The ID
    * stays fixed even if the conversation rotates while delivery settles. */
   deliver?: (result: TurnResult, threadId: string) => Promise<void>;
@@ -140,9 +142,10 @@ export class Gateway extends EventEmitter {
 
   /** Runs a turn nobody typed in a chat conversation. The daemon sets it:
    *  the channels own delivery, and the gateway does not know them. */
-  waker?: (sessionKey: string, text: string) => Promise<void>;
+  waker?: (sessionKey: string, text: string, threadId?: string) => Promise<void>;
   private config: ConfigStore;
   private liveTurns = new Map<string, LiveTurn>();
+  private sessionLifetimes = new Map<string, AbortController>();
 
   constructor(config: ConfigStore) {
     super();
@@ -158,6 +161,9 @@ export class Gateway extends EventEmitter {
 
   async handle(incoming: IncomingMessage): Promise<TurnResult | undefined> {
     const { thread, workspace } = this.resolveThread(incoming.sessionKey, incoming.workspaceHint);
+    if (incoming.expectedThreadId && incoming.expectedThreadId !== thread.id) {
+      throw new Error(`thread ${incoming.expectedThreadId.slice(0, 8)} is no longer the open conversation`);
+    }
     log.info(`turn start: ${incoming.sessionKey} → ${thread.workspace}/${thread.id.slice(0, 8)}`);
     // Bump on arrival, not just on completion: listings are ordered by last
     // activity, so a thread whose turn is still running (they can take minutes)
@@ -255,6 +261,8 @@ export class Gateway extends EventEmitter {
           compactWhenIdle: this.openChannelConversation(thread.id),
           deliver: incoming.deliver && ((result) => incoming.deliver!(result, thread.id)),
           wake: this.wakeFor(thread),
+          sessionSignal: this.sessionSignal(thread),
+          createBackground: incoming.createBackground,
         },
         events,
       );
@@ -299,7 +307,9 @@ export class Gateway extends EventEmitter {
   /** Start a fresh thread for a conversation (the /new command). Keeps prefs. */
   newThread(sessionKey: string, workspaceHint?: string): ThreadEntry {
     const workspace = this.workspaceFor(sessionKey, workspaceHint);
-    const thread = this.threads.rotate(sessionKey, workspace.name, this.threads.current(sessionKey));
+    const previous = this.threads.current(sessionKey);
+    if (previous) this.endSession(previous.id);
+    const thread = this.threads.rotate(sessionKey, workspace.name, previous);
     // Whoever rotated it, every watcher's idea of the conversation's current
     // thread just went stale — a /new typed in Telegram included.
     this.emit("thread-started", { threadId: thread.id, workspace: thread.workspace });
@@ -314,6 +324,7 @@ export class Gateway extends EventEmitter {
   async deleteThread(id: string): Promise<boolean> {
     const thread = this.threads.get(id);
     if (!thread) return false;
+    this.endSession(id);
     await this.runner.discard(id);
     if (thread.sessionFile) {
       await deleteReferencedMedia(thread.sessionFile);
@@ -443,6 +454,21 @@ export class Gateway extends EventEmitter {
     };
   }
 
+  private sessionSignal(thread: ThreadEntry): AbortSignal | undefined {
+    if (!isChannelSessionKey(thread.sessionKey)) return undefined;
+    let lifetime = this.sessionLifetimes.get(thread.id);
+    if (!lifetime) {
+      lifetime = new AbortController();
+      this.sessionLifetimes.set(thread.id, lifetime);
+    }
+    return lifetime.signal;
+  }
+
+  private endSession(id: string): void {
+    this.sessionLifetimes.get(id)?.abort();
+    this.sessionLifetimes.delete(id);
+  }
+
   /** How work a turn left running reports back later — only into the same
    * chat conversation, and only while it is still open. */
   private wakeFor(thread: ThreadEntry): ((text: string) => Promise<void>) | undefined {
@@ -452,7 +478,7 @@ export class Gateway extends EventEmitter {
     const { id, sessionKey } = thread;
     return async (text) => {
       if (!open()) throw new Error(`thread ${id.slice(0, 8)} is no longer the open conversation in ${sessionKey}`);
-      await waker(sessionKey, text);
+      await waker(sessionKey, text, id);
     };
   }
 
@@ -486,7 +512,9 @@ export class Gateway extends EventEmitter {
 
   private resolveThread(sessionKey: string, hint?: string) {
     const workspace = this.workspaceFor(sessionKey, hint);
+    const previous = this.threads.current(sessionKey);
     const thread = this.threads.resolve(sessionKey, workspace.name, this.idleMs());
+    if (previous && previous.id !== thread.id) this.endSession(previous.id);
     if (thread.workspace !== workspace.name) {
       // Thread was created under another workspace (e.g. /workspace switch) — honor it.
       const actual = this.config.resolved.workspaces[thread.workspace];

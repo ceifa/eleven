@@ -199,6 +199,28 @@ test("a provider picking up an answered Claude turn gets the head of large outpu
   assert.equal((await readToolResult(first!.sessionFile, "native-call"))?.output, long);
 });
 
+test("a screenshot a native tool returns is kept in the media store, not in the transcript", async () => {
+  const screenshot = Buffer.alloc(2048, 3).toString("base64");
+  installClaude(undefined, [nativeMessages[0], {
+    ...nativeMessages[1],
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "native-call", content: [
+      { type: "text", text: "the page" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: screenshot } },
+    ] }] },
+  } as SDKMessage, nativeMessages[2]]);
+  const workspace = join(scratch, "screenshot-workspace");
+  mkdirSync(workspace);
+  const first = await new Runner().submit("screenshot-thread", {
+    runtime: { channel: "test", workspace: "test", workspacePath: workspace },
+    sessionDir: join(scratch, "screenshot-sessions"), workspacePath: workspace, tools: ["read"], models: [{ model: "claude-code/default" }], text: "Look at the page",
+  });
+  const transcript = readFileSync(first!.sessionFile, "utf8");
+  assert.ok(!transcript.includes(screenshot));
+  const path = transcript.match(/"path":"([^"]+\.png)"/)?.[1];
+  assert.ok(path, "the image block points at its stored file");
+  assert.equal(readFileSync(path).toString("base64"), screenshot);
+});
+
 for (const runtime of ["history-reader/m", "claude-code/default"]) {
   test(`${runtime} receives a durable date update after midnight without changing its prefix`, async (t) => {
     const previousTZ = process.env.TZ;

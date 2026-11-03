@@ -48,6 +48,7 @@ import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
 import { readToolPanels, type PanelUpdate } from "./panels.ts";
 import { runWithPanelSink } from "./host-api.ts";
+import { LoadedImages, loadImages, storeImages } from "../media-store.ts";
 
 const log = logger("runner");
 
@@ -60,6 +61,9 @@ const CLAUDE_COMPACTION_ENTRY_TYPE = "eleven:claude-compaction";
 const SESSION_IDLE_MS = 10 * 60 * 1000;
 const SESSION_SWEEP_MS = 60 * 1000;
 const MAX_WARM_SESSIONS = 32;
+// A warm session keeps its images' data this long after a turn: back-to-back
+// turns send them again, an idle conversation needn't hold them.
+const IMAGES_IDLE_MS = 5 * 60 * 1000;
 
 /** Everything needed to reach a conversation's pi session on disk. */
 export interface SessionTarget {
@@ -308,6 +312,8 @@ interface WarmSession {
   lastUsedAt: number;
   /** Pending compaction before Claude's prompt cache expires; keeps the session warm until it runs. */
   idleCompaction?: NodeJS.Timeout;
+  /** Data of the images its transcript stores by reference, while it is in use. */
+  images: LoadedImages;
 }
 
 /** A candidate's effective policy: its allowlist ∩ the workspace's; undefined
@@ -336,7 +342,7 @@ function sameTools(a: ToolDefinition[] | undefined, b: ToolDefinition[] | undefi
 
 export interface RunnerHooks {
   /** Fired with the provider payload (a logical SDK invocation for nested runtimes). */
-  onProviderRequest?: (threadId: string, model: string, payload: unknown) => void;
+  onProviderRequest?: (threadId: string, model: string, payload: unknown, images: LoadedImages) => void;
   /** Fired when an owning turn begins (not for steered messages), with its
    * session file — lets the gateway record it as in-flight so an interrupted
    * turn can be woken back up after a restart. */
@@ -814,6 +820,7 @@ export class Runner {
     // actually in use, even after a mid-turn failover.
     const activeModel = { current: modelRef(initial.model) };
     const handoff: WarmSession["handoff"] = {};
+    const images = new LoadedImages();
 
     const settingsManager = SettingsManager.create(request.workspacePath, agentDir);
     // Pi compacts near the window unless told otherwise; the candidate driving
@@ -838,12 +845,18 @@ export class Runner {
         name: "eleven-runtime",
         factory: (pi: ExtensionAPI) => {
           pi.on("before_agent_start", () => ({ message: dateContextMessage(session.messages) }));
-          pi.on("context", (event) => ({ messages: boundRuntimeResults(withToolResults(event.messages)) }));
+          // Images go to the media store as each message settles, and come back
+          // only for the requests that still send them.
+          pi.on("message_end", (event) => {
+            const message = storeImages(event.message, images, threadId);
+            return message && { message };
+          });
+          pi.on("context", async (event) => ({ messages: await loadImages(boundRuntimeResults(withToolResults(event.messages)), images) }));
           pi.on("session_before_compact", (event) =>
             handoff.current ? { compaction: handoffCompaction(event.preparation, handoff.current, sessionManager.getSessionFile()) } : undefined);
           if (this.hooks.onProviderRequest) {
             pi.on("before_provider_request", (event) => {
-              this.hooks.onProviderRequest?.(threadId, activeModel.current, event.payload);
+              this.hooks.onProviderRequest?.(threadId, activeModel.current, event.payload, images);
               return undefined;
             });
           }
@@ -891,7 +904,8 @@ export class Runner {
       workspaceTools: request.tools,
       excludeNativeTools: request.excludeNativeTools,
       customTools: session.agent.state.tools.filter((tool) => customNames.includes(tool.name)),
-      onHistory: (message) => {
+      onHistory: (received) => {
+        const message = storeImages(received, images, threadId) ?? received;
         sessionManager.appendMessage(message);
         session.refreshContext();
         const active = this.active.get(threadId);
@@ -928,6 +942,7 @@ export class Runner {
       handoff,
       applyEntry,
       lastUsedAt: Date.now(),
+      images,
     };
     this.warm.set(threadId, warm);
     if (this.warm.size > MAX_WARM_SESSIONS) this.evictOldestSession(threadId);
@@ -963,8 +978,11 @@ export class Runner {
 
   private evictIdleSessions() {
     const cutoff = Date.now() - SESSION_IDLE_MS;
+    const imagesCutoff = Date.now() - IMAGES_IDLE_MS;
     for (const [threadId, warm] of this.warm) {
-      if (warm.lastUsedAt < cutoff && !warm.idleCompaction && !this.active.has(threadId)) this.dropSession(threadId);
+      if (this.active.has(threadId)) continue;
+      if (warm.lastUsedAt < cutoff && !warm.idleCompaction) this.dropSession(threadId);
+      else if (warm.lastUsedAt < imagesCutoff) warm.images.clear();
     }
   }
 

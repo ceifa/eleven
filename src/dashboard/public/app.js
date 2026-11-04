@@ -201,6 +201,12 @@ const FILE_ICON = `<svg viewBox="0 0 16 16" width="17" height="17" fill="none" s
 // or "CLI", and a bare word there would only stutter it.
 /** The conversation label without the channel type it opens with — the glyph
  *  next to it already says "telegram", and the word after it only stutters. */
+/** What a thread is called on screen: the forum topic, the group, or the person
+ *  in the DM — not the first 80 characters they happened to type. The card and
+ *  the open thread's head say the same thing, or the one you clicked is not the
+ *  one you see. */
+const threadName = (thread) => thread.conversationName ?? thread.sessionKey;
+
 function withoutChannelPrefix(label, sessionKey) {
   const type = sessionKey.split(":")[0];
   if (!CHANNEL_ICONS[type]) return label;
@@ -683,11 +689,9 @@ function buildThreadCard(thread, older) {
     },
     h("div", { class: "card-body py-3 px-4" },
       threadAvatar(thread),
-      // What you recognize a thread by: the forum topic, the group, or the
-      // person in the DM — not the first 80 characters they happened to type.
       h("div", { class: "thread-card-head flex items-center gap-2 text-sm" },
         channelSource(thread.sessionKey),
-        h("span", { class: "truncate min-w-0" }, thread.conversationName ?? thread.sessionKey),
+        h("span", { class: "truncate min-w-0" }, threadName(thread)),
         // Always in the markup, shown by CSS only on a live card: the halo says
         // "something is happening here" from the corner of your eye, and this
         // says it plainly. Painting it as a class keeps the card cacheable.
@@ -721,7 +725,7 @@ function buildThreadCard(thread, older) {
  * desktop, whose cards already carry the glyph at the head of the name.
  */
 function threadAvatar(thread) {
-  const name = thread.conversationName ?? thread.sessionKey;
+  const name = threadName(thread);
   const initial = name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "·";
   let hash = 0;
   for (const char of thread.sessionKey) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
@@ -1461,7 +1465,7 @@ function threadHeader(thread) {
         if (menu) menu.open = true;
       },
     },
-      h("div", { class: "thread-head-title truncate" }, thread.title ?? "(untitled)"),
+      h("div", { class: "thread-head-title truncate" }, threadName(thread)),
       h("div", { class: "thread-head-meta" },
         channelSource(thread.sessionKey),
         // The conversation in words; the raw session key stays one hover away.
@@ -1576,7 +1580,7 @@ function sheetInfo(thread) {
       h("span", { class: "sheet-info-label" }, label),
       h("span", { class: `sheet-info-value${tone}` }, value));
   const rows = [
-    h("div", { class: "sheet-info-title" }, thread.title ?? "(untitled)"),
+    h("div", { class: "sheet-info-title" }, threadName(thread)),
     row("Lives in", thread.conversation),
     row("Workspace", thread.workspace, " text-warning"),
   ];
@@ -2034,12 +2038,12 @@ const transcriptShown = new ResizeObserver(() => {
   el.scrollTop = el.scrollHeight;
   updateJumpButton();
 });
-// Everything the head paints. A thread gets its title after the first turn and
-// can change model mid-conversation, but neither happens on most re-renders —
+// Everything the head paints. A topic can be renamed and a thread can change
+// model mid-conversation, but neither happens on most re-renders —
 // and rebuilding the head for nothing would snap a menu shut under the pointer.
 let renderedHead;
 const headSignature = (thread) =>
-  `${thread.title}|${thread.conversation}|${thread.workspace}|${thread.effectiveModel ?? thread.model}|${state.showRequests}`;
+  `${threadName(thread)}|${thread.conversation}|${thread.workspace}|${thread.effectiveModel ?? thread.model}|${state.showRequests}`;
 
 /**
  * The pane between a thread being asked for and its transcript arriving.
@@ -2080,10 +2084,10 @@ function paneLoading(id) {
     h("header", { class: "thread-head" },
       backButton(),
       h("div", { class: "thread-head-text min-w-0" },
-        h("div", { class: "thread-head-title truncate" }, card?.title ?? "(untitled)"),
+        h("div", { class: "thread-head-title truncate" }, card ? threadName(card) : ""),
         h("div", { class: "thread-head-meta" },
           card ? channelSource(card.sessionKey) : null,
-          h("span", { class: "truncate" }, card ? withoutChannelPrefix(card.conversationName ?? card.sessionKey, card.sessionKey) : ""),
+          h("span", { class: "truncate" }, card ? withoutChannelPrefix(card.conversation, card.sessionKey) : ""),
         ),
       ),
     ),

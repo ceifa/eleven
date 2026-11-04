@@ -173,3 +173,20 @@ test("the request inspector identifies logical SDK invocations instead of callin
   assert.match(open, /"SDK invocation"/);
   assert.match(open, /not an individual provider request/);
 });
+
+test("the open thread's head is called what its card in the list is called", () => {
+  // The card leads with the conversation (topic, group, person) and keeps the
+  // first message for its second line. The head used to lead with that first
+  // message, so the thread you clicked was not the name you then read.
+  const heads = [
+    functionBody(app, "function buildThreadCard(thread, older)"),
+    functionBody(app, "function threadHeader(thread)"),
+    functionBody(app, "function paneLoading(id)"),
+    functionBody(app, "function sheetInfo(thread)"),
+  ];
+  for (const body of heads) {
+    assert.match(body, /threadName\((thread|card)\)/);
+    assert.doesNotMatch(body, /class: "(thread-head-title|sheet-info-title)[^"]*" \}, (thread|card\?)\.title/);
+  }
+  assert.match(app, /const headSignature = \(thread\) =>\s*`\$\{threadName\(thread\)\}/);
+});

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ButtonStyle, ComponentType, GatewayOpcodes } from "discord-api-types/v10";
+import { Agent, Request } from "undici";
 import { Bursts } from "../src/channels/burst.ts";
 import { Channels, type Channel } from "../src/channels/index.ts";
 import { addressesBot, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
@@ -309,6 +310,7 @@ test("files ride as multipart, announced in the payload", async () => {
     const { calls, impl } = fakeFetch([json(200, { id: "m1" })]);
     await new DiscordRest("token", impl).request("POST", "/channels/1/messages", { body: { content: "here" }, files: [{ path }], creates: true });
     const form = calls[0]!.init.body as FormData;
+    assert.match(new Request("https://discord.com", { method: "POST", body: form }).headers.get("content-type")!, /^multipart\/form-data/);
     const payload = JSON.parse(form.get("payload_json") as string);
     assert.ok(payload.nonce && payload.nonce.length <= 25);
     assert.equal(payload.enforce_nonce, true);
@@ -395,6 +397,21 @@ test("Discord message retries reuse a nonce instead of losing a reply after an a
   assert.equal(first.enforce_nonce, true);
   assert.equal(first.nonce, second.nonce);
   assert.ok(calls[0].init.signal instanceof AbortSignal, "a stalled connection must have a deadline");
+});
+
+test("a timed-out request takes its connection down, so the retry cannot stall on it", async () => {
+  const timeout = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  const { calls, impl } = fakeFetch([json(200, {}), timeout, json(200, { id: "m1" }), json(200, {})]);
+  const rest = new DiscordRest("token", impl);
+  await rest.request("PATCH", "/channels/1/messages/m0", { body: { content: "warm" } });
+  await rest.request("POST", "/channels/1/messages", { body: { content: "answer" }, creates: true });
+  await rest.request("PATCH", "/channels/1/messages/m1", { body: { content: "after" } });
+  const [warm, stalled, retry, after] = calls.map((call) => (call.init as { dispatcher?: Agent }).dispatcher);
+  assert.ok(warm instanceof Agent);
+  assert.equal(stalled, warm, "a healthy connection is reused");
+  assert.notEqual(retry, stalled);
+  assert.equal(stalled!.destroyed, true);
+  assert.equal(after, retry);
 });
 
 test("separate sends of identical text get different nonces", async () => {

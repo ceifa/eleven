@@ -874,6 +874,7 @@ export class Runner {
       }],
     });
     await loader.reload();
+    for (const { path, error } of loader.getExtensions().errors) log.warn(`extension ${path} failed to load: ${error}`);
     const extensionToolNames = loader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()]);
 
     const { session } = await createAgentSession({

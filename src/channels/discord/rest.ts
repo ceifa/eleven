@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { basename } from "node:path";
+import { Agent, FormData, fetch as undiciFetch, type RequestInit, type Response } from "undici";
 import { logger } from "../../log.ts";
 
 const log = logger("discord/rest");
@@ -67,9 +68,10 @@ export interface RequestOptions {
  */
 export class DiscordRest {
   private token: string;
-  private fetch: typeof fetch;
+  private fetch: typeof undiciFetch;
+  private dispatcher = new Agent();
 
-  constructor(token: string, fetchImpl: typeof fetch = fetch) {
+  constructor(token: string, fetchImpl: typeof undiciFetch = undiciFetch) {
     this.token = token;
     this.fetch = fetchImpl;
   }
@@ -85,8 +87,10 @@ export class DiscordRest {
       deadline?.throwIfAborted();
       let response: Response;
       let body: Record<string, unknown> | undefined;
+      const dispatcher = this.dispatcher;
       try {
         response = await this.fetch(`${API}${path}`, {
+          dispatcher,
           method,
           headers: {
             authorization: `Bot ${this.token}`,
@@ -105,6 +109,7 @@ export class DiscordRest {
           if (!(error instanceof SyntaxError)) throw error;
         }
       } catch (error) {
+        this.drop(dispatcher);
         if (message && !preConnect(error)) uncertain = true;
         if (deadline?.aborted || attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw terminal(error);
         await this.wait(path, attempt, undefined, error, deadline);
@@ -119,6 +124,15 @@ export class DiscordRest {
       if (!retriable || attempt >= MAX_ATTEMPTS) throw terminal(new DiscordApiError(response.status, body));
       await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`, deadline);
     }
+  }
+
+  /** Discord speaks HTTP/2, so every call shares one connection, and a
+   *  timeout cancels only its own request: a connection that stopped
+   *  answering would take every later call down with it. */
+  private drop(dispatcher: Agent) {
+    if (dispatcher !== this.dispatcher) return;
+    this.dispatcher = new Agent();
+    void dispatcher.destroy().catch(() => {});
   }
 
   get<T = unknown>(path: string) {

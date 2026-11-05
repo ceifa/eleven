@@ -61,7 +61,8 @@ export function telegramTool(api: Api, chatId: number, messageThreadId?: number,
     description:
       "Interact with the current Telegram chat beyond your normal reply: send extra messages, " +
       "media files, inline buttons, reactions, or delete a message you sent. Your final answer " +
-      "is delivered automatically — do NOT repeat content you already sent with this tool.",
+      "is delivered automatically — do NOT repeat content you already sent with this tool. If a message " +
+      "you sent already is the answer, end the turn with no text at all: an empty final answer sends nothing.",
     parameters,
     async execute(_id, params: Static<typeof parameters>) {
       const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });

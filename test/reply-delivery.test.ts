@@ -169,3 +169,24 @@ test("a failed final persistence cleans live state without clearing interrupted 
   await assert.rejects(runner.submit("thread", { deliver: async () => { throw new Error("disk full"); } } as never), /disk full/);
   assert.deepEqual(ended, [["thread", true]]);
 });
+
+test("a turn that ends with no text queues nothing for the chat", async () => {
+  const pending = ledger();
+  const turn: ChatTurn<undefined> = {
+    gateway: {
+      hasPendingReply: () => pending.replies().length > 0,
+      queueReply: (_id: string, sessionKey: string, text: string) => pending.complete("thread", sessionKey, text),
+      handle: async (incoming) => {
+        pending.begin("thread");
+        await incoming.deliver!({ text: "", status: "completed" } as never, "thread");
+      },
+    } as ChatTurn<undefined>["gateway"],
+    sessionKey: "discord:main:1:2", text: "question", images: [], incoming: {}, sent: new Set(["the answer, with buttons"]),
+    status: { start() {}, panels() {}, tool() {}, retry() {}, finish: async () => {}, cancel() {} },
+    send: async () => { throw new Error("nothing should be sent"); },
+    failovers: new FailoverOffers(), replay: undefined, autoFailover: () => false, log: logger("delivery-test"),
+  };
+  await runChatTurn(turn);
+  assert.deepEqual(pending.replies(), []);
+  assert.deepEqual(pending.drain(), []);
+});

@@ -499,10 +499,16 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     const guildId = interaction.guild_id;
     const target: Target = guildId ? { channelId, guildId } : { channelId, userId: user.id };
     if (!guildId) dmChannels.set(user.id, channelId);
-    // Discord tells the user on its own when an acknowledgment misses its
-    // window; what the command or the press asked for still happens.
-    const respond = (body: unknown) => rest.request("POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { body })
-      .then(() => true, (error) => (log.warn(`interaction acknowledgment failed: ${error}`), false));
+    // Discord tells the user itself when an acknowledgment misses its window.
+    const respond = async (body: unknown) => {
+      try {
+        await rest.acknowledge(interaction.id, interaction.token, body);
+        return true;
+      } catch (error) {
+        log.warn(`interaction acknowledgment failed: ${error}`);
+        return false;
+      }
+    };
 
     // Same access policy as messages, minus the mention gate (a command or a
     // press is explicit).
@@ -553,7 +559,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       void runTurn(target, `[inline button pressed]\n${data}`, []);
     }
   }
-
 
   /** The person took one of the two ways out a failed turn offered: pick the
    * dead turn up where it stopped, or run the original request from nothing —
@@ -826,9 +831,7 @@ export function formatDiscordInboundPrompt(message: Pick<APIMessage, "author" | 
   return `${lines.join("\n")}\n${body}`;
 }
 
-/** A slash command's answer. The first piece replaces the "thinking…" its
- *  acknowledgment left, the rest follow it; when Discord never took the
- *  acknowledgment, that slot doesn't exist and the answer goes to the channel. */
+/** Without a landed acknowledgment there is no "thinking…" slot to fill, so the answer goes to the channel. */
 export async function answerCommand(
   rest: DiscordRest,
   channelId: string,

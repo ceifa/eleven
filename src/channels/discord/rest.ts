@@ -79,7 +79,6 @@ export class DiscordRest {
   }
 
   async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
-    if (path.startsWith("/interactions/")) return this.acknowledge(path, options) as Promise<T>;
     const message = method === "POST" && /^\/channels\/\d+\/messages$/.test(path);
     if (message) options = { ...options, body: { ...options.body as object, nonce: randomBytes(12).toString("hex"), enforce_nonce: true } };
     const repeatable = message || !options.creates;
@@ -107,22 +106,19 @@ export class DiscordRest {
     }
   }
 
-  /**
-   * Discord takes an interaction's answer only within three seconds of
-   * creating it, and a slow link can spend most of them delivering the event.
-   * Aborting a slow attempt to retry it throws away the one most likely to
-   * land, so a stalled acknowledgment is raced on a fresh connection instead.
-   */
-  private async acknowledge(path: string, options: RequestOptions): Promise<void> {
+  /** Discord takes an answer only within three seconds of the event, so a stalled acknowledgment is raced, not aborted. */
+  async acknowledge(interactionId: string, token: string, body: unknown): Promise<void> {
+    const path = `/interactions/${interactionId}/${token}/callback`;
     const done = new AbortController();
     const signal = AbortSignal.any([done.signal, AbortSignal.timeout(INTERACTION_TIMEOUT_MS)]);
     const shared = this.dispatcher;
-    const spare = new Agent();
+    let spare: Agent | undefined;
+    let winner: Agent | undefined;
     const send = async (dispatcher: Agent, hedge: boolean) => {
-      const { response, body } = await this.exchange("POST", path, options, dispatcher, signal);
+      const { response, body: answer } = await this.exchange("POST", path, { body }, dispatcher, signal);
       // On the hedge, "already acknowledged" means the first attempt landed.
-      if (response.ok || (hedge && body?.code === 40060)) return;
-      throw new DiscordApiError(response.status, body);
+      if (!response.ok && !(hedge && answer?.code === 40060)) throw new DiscordApiError(response.status, answer);
+      winner ??= dispatcher;
     };
     const first = send(shared, false);
     const second = new Promise<void>((resolve, reject) => {
@@ -133,21 +129,24 @@ export class DiscordRest {
         clearTimeout(timer);
         if (cause instanceof DiscordApiError && cause.status < 500) return reject(cause);
         log.warn(`${redact(path)} ${cause ? `failed: ${detail(cause)}` : "is slow"}, racing it on a fresh connection`);
+        spare = new Agent();
         send(spare, true).then(resolve, reject);
       };
       const timer = setTimeout(() => race(undefined), INTERACTION_HEDGE_MS);
       first.then(() => clearTimeout(timer), (error) => {
-        if (!(error instanceof DiscordApiError)) this.drop(shared);
+        if (!(error instanceof DiscordApiError) && !done.signal.aborted) this.drop(shared);
         race(error);
       });
     });
     try {
       await Promise.any([first, second]);
     } catch (error) {
-      throw (error as AggregateError).errors.at(-1);
+      if (error instanceof AggregateError) throw error.errors.at(-1);
+      throw error;
     } finally {
       done.abort();
-      void spare.destroy().catch(() => {});
+      // The connection that answered is the one worth keeping.
+      if (spare && !(winner === spare && this.drop(shared, spare))) void spare.destroy().catch(() => {});
     }
   }
 
@@ -177,10 +176,11 @@ export class DiscordRest {
   /** Discord speaks HTTP/2, so every call shares one connection, and a
    *  timeout cancels only its own request: a connection that stopped
    *  answering would take every later call down with it. */
-  private drop(dispatcher: Agent) {
-    if (dispatcher !== this.dispatcher) return;
-    this.dispatcher = new Agent();
+  private drop(dispatcher: Agent, next = new Agent()): boolean {
+    if (dispatcher !== this.dispatcher) return false;
+    this.dispatcher = next;
     void dispatcher.destroy().catch(() => {});
+    return true;
   }
 
   get<T = unknown>(path: string) {

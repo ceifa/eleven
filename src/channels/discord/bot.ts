@@ -499,7 +499,16 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     const guildId = interaction.guild_id;
     const target: Target = guildId ? { channelId, guildId } : { channelId, userId: user.id };
     if (!guildId) dmChannels.set(user.id, channelId);
-    const respond = (body: unknown) => rest.request("POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { body });
+    // Discord tells the user itself when an acknowledgment misses its window.
+    const respond = async (body: unknown) => {
+      try {
+        await rest.acknowledge(interaction.id, interaction.token, body);
+        return true;
+      } catch (error) {
+        log.warn(`interaction acknowledgment failed: ${error}`);
+        return false;
+      }
+    };
 
     // Same access policy as messages, minus the mention gate (a command or a
     // press is explicit).
@@ -513,9 +522,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       log.info(`command /${interaction.data.name} in ${sessionKey}`);
       // Answer within Discord's three seconds, then take the time the command
       // needs (/usage asks every provider).
-      await respond({ type: InteractionResponseType.DeferredChannelMessageWithSource });
+      const acknowledged = await respond({ type: InteractionResponseType.DeferredChannelMessageWithSource });
       const answer = (await runCommand(interaction.data.name, commandContext(sessionKey))) ?? "Unknown command.";
-      await followUp(interaction.application_id, interaction.token, answer);
+      await answerCommand(rest, channelId, interaction, acknowledged, answer);
       return;
     }
 
@@ -539,22 +548,15 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
       // A pressed row has done its job: grey it out so the same action can't
       // be fired twice (and so the chat records which option was taken). This
       // is also the answer Discord waits for.
-      await respond({ type: InteractionResponseType.UpdateMessage, data: { components: disableComponents(interaction.message.components, data) } });
+      const components = disableComponents(interaction.message.components, data);
+      if (!await respond({ type: InteractionResponseType.UpdateMessage, data: { components } })) {
+        await rest.request("PATCH", `/channels/${channelId}/messages/${interaction.message.id}`, { body: { components } })
+          .catch((error) => log.warn(`could not disable pressed buttons: ${error}`));
+      }
       if (data.startsWith(FAILOVER_PREFIX)) return retryOnFallback(data, target);
       // The marker on a line of its own is the dashboard's press prompt too, and
       // what lets the transcript draw it as a caption instead of as prose.
       void runTurn(target, `[inline button pressed]\n${data}`, []);
-    }
-  }
-
-  /** The deferred answer to a slash command: the first piece replaces Discord's
-   *  "thinking…", the rest follow it. */
-  async function followUp(applicationId: string, interactionToken: string, markdown: string) {
-    const [first, ...more] = discordChunks(markdown);
-    const flags = MessageFlags.SuppressEmbeds;
-    await rest.request("PATCH", `/webhooks/${applicationId}/${interactionToken}/messages/@original`, { body: { content: first ?? "Done.", flags } });
-    for (const content of more) {
-      await rest.request("POST", `/webhooks/${applicationId}/${interactionToken}`, { body: { content, flags }, creates: true });
     }
   }
 
@@ -827,4 +829,25 @@ export function formatDiscordInboundPrompt(message: Pick<APIMessage, "author" | 
       : toSelf ? "[Replying to your message]" : `[Replying to a message from ${who}]`);
   }
   return `${lines.join("\n")}\n${body}`;
+}
+
+/** Without a landed acknowledgment there is no "thinking…" slot to fill, so the answer goes to the channel. */
+export async function answerCommand(
+  rest: DiscordRest,
+  channelId: string,
+  interaction: Pick<APIInteraction, "application_id" | "token">,
+  acknowledged: boolean,
+  markdown: string,
+) {
+  if (!acknowledged) {
+    await sendMessage(rest, channelId, markdown);
+    return;
+  }
+  const [first, ...more] = discordChunks(markdown);
+  const flags = MessageFlags.SuppressEmbeds;
+  const webhook = `/webhooks/${interaction.application_id}/${interaction.token}`;
+  await rest.request("PATCH", `${webhook}/messages/@original`, { body: { content: first ?? "Done.", flags } });
+  for (const content of more) {
+    await rest.request("POST", webhook, { body: { content, flags }, creates: true });
+  }
 }

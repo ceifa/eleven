@@ -9,7 +9,7 @@ import { ButtonStyle, ComponentType, GatewayOpcodes } from "discord-api-types/v1
 import { Agent, Request } from "undici";
 import { Bursts } from "../src/channels/burst.ts";
 import { Channels, type Channel } from "../src/channels/index.ts";
-import { addressesBot, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
+import { addressesBot, answerCommand, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
 import { DiscordGateway } from "../src/channels/discord/gateway.ts";
 import { discordChunks, toDiscordMarkdown } from "../src/channels/discord/markdown.ts";
 import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
@@ -424,7 +424,7 @@ test("separate sends of identical text get different nonces", async () => {
   assert.notEqual(nonces[0], nonces[1]);
 });
 
-test("an interaction acknowledgment cannot spend five minutes waiting past Discord's three-second deadline", async () => {
+test("an interaction acknowledgment cannot spend five minutes waiting on a dead link", async () => {
   let attempts = 0;
   const keepAlive = setInterval(() => {}, 1_000);
   try {
@@ -436,14 +436,46 @@ test("an interaction acknowledgment cannot spend five minutes waiting past Disco
     }) as typeof fetch;
     const started = Date.now();
     await assert.rejects(
-      new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } }),
+      new DiscordRest("token", impl).acknowledge("1", "private-token", { type: 5 }),
       { name: "TimeoutError" },
     );
     assert.equal(attempts, 2);
-    assert.ok(Date.now() - started < 3_000);
+    assert.ok(Date.now() - started < 7_000);
   } finally {
     clearInterval(keepAlive);
   }
+});
+
+test("a slow acknowledgment is raced, not abandoned, so a high-latency link still answers in time", async () => {
+  const sent: number[] = [];
+  const impl = (async (_url: string, init: RequestInit) => {
+    sent.push(Date.now());
+    // Every round trip takes 1.5s: aborting at 1s and retrying never lands.
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 1_500);
+      init.signal!.addEventListener("abort", () => (clearTimeout(timer), reject(init.signal!.reason)), { once: true });
+    });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const started = Date.now();
+  await new DiscordRest("token", impl).acknowledge("1", "private-token", { type: 5 });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 1_400 && elapsed < 2_000, `the first attempt answered (${elapsed}ms)`);
+  assert.equal(sent.length, 2, "the hedge started while the first attempt was still in flight");
+});
+
+test("a command whose acknowledgment never landed answers in the channel instead of a reply slot that doesn't exist", async () => {
+  const interaction = { application_id: "app", token: "private-token" };
+  const lost = fakeFetch([json(200, { id: "m1" })]);
+  await answerCommand(new DiscordRest("token", lost.impl), "42", interaction, false, "New conversation started.");
+  assert.equal(lost.calls.length, 1);
+  assert.match(lost.calls[0].url, /\/channels\/42\/messages$/);
+  assert.equal(JSON.parse(lost.calls[0].init.body as string).content, "New conversation started.");
+
+  const acked = fakeFetch([json(200, { id: "m2" })]);
+  await answerCommand(new DiscordRest("token", acked.impl), "42", interaction, true, "New conversation started.");
+  assert.match(acked.calls[0].url, /\/webhooks\/app\/private-token\/messages\/@original$/);
+  assert.equal(acked.calls[0].init.method, "PATCH");
 });
 
 
@@ -469,20 +501,27 @@ test("a stalled response body is aborted and retried rather than accepted as a d
   }
 });
 
-test("a stalled acknowledgment leaves time to retry before the interaction expires", async () => {
-  let attempts = 0;
+test("a stalled acknowledgment is won on a fresh connection, which later calls then use", async () => {
+  const dispatchers: Agent[] = [];
   const keepAlive = setInterval(() => {}, 1_000);
   try {
     const impl = (async (_url: string, init: RequestInit) => {
-      if (++attempts === 1) {
+      dispatchers.push((init as { dispatcher: Agent }).dispatcher);
+      if (dispatchers.length === 1) {
         await new Promise((_, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true }));
       }
       return new Response(null, { status: 204 });
     }) as typeof fetch;
+    const rest = new DiscordRest("token", impl);
     const started = Date.now();
-    await new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } });
-    assert.equal(attempts, 2);
+    await rest.acknowledge("1", "private-token", { type: 5 });
     assert.ok(Date.now() - started < 3_000);
+    await rest.request("PATCH", "/channels/1/messages/m1", { body: { content: "after" } });
+    const [stalled, hedge, after] = dispatchers;
+    assert.notEqual(hedge, stalled);
+    assert.equal(after, hedge);
+    assert.equal(stalled!.destroyed, true);
+    assert.equal(hedge!.destroyed, false);
   } finally {
     clearInterval(keepAlive);
   }
@@ -490,11 +529,11 @@ test("a stalled acknowledgment leaves time to retry before the interaction expir
 
 test("an acknowledgment whose reply was lost is accepted when Discord confirms the retry is already acknowledged", async () => {
   const { calls, impl } = fakeFetch([new TypeError("fetch failed"), json(400, { code: 40060, message: "Interaction has already been acknowledged." })]);
-  await new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } });
+  await new DiscordRest("token", impl).acknowledge("1", "private-token", { type: 5 });
   assert.equal(calls.length, 2);
 
   await assert.rejects(
-    new DiscordRest("token", fakeFetch([json(400, { code: 40060 })]).impl).request("POST", "/interactions/1/private-token/callback"),
+    new DiscordRest("token", fakeFetch([json(400, { code: 40060 })]).impl).acknowledge("1", "private-token", { type: 5 }),
     (error: unknown) => error instanceof DiscordApiError && error.code === 40060,
   );
 });

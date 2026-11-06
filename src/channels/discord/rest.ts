@@ -13,8 +13,10 @@ const MAX_ATTEMPTS = 4;
 const BASE_DELAY_MS = 500;
 const RETRY_AFTER_CAP_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
-const INTERACTION_TIMEOUT_MS = 2_500;
-const INTERACTION_ATTEMPT_TIMEOUT_MS = 1_000;
+// An acknowledgment that reached Discord in time can still answer late on a
+// slow link, and whether it landed decides where the command's answer goes.
+const INTERACTION_TIMEOUT_MS = 6_000;
+const INTERACTION_HEDGE_MS = 1_000;
 
 /** Errors that provably happened before the request reached Discord. */
 const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
@@ -82,71 +84,118 @@ export class DiscordRest {
     const repeatable = message || !options.creates;
     let uncertain = false;
     const terminal = (error: unknown) => uncertain ? new DiscordSendUncertain(String(error), { cause: error }) : error;
-    const deadline = path.startsWith("/interactions/") ? AbortSignal.timeout(INTERACTION_TIMEOUT_MS) : undefined;
     for (let attempt = 1; ; attempt++) {
-      deadline?.throwIfAborted();
       let response: Response;
       let body: Record<string, unknown> | undefined;
       const dispatcher = this.dispatcher;
       try {
-        response = await this.fetch(`${API}${path}`, {
-          dispatcher,
-          method,
-          headers: {
-            authorization: `Bot ${this.token}`,
-            "user-agent": USER_AGENT,
-            ...(options.files?.length || options.body === undefined ? {} : { "content-type": "application/json" }),
-          },
-          body: await encode(options),
-          signal: deadline
-            ? AbortSignal.any([deadline, AbortSignal.timeout(INTERACTION_ATTEMPT_TIMEOUT_MS)])
-            : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-        if (response.status === 204) return undefined as T;
-        try {
-          body = await response.json() as Record<string, unknown>;
-        } catch (error) {
-          if (!(error instanceof SyntaxError)) throw error;
-        }
+        ({ response, body } = await this.exchange(method, path, options, dispatcher, AbortSignal.timeout(REQUEST_TIMEOUT_MS)));
       } catch (error) {
         this.drop(dispatcher);
         if (message && !preConnect(error)) uncertain = true;
-        if (deadline?.aborted || attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw terminal(error);
-        await this.wait(path, attempt, undefined, error, deadline);
+        if (attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw terminal(error);
+        await this.wait(path, attempt, undefined, error);
         continue;
       }
       if (response.ok) return body as T;
-      // Discord's "already acknowledged" confirms the previous callback landed.
-      if (deadline && attempt > 1 && body?.code === 40060) return undefined as T;
       if (message && response.status >= 500) uncertain = true;
       const retryAfter = response.status === 429 ? retryAfterMs(response, body) : undefined;
       const retriable = retryAfter !== undefined || (response.status >= 500 && repeatable);
       if (!retriable || attempt >= MAX_ATTEMPTS) throw terminal(new DiscordApiError(response.status, body));
-      await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`, deadline);
+      await this.wait(path, attempt, retryAfter, `HTTP ${response.status}`);
     }
+  }
+
+  /** Discord takes an answer only within three seconds of the event, so a stalled acknowledgment is raced, not aborted. */
+  async acknowledge(interactionId: string, token: string, body: unknown): Promise<void> {
+    const path = `/interactions/${interactionId}/${token}/callback`;
+    const done = new AbortController();
+    const signal = AbortSignal.any([done.signal, AbortSignal.timeout(INTERACTION_TIMEOUT_MS)]);
+    const shared = this.dispatcher;
+    let spare: Agent | undefined;
+    let winner: Agent | undefined;
+    const send = async (dispatcher: Agent, hedge: boolean) => {
+      const { response, body: answer } = await this.exchange("POST", path, { body }, dispatcher, signal);
+      // On the hedge, "already acknowledged" means the first attempt landed.
+      if (!response.ok && !(hedge && answer?.code === 40060)) throw new DiscordApiError(response.status, answer);
+      winner ??= dispatcher;
+    };
+    const first = send(shared, false);
+    const second = new Promise<void>((resolve, reject) => {
+      let started = false;
+      const race = (cause: unknown) => {
+        if (started) return;
+        started = true;
+        clearTimeout(timer);
+        if (cause instanceof DiscordApiError && cause.status < 500) return reject(cause);
+        log.warn(`${redact(path)} ${cause ? `failed: ${detail(cause)}` : "is slow"}, racing it on a fresh connection`);
+        spare = new Agent();
+        send(spare, true).then(resolve, reject);
+      };
+      const timer = setTimeout(() => race(undefined), INTERACTION_HEDGE_MS);
+      first.then(() => clearTimeout(timer), (error) => {
+        if (!(error instanceof DiscordApiError) && !done.signal.aborted) this.drop(shared);
+        race(error);
+      });
+    });
+    try {
+      await Promise.any([first, second]);
+    } catch (error) {
+      if (error instanceof AggregateError) throw error.errors.at(-1);
+      throw error;
+    } finally {
+      done.abort();
+      // The connection that answered is the one worth keeping.
+      if (spare && !(winner === spare && this.drop(shared, spare))) void spare.destroy().catch(() => {});
+    }
+  }
+
+  /** One round trip: the response, and its JSON body when there is one. */
+  private async exchange(method: string, path: string, options: RequestOptions, dispatcher: Agent, signal: AbortSignal) {
+    const response = await this.fetch(`${API}${path}`, {
+      dispatcher,
+      method,
+      headers: {
+        authorization: `Bot ${this.token}`,
+        "user-agent": USER_AGENT,
+        ...(options.files?.length || options.body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: await encode(options),
+      signal,
+    });
+    let body: Record<string, unknown> | undefined;
+    if (response.status === 204) return { response, body };
+    try {
+      body = await response.json() as Record<string, unknown>;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+    return { response, body };
   }
 
   /** Discord speaks HTTP/2, so every call shares one connection, and a
    *  timeout cancels only its own request: a connection that stopped
    *  answering would take every later call down with it. */
-  private drop(dispatcher: Agent) {
-    if (dispatcher !== this.dispatcher) return;
-    this.dispatcher = new Agent();
+  private drop(dispatcher: Agent, next = new Agent()): boolean {
+    if (dispatcher !== this.dispatcher) return false;
+    this.dispatcher = next;
     void dispatcher.destroy().catch(() => {});
+    return true;
   }
 
   get<T = unknown>(path: string) {
     return this.request<T>("GET", path);
   }
 
-  private async wait(path: string, attempt: number, retryAfter: number | undefined, cause: unknown, signal?: AbortSignal): Promise<void> {
+  private async wait(path: string, attempt: number, retryAfter: number | undefined, cause: unknown): Promise<void> {
     const ms = retryAfter ?? BASE_DELAY_MS * 2 ** (attempt - 1);
-    const route = path.replace(/^(\/interactions|\/webhooks)\/([^/]+)\/[^/]+/, "$1/$2/[redacted]");
-    const detail = cause instanceof Error && cause.cause ? `${cause}: ${cause.cause}` : String(cause);
-    log.warn(`${route} failed (attempt ${attempt}), retrying in ${Math.round(ms)}ms: ${detail}`);
-    await delay(ms, undefined, { signal });
+    log.warn(`${redact(path)} failed (attempt ${attempt}), retrying in ${Math.round(ms)}ms: ${detail(cause)}`);
+    await delay(ms);
   }
 }
+
+const redact = (path: string) => path.replace(/^(\/interactions|\/webhooks)\/([^/]+)\/[^/]+/, "$1/$2/[redacted]");
+const detail = (cause: unknown) => cause instanceof Error && cause.cause ? `${cause}: ${cause.cause}` : String(cause);
 
 /** JSON, or multipart when files ride along: the payload in `payload_json`,
  *  each file as `files[n]` and announced in `attachments`. */

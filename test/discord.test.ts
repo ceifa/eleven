@@ -9,7 +9,7 @@ import { ButtonStyle, ComponentType, GatewayOpcodes } from "discord-api-types/v1
 import { Agent, Request } from "undici";
 import { Bursts } from "../src/channels/burst.ts";
 import { Channels, type Channel } from "../src/channels/index.ts";
-import { addressesBot, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
+import { addressesBot, answerCommand, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
 import { DiscordGateway } from "../src/channels/discord/gateway.ts";
 import { discordChunks, toDiscordMarkdown } from "../src/channels/discord/markdown.ts";
 import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
@@ -424,7 +424,7 @@ test("separate sends of identical text get different nonces", async () => {
   assert.notEqual(nonces[0], nonces[1]);
 });
 
-test("an interaction acknowledgment cannot spend five minutes waiting past Discord's three-second deadline", async () => {
+test("an interaction acknowledgment cannot spend five minutes waiting on a dead link", async () => {
   let attempts = 0;
   const keepAlive = setInterval(() => {}, 1_000);
   try {
@@ -440,10 +440,42 @@ test("an interaction acknowledgment cannot spend five minutes waiting past Disco
       { name: "TimeoutError" },
     );
     assert.equal(attempts, 2);
-    assert.ok(Date.now() - started < 3_000);
+    assert.ok(Date.now() - started < 7_000);
   } finally {
     clearInterval(keepAlive);
   }
+});
+
+test("a slow acknowledgment is raced, not abandoned, so a high-latency link still answers in time", async () => {
+  const sent: number[] = [];
+  const impl = (async (_url: string, init: RequestInit) => {
+    sent.push(Date.now());
+    // Every round trip takes 1.5s: aborting at 1s and retrying never lands.
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 1_500);
+      init.signal!.addEventListener("abort", () => (clearTimeout(timer), reject(init.signal!.reason)), { once: true });
+    });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const started = Date.now();
+  await new DiscordRest("token", impl).request("POST", "/interactions/1/private-token/callback", { body: { type: 5 } });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 1_400 && elapsed < 2_000, `the first attempt answered (${elapsed}ms)`);
+  assert.equal(sent.length, 2, "the hedge started while the first attempt was still in flight");
+});
+
+test("a command whose acknowledgment never landed answers in the channel instead of a reply slot that doesn't exist", async () => {
+  const interaction = { application_id: "app", token: "private-token" };
+  const lost = fakeFetch([json(200, { id: "m1" })]);
+  await answerCommand(new DiscordRest("token", lost.impl), "42", interaction, false, "New conversation started.");
+  assert.equal(lost.calls.length, 1);
+  assert.match(lost.calls[0].url, /\/channels\/42\/messages$/);
+  assert.equal(JSON.parse(lost.calls[0].init.body as string).content, "New conversation started.");
+
+  const acked = fakeFetch([json(200, { id: "m2" })]);
+  await answerCommand(new DiscordRest("token", acked.impl), "42", interaction, true, "New conversation started.");
+  assert.match(acked.calls[0].url, /\/webhooks\/app\/private-token\/messages\/@original$/);
+  assert.equal(acked.calls[0].init.method, "PATCH");
 });
 
 

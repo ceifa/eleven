@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   ChannelType,
   GatewayDispatchEvents,
@@ -20,6 +21,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ChannelConfig } from "../../config.ts";
 import { formatInboundBody } from "../../media-store.ts";
 import { logger } from "../../log.ts";
+import { STATE_DIR } from "../../paths.ts";
 import { keyedLane, lruTouch } from "../../util.ts";
 import { capped } from "../avatars.ts";
 import type { BotDeps } from "../bots.ts";
@@ -32,6 +34,7 @@ import type { PairingRequest } from "../pairing.ts";
 import { topicChain } from "../session-key.ts";
 import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
+import { BACKFILL_MAX_PER_CHANNEL, BACKFILL_WINDOW_MS, isNewer, missedMessages, snowflakeAt, Watermark } from "./backfill.ts";
 import { DiscordGateway } from "./gateway.ts";
 import { collectInboundMedia } from "./media.ts";
 import { DiscordRest } from "./rest.ts";
@@ -49,6 +52,8 @@ const MAX_CHAT_TOOLS = 128;
 // The heartbeat runs every ~41 s; two missed acks is a dead connection.
 const HEALTHY_ACK_MS = 100_000;
 const CDN = "https://cdn.discordapp.com";
+// How stale the on-disk "still listening" mark may get; a restart replays from it.
+const WATERMARK_EVERY_MS = 15_000;
 
 /** Where a turn lands, distilled from a live event or a bare session key (a
  * wake-up after restart has nothing else to read from). */
@@ -96,10 +101,10 @@ export interface BotHandle {
   stop(): Promise<void>;
 }
 
-export function startDiscordBot(name: string, token: string, deps: BotDeps): BotHandle {
+export function startDiscordBot(name: string, token: string, deps: BotDeps, io?: { rest: DiscordRest; gateway: DiscordGateway }): BotHandle {
   const log = logger(`discord/${name}`);
-  const rest = new DiscordRest(token);
-  const gateway = new DiscordGateway(token, INTENTS, log);
+  const rest = io?.rest ?? new DiscordRest(token);
+  const gateway = io?.gateway ?? new DiscordGateway(token, INTENTS, log);
   let self: APIUser | undefined;
   let commandsSynced = false;
 
@@ -164,6 +169,21 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   const alreadyHandled = createSeenMessages();
   const archiveTimer = setInterval(() => void flushArchives(), 60_000);
   archiveTimer.unref();
+  const watermark = new Watermark(join(STATE_DIR, "discord", `${name}.json`));
+  const listening = () => {
+    if (!handle.connected()) return;
+    try {
+      watermark.save(Date.now());
+    } catch (error) {
+      log.warn(`could not save the watermark: ${error}`);
+    }
+  };
+  const watermarkTimer = setInterval(listening, WATERMARK_EVERY_MS);
+  watermarkTimer.unref();
+  // A READY (unlike RESUMED) starts a session that replays nothing: whatever
+  // was sent since the watermark is fetched instead, guild by guild as each
+  // one arrives.
+  let backfill: { since: string; guilds: Set<string> } | undefined;
 
   function discardBurst(sessionKey: string): boolean {
     return bursts.discard(sessionKey);
@@ -172,6 +192,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   gateway.on("ready", (ready) => {
     self = ready.user;
     log.info(`@${self.username} connected`);
+    if (watermark.value !== undefined) {
+      const since = snowflakeAt(Math.max(watermark.value, Date.now() - BACKFILL_WINDOW_MS));
+      backfill = { since, guilds: new Set(ready.guilds.map((guild) => guild.id)) };
+      void backfillDms(since).catch((error) => log.warn(`DM backfill failed: ${error}`));
+    }
     void flushArchives();
     if (!commandsSynced) {
       commandsSynced = true;
@@ -204,7 +229,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   function dispatch(payload: GatewayDispatchPayload) {
     switch (payload.t) {
       case GatewayDispatchEvents.GuildCreate:
-        return rememberGuild(payload.d);
+        rememberGuild(payload.d);
+        if (backfill?.guilds.delete(payload.d.id)) {
+          void backfillGuild(payload.d, backfill.since).catch((error) => log.warn(`backfill of server ${payload.d.id} failed: ${error}`));
+        }
+        return;
       case GatewayDispatchEvents.GuildUpdate:
         guilds.set(payload.d.id, { name: payload.d.name, icon: payload.d.icon });
         return;
@@ -311,6 +340,32 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
     } catch (error) {
       return { ...created, warning: `setup failed: ${error}` };
     }
+  }
+
+  async function backfillGuild(guild: GatewayGuildCreateDispatchData, since: string) {
+    if ("unavailable" in guild && guild.unavailable) return;
+    if (!deps.botConfig()?.groups?.[guild.id]) return;
+    for (const channel of [...(guild.channels ?? []), ...(guild.threads ?? [])]) {
+      if ("last_message_id" in channel && isNewer(channel.last_message_id, since)) await replay(channel.id, guild.id, since);
+    }
+  }
+
+  async function backfillDms(since: string) {
+    for (const userId of Object.keys(deps.botConfig()?.users ?? {})) {
+      const dm = await rest.request<APIChannel & { last_message_id?: string | null }>("POST", "/users/@me/channels", { body: { recipient_id: userId } });
+      dmChannels.set(userId, dm.id);
+      if (isNewer(dm.last_message_id, since)) await replay(dm.id, undefined, since);
+    }
+  }
+
+  async function replay(channelId: string, guildId: string | undefined, since: string) {
+    const missed = await missedMessages((path) => rest.get(path), channelId, since);
+    if (!missed) {
+      log.warn(`over ${BACKFILL_MAX_PER_CHANNEL} messages in ${channelId} while disconnected — not answering them`);
+      return;
+    }
+    if (missed.length) log.info(`replaying ${missed.length} message(s) sent to ${channelId} while disconnected`);
+    for (const message of missed) await handleMessage({ ...message, guild_id: guildId });
   }
 
   async function handleMessage(message: GatewayMessageCreateDispatchData) {
@@ -785,8 +840,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps): Bot
   }
 
   async function stop() {
+    listening();
     bursts.flushAll();
     clearInterval(archiveTimer);
+    clearInterval(watermarkTimer);
     gateway.stop();
   }
 

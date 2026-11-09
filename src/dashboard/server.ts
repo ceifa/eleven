@@ -446,6 +446,14 @@ export function startDashboard(config: ConfigStore, gateway: Gateway, channels: 
       return send(403, { error: "cross-origin request refused" });
     }
 
+    // The dashboard's way back through an auth proxy whose session ran out
+    // (see signIn in app.js): the proxy sends this navigation to its sign-in and
+    // back here, and here sends it on to the app.
+    if (method === "GET" && path === "/signin") {
+      res.writeHead(303, { location: "/" });
+      return res.end();
+    }
+
     try {
       if (method === "GET" && path === "/status") {
         const bots = channels.status();

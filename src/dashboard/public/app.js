@@ -75,15 +75,38 @@ const NEW_THREAD_DRAFT = "new"; // the launcher's box has no thread to key on ye
 
 /* ---------- helpers ---------- */
 
+// The daemon never redirects, so a redirect here is an auth proxy in front of it
+// (Cloudflare Access and the like) whose session ran out. Followed, it lands
+// cross-origin on a sign-in page and fails exactly like a daemon that is down.
+const call = (path, init) => fetch(`/api${path}`, { ...init, redirect: "manual" });
+
 const api = {
-  get: (path) => take(path) ?? fetch(`/api${path}`).then(ok),
+  get: (path) => take(path) ?? call(path).then(ok),
   send: (method, path, body) =>
-    fetch(`/api${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(ok),
+    call(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(ok),
 };
+class SignInExpired extends Error {}
 async function ok(response) {
+  if (response.type === "opaqueredirect") {
+    signIn();
+    throw new SignInExpired("sign-in expired");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error ?? response.statusText);
   return data;
+}
+
+/** The shell came out of the service worker's cache, so the proxy never got a
+ *  navigation to send to its sign-in. /api/signin is one the worker lets
+ *  through and the daemon bounces back to the app. At most once a minute
+ *  unless asked: a proxy still redirecting after a sign-in would otherwise
+ *  reload the page forever. */
+const SIGNIN_RETRY_MS = 60_000;
+function signIn({ force = false } = {}) {
+  const last = Number(sessionStorage.getItem("eleven.signin-at"));
+  if (!force && Date.now() - last < SIGNIN_RETRY_MS) return;
+  sessionStorage.setItem("eleven.signin-at", String(Date.now()));
+  location.assign(`/api/signin${location.hash}`);
 }
 
 /** Reads that were already in flight before anyone asked for them — see the
@@ -944,7 +967,7 @@ function readAheadThreads() {
   idle(async () => {
     for (const thread of state.threads.slice(0, 8)) {
       if (seenThreads.has(thread.id)) continue;
-      const data = await fetch(`/api/threads/${thread.id}`).then(ok).catch(() => null);
+      const data = await call(`/threads/${thread.id}`).then(ok).catch(() => null);
       if (data && !seenThreads.has(thread.id)) rememberThread(data);
     }
   });
@@ -1669,7 +1692,7 @@ const mediaName = (id) => id.replace(/^[0-9a-f]{8}-/, "");
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // mirrors the daemon's own ceiling
 
 async function uploadFile(file) {
-  const response = await fetch(`/api/media?name=${encodeURIComponent(file.name || "attachment")}`, {
+  const response = await call(`/media?name=${encodeURIComponent(file.name || "attachment")}`, {
     method: "POST",
     headers: { "content-type": file.type || "application/octet-stream" },
     body: file,
@@ -4109,6 +4132,12 @@ async function render() {
  * two different problems with two different fixes.
  */
 function loadFailure(error) {
+  if (error instanceof SignInExpired) {
+    return h("div", { class: "flex flex-col gap-3 self-start" },
+      h("div", { class: "alert alert-error" }, "Your sign-in to this dashboard has expired."),
+      h("button", { class: "btn btn-sm self-start", onclick: () => signIn({ force: true }) }, "Sign in"),
+    );
+  }
   const offline = !navigator.onLine;
   const unreachable = offline || error instanceof TypeError; // fetch rejects with a TypeError
   return h("div", { class: "flex flex-col gap-3 self-start" },

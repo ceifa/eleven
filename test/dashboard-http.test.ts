@@ -292,6 +292,17 @@ test("an unknown path still renders the app shell", async () => {
   });
 });
 
+test("/api/signin sends the browser back to the app", async () => {
+  // The page's way through an auth proxy whose session ran out: a navigation
+  // the service worker leaves alone, so the proxy can take it to its sign-in,
+  // and that lands back on the app once the proxy lets it through.
+  await withDashboard(async (base) => {
+    const response = await get(`${base}/api/signin`);
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.location, "/");
+  });
+});
+
 test("API reads carry an ETag, so an unchanged answer costs a 304", async () => {
   await withDashboard(async (base) => {
     const response = await get(`${base}/api/threads`);

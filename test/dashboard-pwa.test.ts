@@ -204,6 +204,62 @@ test("a shell that arrives in part is not written over a whole one", async () =>
   assert.deepEqual(worker.posted, [JSON.stringify({ type: "shell-updated" })]);
 });
 
+/** app.js's API helpers, run against a fake browser: what an auth proxy's
+ *  redirect looks like to the page, and where the page sends it. */
+function apiHelpers(answer: { type: string; status?: number }) {
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const pick = (from: string, to: string) => app.slice(app.indexOf(from), app.indexOf(to));
+  const source = [
+    pick("const call =", "\nconst api ="),
+    pick("class SignInExpired", "\n/** Reads that were already in flight"),
+  ].join("\n");
+  const requests: { url: string; init: RequestInit }[] = [];
+  const assigned: string[] = [];
+  const session = new Map<string, string>();
+  const context = vm.createContext({
+    fetch: async (url: string, init: RequestInit) => {
+      requests.push({ url, init });
+      return { ok: false, statusText: "", json: async () => ({}), ...answer };
+    },
+    sessionStorage: { getItem: (key: string) => session.get(key) ?? null, setItem: (key: string, value: string) => session.set(key, value) },
+    location: { assign: (url: string) => assigned.push(url), hash: "" },
+    Date,
+  });
+  vm.runInContext(`${source}\nthis.read = (path) => call(path).then(ok); this.signIn = signIn;`, context);
+  return { read: context.read as (path: string) => Promise<unknown>, signIn: context.signIn as (options?: object) => void, requests, assigned };
+}
+
+test("an auth proxy's expired session sends the page to sign in, not to 'can't reach the daemon'", async () => {
+  // The service worker answers the shell from its cache, so an expired
+  // Cloudflare Access session no longer turns the navigation into its sign-in
+  // page. The API reads still go out, get a redirect to the proxy's origin, and
+  // a followed redirect fails on CORS as a TypeError: the daemon looked down.
+  const gated = apiHelpers({ type: "opaqueredirect", status: 0 });
+  await assert.rejects(gated.read("/overview"), /sign-in expired/);
+  assert.equal(gated.requests[0].url, "/api/overview");
+  assert.equal(gated.requests[0].init.redirect, "manual");
+  assert.deepEqual(gated.assigned, ["/api/signin"]);
+
+  // The three boot reads all fail together; that is one trip to sign in. And a
+  // proxy that redirects again right after a sign-in would loop the page
+  // forever, so only the button on the error goes again inside the minute.
+  await assert.rejects(gated.read("/threads"));
+  assert.deepEqual(gated.assigned, ["/api/signin"]);
+  gated.signIn({ force: true });
+  assert.deepEqual(gated.assigned, ["/api/signin", "/api/signin"]);
+
+  // A daemon error is still a daemon error.
+  const failing = apiHelpers({ type: "basic", status: 500 });
+  await assert.rejects(failing.read("/overview"), (error: Error) => error.constructor.name === "Error");
+  assert.deepEqual(failing.assigned, []);
+
+  // Every API request has to go through that helper, or it is the one that
+  // still says the daemon is down.
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  assert.deepEqual(app.match(/fetch\(`\/api/g), ["fetch(`/api"], "only call() should fetch the API");
+  assert.match(app, /error instanceof SignInExpired[\s\S]{0,300}signIn\(\{ force: true \}\)/);
+});
+
 test("the first screen's reads leave together", () => {
   const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
 
@@ -212,7 +268,7 @@ test("the first screen's reads leave together", () => {
   // the conversation the hash names. Three round trips through a tunnel, none
   // of which needs the one before it. The boot starts them all at once and
   // api.get takes whatever is already in flight for the path it is asked for.
-  assert.match(app, /get: \(path\) => take\(path\) \?\? fetch\(`\/api\$\{path\}`\)/);
+  assert.match(app, /get: \(path\) => take\(path\) \?\? call\(path\)/);
   assert.match(app, /prefetch\("\/overview"\)/);
   assert.match(app, /prefetch\(`\/threads\$\{threadsQuery\(\)\}`\)/);
   assert.match(app, /prefetch\(`\/threads\/\$\{bootThread\}`\)/);

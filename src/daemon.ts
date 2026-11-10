@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ConfigStore } from "./config.ts";
 import { Gateway } from "./gateway.ts";
 import { ReplyDelivery } from "./channels/replies.ts";
+import { interruptLiveCards } from "./channels/turn-status.ts";
 import { Channels } from "./channels/index.ts";
 import { PairingStore } from "./channels/pairing.ts";
 import { TelegramChannel } from "./channels/telegram/index.ts";
@@ -122,6 +123,9 @@ export async function startDaemon() {
     log.info(`${signal} received, shutting down`);
     stopCatalogRefresh();
     replies.stop();
+    // Before the channels go: settling a card is a write to its chat. Bounded,
+    // because the next instance SIGKILLs this one after 5 s.
+    await Promise.race([interruptLiveCards(), sleep(3_000)]);
     await Promise.allSettled([channels.stop(), dashboard.close()]);
     rmSync(PID_FILE, { force: true });
     process.exit(0);

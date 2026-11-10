@@ -6,6 +6,7 @@ import { CLAUDE_CODE_PROVIDER, probeClaudeCodeAuth } from "./agent/claude-code.t
 import { CONFIG_FILE } from "./paths.ts";
 import { ApplicationFlags } from "discord-api-types/v10";
 import { DiscordRest } from "./channels/discord/rest.ts";
+import { GoogleChatApi, readServiceAccountKey } from "./channels/googlechat/api.ts";
 
 const MESSAGE_CONTENT_FLAGS = ApplicationFlags.GatewayMessageContent | ApplicationFlags.GatewayMessageContentLimited;
 
@@ -71,6 +72,14 @@ export async function runDoctor(): Promise<boolean> {
           : "the Message Content intent is off — enable it under Bot → Privileged Gateway Intents in the Developer Portal");
       } catch (error) {
         check(false, label, `token check failed: ${error}`);
+      }
+      continue;
+    }
+    if (channel.type === "googlechat") {
+      try {
+        check(true, label, await new GoogleChatApi(readServiceAccountKey(channel.token)).checkCredentials());
+      } catch (error) {
+        check(false, label, `service account check failed: ${error}`);
       }
       continue;
     }

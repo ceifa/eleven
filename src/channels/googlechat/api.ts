@@ -64,6 +64,12 @@ export class GoogleChatApi {
     this.fetch = fetchImpl;
   }
 
+  /** Exchanges the key for a `chat.bot` token, proving the key is live; returns the account. */
+  async checkCredentials(): Promise<string> {
+    await this.accessToken(BOT_SCOPE);
+    return this.key.client_email;
+  }
+
   private async accessToken(scope: string): Promise<string> {
     const cached = this.cached.get(scope);
     if (cached && cached.expiresAt - Date.now() > TOKEN_MARGIN_MS) return cached.token;

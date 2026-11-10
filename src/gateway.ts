@@ -304,6 +304,15 @@ export class Gateway extends EventEmitter {
     });
   }
 
+  /** When the conversation's current thread began, if its next turn will go on
+   *  in it rather than start over (idle expiry, /new) — what tells a channel
+   *  whether the agent already holds something said earlier. */
+  continuingSince(sessionKey: string): number | undefined {
+    const thread = this.threads.current(sessionKey);
+    if (!thread || !(thread.persistent || Date.now() - thread.lastActivityAt <= this.idleMs())) return undefined;
+    return thread.createdAt;
+  }
+
   /** Start a fresh thread for a conversation (the /new command). Keeps prefs. */
   newThread(sessionKey: string, workspaceHint?: string): ThreadEntry {
     const workspace = this.workspaceFor(sessionKey, workspaceHint);

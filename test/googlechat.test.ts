@@ -117,7 +117,7 @@ const DM = { name: "spaces/DMSPACE", type: "DM", spaceType: "DIRECT_MESSAGE" };
 const ROOM = { name: "spaces/ROOM", type: "ROOM", spaceType: "SPACE", displayName: "Produto" };
 
 type History = { thread?: string; before: string; pageSize: number };
-function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, options: History) => Promise<unknown[]> = async () => []) {
+function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, options: History) => Promise<unknown[]> = async () => [], sessionSince?: number) {
   const config: ChannelConfig = { type: "googlechat", name: "oracle", token: "key.json", users: { "111": { name: "Old name" } }, groups: { ROOM: {} }, ...channel };
   const posted: { space: string; text: string; thread?: string }[] = [];
   const turns: { sessionKey: string; text: string; images: unknown[] }[] = [];
@@ -133,6 +133,7 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
       await incoming.deliver({ text: `answer to ${incoming.text.split("\n").at(-1)}`, status: "completed" }, "thread-1");
     },
     interrupt: async () => false,
+    continuingSince: () => sessionSince,
   };
   const pairing = {
     find: (identity: { kind: string; userId: string; chatId: string }) => requests.find((r) => r.kind === identity.kind && r.chatId === identity.chatId),
@@ -362,4 +363,40 @@ test("history is read with its own admin-approved scope, filtered to before the 
   assert.equal(list.pathname, "/v1/spaces/S/messages");
   assert.equal(list.searchParams.get("filter"), 'createTime < "2026-11-10T18:05:00Z" AND thread.name = spaces/S/threads/T');
   assert.equal(list.searchParams.get("orderBy"), "createTime desc");
+});
+
+test("a session that already answered in the thread gets only what came after that question", async () => {
+  const thread = { thread: { name: "spaces/ROOM/threads/T1" } };
+  const inThread = [
+    said("Igor", "18:04", "e agora?", { ...thread, threadReply: true }),
+    said("Oracle", "18:03", "first answer", { ...thread, threadReply: true }),
+    said("Ian", "18:02", "x", { ...thread, threadReply: true, createTime: "2026-11-10T18:02:30.000Z" }),
+    said("Paulo", "18:02", "@Oracle olha isso", { ...thread, ...MENTION }),
+  ];
+  const outside = [...inThread, said("Thomaz", "18:03", "lá fora, depois", { thread: { name: "spaces/ROOM/threads/Y" } }), said("Ian", "17:30", "bom dia", { thread: { name: "spaces/ROOM/threads/Z" } })];
+  const ask = async (sessionSince?: number) => {
+    const { bot, turns } = harness({}, async (_space, options) => options.thread ? inThread : outside, sessionSince);
+    await bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " e aí?", createTime: "2026-11-10T18:05:00Z" }));
+    await until(() => turns.length > 0);
+    return turns[0]!.text;
+  };
+  // The session that answered at 18:03 is still open: it has everything up to Paulo's question.
+  assert.equal(await ask(Date.parse("2026-11-10T17:00:00Z")), [
+    "[The conversation in this space outside threads since you last answered here, oldest first — context, not requests to you]",
+    "[Thomaz · 2026-11-10 18:03 UTC] lá fora, depois",
+    "[End of context]",
+    "",
+    "[This thread since you last answered, oldest first — context, not requests to you]",
+    "[Ian · 2026-11-10 18:02 UTC] x",
+    "[Igor · 2026-11-10 18:04 UTC] e agora?",
+    "[End of context]",
+    "",
+    "[Gabriel Francisco <gabriel@example.com>]",
+    "e aí?",
+  ].join("\n"));
+  // A session started after that answer (/new, idle expiry) holds none of it: everything again.
+  const fresh = await ask(Date.parse("2026-11-10T18:04:30Z"));
+  assert.match(fresh, /\[This thread so far[^\n]*\]\n\[Paulo[^\n]*\n\[Ian[^\n]*\n\[you · 2026-11-10 18:03 UTC\] first answer/);
+  assert.match(fresh, /bom dia/);
+  assert.equal(await ask(undefined), fresh);
 });

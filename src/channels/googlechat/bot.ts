@@ -174,7 +174,7 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
       const media = await collectAttachments(message.attachment ?? []);
       const body = formatInboundBody(text, media);
       if (!body.trim() && !media.images.length) return;
-      const context = dm ? "" : await conversationContext(space.name, message.thread!.name!, message.createTime);
+      const context = dm ? "" : await conversationContext(target.sessionKey, space.name, message.thread!.name!, message.createTime);
       bursts.enqueue(target.sessionKey, target, `${context}${dm ? body : `[${senderLabel(sender)}]\n${body}`}`, media.images);
     } finally {
       release();
@@ -184,9 +184,11 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
   /** What the space was talking about when someone mentioned the app, as
    *  blocks the agent reads as context: the conversation outside threads in
    *  the hours before, and the whole thread when the mention is in one. Chat
-   *  delivers only the mention itself. Empty without the read scope: the
-   *  mention alone still gets an answer. */
-  async function conversationContext(space: string, thread: string, before: string | undefined): Promise<string> {
+   *  delivers only the mention itself. When the agent is still in the session
+   *  where it last answered this thread, it already holds everything up to
+   *  that question, so only what came after is sent. Empty without the read
+   *  scope: the mention alone still gets an answer. */
+  async function conversationContext(sessionKey: string, space: string, thread: string, before: string | undefined): Promise<string> {
     if (!before) return "";
     try {
       const [inSpace, inThread] = await Promise.all([
@@ -194,20 +196,35 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
         api.listMessages(space, { thread, before, pageSize: THREAD_CONTEXT_MESSAGES }),
       ]);
       historyDenied = false;
+      const seenUntil = alreadySeen(sessionKey, inThread);
+      const unseen = (m: ChatHistoryMessage) => seenUntil === undefined || (Date.parse(m.createTime) > seenUntil && m.sender?.type !== "BOT");
       const since = Date.parse(before) - SPACE_CONTEXT_WINDOW_MS;
       // Outside threads means the messages that start one; replies belong to their thread.
       const outside = inSpace
-        .filter((m) => !m.threadReply && m.thread?.name !== thread && Date.parse(m.createTime) >= since)
+        .filter((m) => !m.threadReply && m.thread?.name !== thread && Date.parse(m.createTime) >= since && unseen(m))
         .slice(0, SPACE_CONTEXT_MESSAGES);
+      const sinceLast = seenUntil === undefined ? "" : " since you last answered here";
       return [
-        contextBlock("The conversation in this space outside threads", outside),
-        contextBlock("This thread so far", inThread),
+        contextBlock(`The conversation in this space outside threads${sinceLast}`, outside),
+        contextBlock(seenUntil === undefined ? "This thread so far" : "This thread since you last answered", inThread.filter(unseen)),
       ].join("");
     } catch (error) {
       if (!historyDenied) log.warn(`cannot read conversation history (needs chat.app.messages.readonly approved by an admin): ${error}`);
       historyDenied = true;
       return "";
     }
+  }
+
+  /** Up to when the agent's session already has this thread: the question its
+   *  last reply here answered — that turn carried everything said before it.
+   *  Unknown when the app never answered here, or when the session it answered
+   *  in is gone (idle expiry, /new): then the agent needs it all again. */
+  function alreadySeen(sessionKey: string, inThread: ChatHistoryMessage[]): number | undefined {
+    const reply = inThread.find((m) => m.sender?.type === "BOT");
+    const session = deps.gateway.continuingSince(sessionKey);
+    if (!reply || session === undefined || session > Date.parse(reply.createTime)) return undefined;
+    const question = inThread.find((m) => Date.parse(m.createTime) < Date.parse(reply.createTime) && mentionsApp(m));
+    return Date.parse((question ?? reply).createTime);
   }
 
   /** Messages, newest first as listed, written out oldest first. A mention of
@@ -217,11 +234,10 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     if (!newestFirst.length) return "";
     const lines = [...newestFirst].reverse().map((m) => {
       const who = m.sender?.type === "BOT" ? "you" : sanitizeContextLabel(foldDisplayName(m.sender?.displayName ?? "").name) || "Unknown sender";
-      const mentionsApp = m.sender?.type !== "BOT" && m.annotations?.some((a) => a.userMention?.user?.type === "BOT");
       const text = [
         m.text?.trim().slice(0, CONTEXT_MESSAGE_CHARS),
         ...(m.attachment ?? []).map((a) => `(attached ${a.contentName ?? "a file"})`),
-        mentionsApp && heading.startsWith("The conversation") ? "(asked you in its own thread, already handled there)" : undefined,
+        mentionsApp(m) && heading.startsWith("The conversation") ? "(asked you in its own thread, already handled there)" : undefined,
       ].filter(Boolean).join(" ");
       return `[${who} · ${m.createTime.slice(0, 16).replace("T", " ")} UTC] ${text}`;
     });
@@ -478,6 +494,10 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
       await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     },
   };
+}
+
+function mentionsApp(message: ChatHistoryMessage): boolean {
+  return message.sender?.type !== "BOT" && !!message.annotations?.some((a) => a.userMention?.user?.type === "BOT");
 }
 
 function senderLabel(user: ChatUser | undefined): string {

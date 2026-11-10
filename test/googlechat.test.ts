@@ -300,11 +300,12 @@ test("a mention in a thread reads what was said since the app last spoke there",
 });
 
 test("a mention that starts a thread reads the space's last hours instead, and no approval means no context", async () => {
-  const { bot, turns } = harness({}, async (_space, options) => options.thread ? [] : [said("Thomaz", "17:50", "deploy saiu"), said("Rafael", "02:00", "too old")]);
+  const mention = { ...said("Igor", "17:55", "@Oracle other question"), annotations: [{ type: "USER_MENTION", userMention: { user: { type: "BOT" } } }] };
+  const { bot, turns } = harness({}, async (_space, options) => options.thread ? [] : [said("Oracle", "17:56", "its answer", "BOT"), mention, said("Thomaz", "17:50", "deploy saiu"), said("Rafael", "02:00", "too old")]);
   await bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " resume?", createTime: "2026-11-10T18:05:00Z" }));
   await until(() => turns.length > 0);
   assert.match(turns[0]!.text, /^\[Recent messages in this space[^\n]*\]\n\[Thomaz · 2026-11-10 17:50 UTC\] deploy saiu\n\[End of context\]/);
-  assert.doesNotMatch(turns[0]!.text, /too old/);
+  assert.doesNotMatch(turns[0]!.text, /too old|other question|its answer/);
 
   const denied = harness({}, async () => { throw new Error("403 insufficient scopes"); });
   await denied.bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " oi", createTime: "2026-11-10T18:05:00Z" }));

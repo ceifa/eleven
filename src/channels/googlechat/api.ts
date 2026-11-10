@@ -38,6 +38,7 @@ export interface ChatHistoryMessage {
   sender?: { name?: string; displayName?: string; type?: string };
   thread?: { name?: string };
   attachment?: { contentName?: string }[];
+  annotations?: { type?: string; userMention?: { user?: { type?: string } } }[];
 }
 
 /** What a Chat message create or update returns that eleven uses. */

@@ -13,7 +13,7 @@ import type { PairingRequest } from "../pairing.ts";
 import { createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
 import { plainStatus, TurnStatus } from "../turn-status.ts";
-import { GoogleChatApi, readServiceAccountKey } from "./api.ts";
+import { GoogleChatApi, readServiceAccountKey, type ChatHistoryMessage } from "./api.ts";
 import { chatChunks, toChatText } from "./markdown.ts";
 import { googleChatSessionKey, parseGoogleChatSessionKey, resourceId } from "./session-key.ts";
 import { createChatVerifier } from "./verify.ts";
@@ -195,7 +195,11 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
         if (seen !== -1) earlier = inThread.slice(0, seen);
       } else {
         const since = Date.parse(before) - SPACE_CONTEXT_WINDOW_MS;
-        earlier = (await api.listMessages(space, { before, pageSize: SPACE_CONTEXT_MESSAGES })).filter((m) => Date.parse(m.createTime) >= since);
+        // A mention elsewhere in the space, and the app's answer to it, are
+        // conversations of their own: this one shouldn't pick them up again.
+        const elsewhere = (m: ChatHistoryMessage) => m.sender?.type === "BOT" || !!m.annotations?.some((a) => a.userMention?.user?.type === "BOT");
+        earlier = (await api.listMessages(space, { before, pageSize: SPACE_CONTEXT_MESSAGES }))
+          .filter((m) => Date.parse(m.createTime) >= since && !elsewhere(m));
         heading = "Recent messages in this space";
       }
       historyDenied = false;

@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 
 const CHAT_API = "https://chat.googleapis.com/v1";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SCOPE = "https://www.googleapis.com/auth/chat.bot";
+const BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot";
+// Reading a space's messages as the app needs this scope and a one-time admin approval.
+const READ_SCOPE = "https://www.googleapis.com/auth/chat.app.messages.readonly";
 // Access tokens live an hour; renew with margin so a slow turn never sends with a dead one.
 const TOKEN_MARGIN_MS = 5 * 60 * 1000;
 
@@ -28,6 +30,16 @@ export class GoogleChatApiError extends Error {
   }
 }
 
+/** A message as the history listing returns it. */
+export interface ChatHistoryMessage {
+  name: string;
+  createTime: string;
+  text?: string;
+  sender?: { name?: string; displayName?: string; type?: string };
+  thread?: { name?: string };
+  attachment?: { contentName?: string }[];
+}
+
 /** What a Chat message create or update returns that eleven uses. */
 export interface ChatMessage {
   name: string;
@@ -42,19 +54,20 @@ export interface ChatMessage {
 export class GoogleChatApi {
   private key: ServiceAccountKey;
   private fetch: typeof fetch;
-  private cached?: { token: string; expiresAt: number };
+  private cached = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(key: ServiceAccountKey, fetchImpl: typeof fetch = fetch) {
     this.key = key;
     this.fetch = fetchImpl;
   }
 
-  private async accessToken(): Promise<string> {
-    if (this.cached && this.cached.expiresAt - Date.now() > TOKEN_MARGIN_MS) return this.cached.token;
+  private async accessToken(scope: string): Promise<string> {
+    const cached = this.cached.get(scope);
+    if (cached && cached.expiresAt - Date.now() > TOKEN_MARGIN_MS) return cached.token;
     const now = Math.floor(Date.now() / 1000);
     const part = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
     const header = { alg: "RS256", typ: "JWT", ...(this.key.private_key_id && { kid: this.key.private_key_id }) };
-    const unsigned = `${part(header)}.${part({ iss: this.key.client_email, scope: SCOPE, aud: TOKEN_URL, iat: now, exp: now + 3600 })}`;
+    const unsigned = `${part(header)}.${part({ iss: this.key.client_email, scope, aud: TOKEN_URL, iat: now, exp: now + 3600 })}`;
     const assertion = `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(this.key.private_key).toString("base64url")}`;
     const response = await this.fetch(TOKEN_URL, {
       method: "POST",
@@ -63,14 +76,14 @@ export class GoogleChatApi {
     });
     const body = (await response.json()) as { access_token?: string; expires_in?: number; error_description?: string; error?: string };
     if (!response.ok || !body.access_token) throw new GoogleChatApiError(response.status, `Google token exchange failed: ${body.error_description ?? body.error ?? response.status}`);
-    this.cached = { token: body.access_token, expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000 };
+    this.cached.set(scope, { token: body.access_token, expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000 });
     return body.access_token;
   }
 
-  private async request(method: string, path: string, body?: unknown): Promise<Response> {
+  private async request(method: string, path: string, body?: unknown, scope = BOT_SCOPE): Promise<Response> {
     const response = await this.fetch(`${CHAT_API}/${path}`, {
       method,
-      headers: { authorization: `Bearer ${await this.accessToken()}`, ...(body !== undefined && { "content-type": "application/json" }) },
+      headers: { authorization: `Bearer ${await this.accessToken(scope)}`, ...(body !== undefined && { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) {
@@ -108,6 +121,16 @@ export class GoogleChatApi {
       if (error instanceof GoogleChatApiError && error.status === 404) return undefined;
       throw error;
     }
+  }
+
+  /** A space's messages, newest first: those of one thread, or the whole
+   *  space's when no thread is given. Needs the admin-approved read scope;
+   *  without it Google answers 403. */
+  async listMessages(space: string, options: { thread?: string; before: string; pageSize: number }): Promise<ChatHistoryMessage[]> {
+    const filter = [`createTime < "${options.before}"`, options.thread && `thread.name = ${options.thread}`].filter(Boolean).join(" AND ");
+    const query = new URLSearchParams({ pageSize: String(options.pageSize), orderBy: "createTime desc", filter });
+    const response = await this.request("GET", `${space}/messages?${query}`, undefined, READ_SCOPE);
+    return ((await response.json()) as { messages?: ChatHistoryMessage[] }).messages ?? [];
   }
 
   /** The bytes of an uploaded attachment (its `attachmentDataRef.resourceName`). */

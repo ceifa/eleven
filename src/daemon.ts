@@ -7,6 +7,7 @@ import { Channels } from "./channels/index.ts";
 import { PairingStore } from "./channels/pairing.ts";
 import { TelegramChannel } from "./channels/telegram/index.ts";
 import { DiscordChannel } from "./channels/discord/index.ts";
+import { GoogleChatChannel } from "./channels/googlechat/index.ts";
 import { startDashboard } from "./dashboard/server.ts";
 import { refreshModelCatalogs, trustWorkspaces } from "./agent/pi.ts";
 import { PID_FILE } from "./paths.ts";
@@ -95,6 +96,7 @@ export async function startDaemon() {
   const channels = new Channels(config, pairing, [
     new TelegramChannel(config, gateway, pairing),
     new DiscordChannel(config, gateway, pairing),
+    new GoogleChatChannel(config, gateway, pairing),
   ]);
   gateway.waker = (sessionKey, text, threadId) => channels.wake(sessionKey, text, threadId);
   const replies = new ReplyDelivery(gateway.pending, (key, text, options) => channels.sendReply(key, text, options));

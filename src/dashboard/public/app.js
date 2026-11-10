@@ -176,7 +176,8 @@ const DISCORD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label
 // the list starting at the same x, however the thread was born.
 const DASHBOARD_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Dashboard" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9.5h18"/></svg>`;
 const CLI_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="CLI" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="m7.5 10 2.4 2.3-2.4 2.3M13 14.6h3.6"/></svg>`;
-const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, discord: DISCORD_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
+const GOOGLE_CHAT_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-label="Google Chat"><circle cx="12" cy="12" r="12" fill="#00AC47"/><path fill="#fff" d="M7 7.2h10c.6 0 1 .4 1 1v6.4c0 .6-.4 1-1 1h-5.6L8.6 18v-2.4H7c-.6 0-1-.4-1-1V8.2c0-.6.4-1 1-1z"/></svg>`;
+const CHANNEL_ICONS = { telegram: TELEGRAM_ICON, discord: DISCORD_ICON, googlechat: GOOGLE_CHAT_ICON, dashboard: DASHBOARD_ICON, cli: CLI_ICON };
 
 /** What each platform calls the parts of the registry, and where its tokens come from. */
 const CHANNEL_WORDS = {
@@ -202,6 +203,18 @@ const CHANNEL_WORDS = {
     topic: "channel",
     dmTopics: false,
     tokenHint: "bot token from the Developer Portal (Message Content intent on)",
+    profile: undefined,
+  },
+  googlechat: {
+    groups: "Spaces",
+    groupsInfo: "Spaces the app lives in — mention it inside a space to register it. Each space can append its own instructions to the prompt.",
+    groupsEmpty: "none yet — mention the app in a space to add it",
+    group: "space",
+    topics: "Threads",
+    topicsInfo: "Every thread in a space is its own thread here.",
+    topic: "thread",
+    dmTopics: false,
+    tokenHint: "path to the app's service account JSON key (googlechat.port and audience go in config.json)",
     profile: undefined,
   },
 };
@@ -236,7 +249,7 @@ function withoutChannelPrefix(label, sessionKey) {
   const [first, ...rest] = label.split(" · ");
   // "Telegram DM · Gabriel" loses its first segment; a bare "Dashboard" keeps
   // it, because there it is the whole name.
-  return rest.length && first.toLowerCase().startsWith(type) ? rest.join(" · ") : label;
+  return rest.length && first.toLowerCase().replaceAll(" ", "").startsWith(type) ? rest.join(" · ") : label;
 }
 
 function channelSource(sessionKey) {

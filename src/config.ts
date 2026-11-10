@@ -56,7 +56,7 @@ export function runtimeTools(provider: string): readonly WorkspaceTool[] {
 }
 
 /** Channel types eleven can speak. */
-export const CHANNEL_TYPES = ["telegram", "discord"] as const;
+export const CHANNEL_TYPES = ["telegram", "discord", "googlechat"] as const;
 export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
 /** Whether a conversation lives on a chat platform, rather than the dashboard or the CLI. */
@@ -116,7 +116,11 @@ export interface ChannelConfig {
   type: ChannelType;
   /** Unique across all workspaces — it names the bot inside thread session keys. */
   name: string;
+  /** The bot token; for Google Chat, the path to the app's service account JSON key. */
   token: string;
+  /** Google Chat only: where the app's HTTP endpoint listens, and the audience
+   *  Chat signs its requests for (the project number, or the endpoint URL). */
+  googlechat?: { port: number; host?: string; audience: string };
   /** Users allowed to DM, keyed by numeric id. Deny by default; grown via pairing. */
   users?: Record<string, UserConfig>;
   /** Group chats the channel participates in, keyed by chat id (a Discord

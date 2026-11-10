@@ -123,6 +123,7 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
   const config: ChannelConfig = { type: "googlechat", name: "oracle", token: "key.json", users: { "111": { name: "Old name" } }, groups: { ROOM: {} }, ...channel };
   const posted: { space: string; text: string; thread?: string }[] = [];
   const turns: { sessionKey: string; text: string; images: unknown[] }[] = [];
+  const conversations: (string | undefined)[] = [];
   const requests: { kind: string; userId: string; chatId: string; name?: string; username?: string }[] = [];
   const downloads: string[] = [];
   const lookups: string[] = [];
@@ -130,8 +131,9 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
   const gateway = {
     hasPendingReply: () => false,
     queueReply: (_thread: string, sessionKey: string, text: string) => { if (text) void bot.send(sessionKey, text); },
-    handle: async (incoming: { sessionKey: string; text: string; images: unknown[]; deliver: (result: unknown, thread: string) => Promise<void> }) => {
+    handle: async (incoming: { sessionKey: string; text: string; images: unknown[]; runtime?: { conversation?: string }; deliver: (result: unknown, thread: string) => Promise<void> }) => {
       turns.push({ sessionKey: incoming.sessionKey, text: incoming.text, images: incoming.images });
+      conversations.push(incoming.runtime?.conversation);
       await incoming.deliver({ text: `answer to ${incoming.text.split("\n").at(-1)}`, status: "completed" }, "thread-1");
     },
     interrupt: async () => false,
@@ -161,7 +163,7 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
     },
     verify: async (authorization) => { if (authorization !== "Bearer good") throw new Error("not Chat"); },
   });
-  return { bot, config, posted, turns, requests, downloads, lookups, saved: () => saved };
+  return { bot, config, posted, turns, conversations, requests, downloads, lookups, saved: () => saved };
 }
 
 async function until(condition: () => boolean, ms = 4_000) {
@@ -209,10 +211,12 @@ test("an allowed DM runs a turn and answers in the DM, outside any thread", asyn
 });
 
 test("a mention in a space runs in its thread, says who asked, and answers there", async () => {
-  const { bot, config, posted, turns } = harness();
+  const { bot, config, posted, turns, conversations } = harness();
   await bot.handleEvent(message(GABRIEL, ROOM, { text: "@Oracle **why** is it so?", argumentText: " **why** is it so?" }));
   await until(() => posted.length > 0);
   assert.equal(turns[0]!.sessionKey, "googlechat:oracle:ROOM:T1");
+  // The agent knows the thread's link, so what it creates elsewhere can point back here.
+  assert.equal(conversations[0], 'thread in space "Produto", https://chat.google.com/room/ROOM/T1');
   assert.equal(turns[0]!.text, "[Gabriel Francisco <gabriel@example.com>]\n**why** is it so?");
   assert.deepEqual(posted, [{ space: "spaces/ROOM", text: "answer to *why* is it so?", thread: "spaces/ROOM/threads/T1" }]);
   assert.equal(config.groups!.ROOM!.title, "Produto");

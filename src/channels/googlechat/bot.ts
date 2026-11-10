@@ -390,7 +390,9 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
       const user = config?.users?.[target.userId];
       return `DM with ${user?.name ?? "user"}${user?.username ? ` (${user.username})` : ""}`;
     }
-    return `thread in space "${config?.groups?.[target.spaceId!]?.title ?? target.spaceId}"`;
+    // The link lets what the agent creates elsewhere (a PR, a card) point back to the thread that asked.
+    const link = `https://chat.google.com/room/${target.spaceId}/${resourceId(target.thread)}`;
+    return `thread in space "${config?.groups?.[target.spaceId!]?.title ?? target.spaceId}", ${link}`;
   }
 
   async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry, expectedThreadId?: string) {

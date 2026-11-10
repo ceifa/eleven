@@ -37,6 +37,8 @@ export interface ChatHistoryMessage {
   text?: string;
   sender?: { name?: string; displayName?: string; type?: string };
   thread?: { name?: string };
+  /** Set on a reply in a thread; absent on the message that starts one. */
+  threadReply?: boolean;
   attachment?: { contentName?: string }[];
   annotations?: { type?: string; userMention?: { user?: { type?: string } } }[];
 }

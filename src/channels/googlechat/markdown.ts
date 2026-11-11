@@ -9,7 +9,7 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 
 /**
  * Agent markdown in the syntax Chat's API renders: `*bold*`, `_italic_`,
- * `~strike~`, `<url|text>` links, code as it is. Chat draws no headings and no
+ * `~strike~`, `[text](url)` links, code as it is. Chat draws no headings and no
  * tables, so a heading becomes a bold line and a table a monospace block.
  */
 export function toChatText(markdown: string): string {
@@ -42,7 +42,6 @@ function prose(text: string): string {
   // Bold first, into placeholders, so its asterisks aren't read as italics after.
   return text
     .replace(/^(\s*)[*+]\s/, "$1• ")
-    .replaceAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label: string, url: string) => `<${url}|${label.replaceAll("|", "¦")}>`)
     .replaceAll(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a: string | undefined, b: string | undefined) => `\u0000${bold.push(a ?? b ?? "") - 1}\u0000`)
     .replaceAll(/(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])/g, "_$1_")
     .replaceAll(/~~(.+?)~~/g, "~$1~")

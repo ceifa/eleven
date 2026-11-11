@@ -39,7 +39,8 @@ test("a Chat DM is keyed by the person, a space conversation by space and thread
 test("markdown becomes the syntax Chat renders, and code is left alone", () => {
   assert.equal(toChatText("**bold** and *italic* and ~~gone~~"), "*bold* and _italic_ and ~gone~");
   assert.equal(toChatText("## Plan"), "*Plan*");
-  assert.equal(toChatText("see [the PR](https://github.com/a/b/pull/1)"), "see <https://github.com/a/b/pull/1|the PR>");
+  // Chat no longer reads `<url|text>` from an app: it links `url|text` whole.
+  assert.equal(toChatText("see [Blip: SLA Rules](https://help.blip.ai/x)"), "see [Blip: SLA Rules](https://help.blip.ai/x)");
   assert.equal(toChatText("* item\n- other"), "• item\n- other");
   assert.equal(toChatText("`**not bold**` but **bold**"), "`**not bold**` but *bold*");
   assert.equal(toChatText("```\n**raw**\n```"), "```\n**raw**\n```");

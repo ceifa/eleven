@@ -1,5 +1,6 @@
 import type { ChannelConfig, ChannelType, ModelScope, TopicConfig, UserConfig, GroupConfig } from "../config.ts";
 import { parseDiscordSessionKey } from "./discord/session-key.ts";
+import { parseGoogleChatSessionKey } from "./googlechat/session-key.ts";
 import { parseTelegramSessionKey } from "./telegram/session-key.ts";
 
 /**
@@ -35,6 +36,15 @@ export function parseSessionKey(sessionKey: string): ConversationTarget | undefi
       channel: discord.channel,
       owner: discord.guildId ? { kind: "group", id: discord.guildId } : { kind: "user", id: discord.userId! },
       topic: discord.channelId,
+    };
+  }
+  const googlechat = parseGoogleChatSessionKey(sessionKey);
+  if (googlechat) {
+    return {
+      type: "googlechat",
+      channel: googlechat.channel,
+      owner: googlechat.userId ? { kind: "user", id: googlechat.userId } : { kind: "group", id: googlechat.spaceId! },
+      topic: googlechat.threadId,
     };
   }
   return undefined;

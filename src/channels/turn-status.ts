@@ -25,6 +25,9 @@ const MAX_TEXT = 4_000;
 const lastEditAt = new Map<string, number>();
 const editLanes = new Map<string, Promise<unknown>>();
 
+/** Cards still drawing something, so a shutdown can settle them. */
+const liveCards = new Set<TurnStatus<unknown>>();
+
 export type TurnOutcome = "completed" | "failed" | "stopped";
 
 /** Live-turn status for the header line: the last top-level tool the model
@@ -132,6 +135,7 @@ export class TurnStatus<R = string> {
     this.rateKey = options.rateKey;
     this.toolRenderDelayMs = options.toolRenderDelayMs ?? TOOL_FIRST_RENDER_DELAY_MS;
     this.idleRenderDelayMs = options.idleRenderDelayMs ?? IDLE_FIRST_RENDER_DELAY_MS;
+    liveCards.add(this);
   }
 
   /** The turn began. Arms the bare "working" header for a turn that produces no
@@ -209,9 +213,33 @@ export class TurnStatus<R = string> {
       return;
     }
     // The elapsed ticker keeps running for the runs still on the card.
-    if (!this.runsLive) this.stopTimers();
     this.outcome = outcome;
+    if (!this.runsLive) this.stopTimers();
     if (outcome !== "completed") this.board.settle();
+    await this.queueRender();
+  }
+
+  /** eleven is going down under a turn that will be woken in a new card: say
+   *  so, rather than leave this one claiming to work forever. A card that only
+   *  showed tool status goes; one with a record left on it says it stopped,
+   *  along with the runs that die with the process. */
+  async interrupt(): Promise<void> {
+    if (!this.live) return;
+    if (!this.outcome && !this.worthKeeping) {
+      this.cancel();
+      await this.draining;
+      if (this.posted) await this.surface.remove();
+      return;
+    }
+    for (const run of this.runs) {
+      if (run.outcome) continue;
+      run.outcome = "stopped";
+      run.endedAt = Date.now();
+      run.board.settle();
+    }
+    this.outcome ??= "stopped";
+    this.board.settle();
+    this.stopTimers();
     await this.queueRender();
   }
 
@@ -237,6 +265,7 @@ export class TurnStatus<R = string> {
   }
 
   private stopTimers(): void {
+    if (!this.live) liveCards.delete(this);
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     if (this.ticker) clearInterval(this.ticker);
@@ -444,4 +473,9 @@ export function formatDuration(milliseconds: number): string {
   const seconds = Math.round(milliseconds / 1_000);
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/** Settle every live card before eleven exits (see TurnStatus.interrupt). */
+export async function interruptLiveCards(): Promise<void> {
+  await Promise.allSettled([...liveCards].map((card) => card.interrupt()));
 }

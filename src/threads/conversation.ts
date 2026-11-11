@@ -21,7 +21,8 @@ export interface ConversationIdentity {
   color?: number;
 }
 
-const PLATFORM: Record<ChannelType, string> = { telegram: "Telegram", discord: "Discord" };
+const PLATFORM: Record<ChannelType, string> = { telegram: "Telegram", discord: "Discord", googlechat: "Google Chat" };
+const TOPIC_WORD: Record<ChannelType, string> = { telegram: "topic", discord: "channel", googlechat: "thread" };
 
 /**
  * Names a conversation from its session key and the channel registry that holds
@@ -59,7 +60,7 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   // Inside a forum the topic is the conversation; the group — or, in a DM with
   // topic mode, the person — is where it sits, along with whatever the topic
   // is nested in (a Discord channel's category, a thread's channel).
-  const topicName = topic?.title || `${target.type === "discord" ? "channel" : "topic"} ${target.topic}`;
+  const topicName = topic?.title || `${TOPIC_WORD[target.type]} ${target.topic}`;
   const where = [ownerName, ...around.reverse().flatMap((parent) => parent.title ?? [])].join(" › ");
   return {
     name: topicName,

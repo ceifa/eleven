@@ -54,6 +54,7 @@ interface ChatSpace {
   name?: string;
   type?: string;
   spaceType?: string;
+  singleUserBotDm?: boolean;
   displayName?: string;
 }
 
@@ -146,7 +147,8 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     const userId = resourceId(sender?.name);
     const spaceId = resourceId(space?.name);
     if (!space?.name || !spaceId || !userId || sender?.type === "BOT") return;
-    const dm = space.type === "DM" || space.spaceType === "DIRECT_MESSAGE";
+    // A DIRECT_MESSAGE can also be two people who added the app; only this flag means one person and the app.
+    const dm = space.singleUserBotDm === true;
     if (dm) dmSpaces.set(userId, space.name);
 
     if (event.type === "REMOVED_FROM_SPACE") return void log.info(`removed from ${space.name}`);

@@ -116,7 +116,9 @@ test("the app authenticates as its service account and posts into the thread", a
 
 const GABRIEL = { name: "users/111", displayName: "Gabriel Francisco", email: "gabriel@example.com", type: "HUMAN" };
 const STRANGER = { name: "users/999", displayName: "Stranger", email: "stranger@example.com", type: "HUMAN" };
-const DM = { name: "spaces/DMSPACE", type: "DM", spaceType: "DIRECT_MESSAGE" };
+const DM = { name: "spaces/DMSPACE", type: "DM", spaceType: "DIRECT_MESSAGE", singleUserBotDm: true };
+// Two people's DM the app was added to: Chat types it like the app's own DM.
+const SHARED_DM = { name: "spaces/SHARED", type: "DM", spaceType: "DIRECT_MESSAGE" };
 const ROOM = { name: "spaces/ROOM", type: "ROOM", spaceType: "SPACE", displayName: "Produto" };
 
 type History = { thread?: string; before: string; pageSize: number };
@@ -209,6 +211,23 @@ test("an allowed DM runs a turn and answers in the DM, outside any thread", asyn
   assert.equal(config.users!["111"]!.name, "Gabriel Francisco");
   assert.equal(config.users!["111"]!.username, "gabriel@example.com");
   assert.equal(saved(), 1);
+});
+
+test("a DM between two people is a space, not the DM of whoever mentioned the app", async () => {
+  const { bot, config, posted, turns, requests } = harness();
+  await bot.handleEvent(message(GABRIEL, DM, { text: "hi" }));
+  await until(() => posted.length > 0);
+  await bot.handleEvent(message(GABRIEL, SHARED_DM, { text: "@Oracle test", argumentText: " test" }));
+  assert.deepEqual(requests.map((r) => [r.kind, r.chatId]), [["group", "SHARED"]]);
+  assert.equal(turns.length, 1);
+  // Gabriel's own DM still goes to the app's DM, not the conversation with someone else.
+  await bot.send("googlechat:oracle:dm:111", "private");
+  assert.equal(posted.at(-1)!.space, "spaces/DMSPACE");
+  config.groups!.SHARED = {};
+  await bot.handleEvent(message(GABRIEL, SHARED_DM, { text: "@Oracle test", argumentText: " test" }));
+  await until(() => turns.length > 1);
+  assert.equal(turns[1]!.sessionKey, "googlechat:oracle:SHARED:T1");
+  assert.equal(turns[1]!.text, "[Gabriel Francisco <gabriel@example.com>]\ntest");
 });
 
 test("a mention in a space runs in its thread, says who asked, and answers there", async () => {

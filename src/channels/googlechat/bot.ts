@@ -271,7 +271,8 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
         media.notes.push(`[attachment "${sanitizeNoteValue(filename)}" could not be downloaded: ${sanitizeNoteValue(String(error))}]`);
         continue;
       }
-      if (!mime.startsWith("audio/")) continue;
+      // Chat types an .ogg upload as application/ogg, not audio/ogg.
+      if (!mime.startsWith("audio/") && mime !== "application/ogg") continue;
       const command = deps.transcribeCommand();
       if (!command) {
         media.notes.push("[voice message not transcribed; transcription is not configured]");

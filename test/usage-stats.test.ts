@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,7 +17,7 @@ const dir = mkdtempSync(join(tmpdir(), "eleven-usage-"));
 process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
 
 let files = 0;
-/** A session file of its own per test — the reader memoizes by path and size. */
+/** A session file of its own per test — the reader remembers what it found, by path. */
 function sessionFile(...lines: unknown[]): string {
   const file = join(dir, `session-${++files}.jsonl`);
   writeFileSync(file, lines.map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n") + "\n");
@@ -93,6 +93,59 @@ test("a tool result too large to hold doesn't hide the responses around it", asy
   );
   const samples = await readSessionUsage(file);
   assert.deepEqual(samples.map((s) => s.input), [10, 20]);
+});
+
+test("a session that grew is read from where the last read stopped", async () => {
+  const file = sessionFile(response("2026-08-01T10:00:00.000Z", "openai-codex", "gpt-5", { input: 10, output: 1 }));
+  const first = await readSessionUsage(file);
+  assert.deepEqual(first.map((s) => s.input), [10]);
+  // Nothing appended: the same answer, without the file being walked again.
+  assert.equal(await readSessionUsage(file), first);
+
+  appendFileSync(file, `${JSON.stringify(response("2026-08-01T10:01:00.000Z", "openai-codex", "gpt-5", { input: 20, output: 2 }))}\n`);
+  const second = await readSessionUsage(file);
+  assert.deepEqual(second.map((s) => s.input), [10, 20]);
+  // What the first caller was handed is still what it was handed.
+  assert.deepEqual(first.map((s) => s.input), [10]);
+});
+
+test("a line still being written counts once, however many reads catch it halfway", async () => {
+  const file = sessionFile(response("2026-08-01T10:00:00.000Z", "openai-codex", "gpt-5", { input: 10, output: 1 }));
+  const pending = JSON.stringify(response("2026-08-01T10:01:00.000Z", "openai-codex", "gpt-5", { input: 20, output: 2 }));
+  // Half a line: not JSON yet, so not a sample yet.
+  appendFileSync(file, pending.slice(0, 40));
+  assert.deepEqual((await readSessionUsage(file)).map((s) => s.input), [10]);
+  // The whole line, with the writer's newline still to come.
+  appendFileSync(file, pending.slice(40));
+  assert.deepEqual((await readSessionUsage(file)).map((s) => s.input), [10, 20]);
+  assert.deepEqual((await readSessionUsage(file)).map((s) => s.input), [10, 20]);
+  appendFileSync(file, "\n");
+  assert.deepEqual((await readSessionUsage(file)).map((s) => s.input), [10, 20]);
+});
+
+test("a session file replaced by a shorter one is read from the top again", async () => {
+  const file = sessionFile(
+    response("2026-08-01T10:00:00.000Z", "openai-codex", "gpt-5", { input: 10, output: 1 }),
+    response("2026-08-01T10:01:00.000Z", "openai-codex", "gpt-5", { input: 20, output: 2 }),
+  );
+  assert.equal((await readSessionUsage(file)).length, 2);
+  writeFileSync(file, `${JSON.stringify(response("2026-08-02T09:00:00.000Z", "openai-codex", "gpt-5", { input: 7, output: 1 }))}\n`);
+  assert.deepEqual((await readSessionUsage(file)).map((s) => s.input), [7]);
+});
+
+test("a history larger than any cache still answers its second report from memory", async () => {
+  // The report asks for every file in the same order each time. A cache that
+  // holds fewer files than there are threads evicts exactly the ones the next
+  // report starts with, and none of them is ever a hit.
+  const sources = Array.from({ length: 600 }, (_, index) => ({
+    id: `t${index}`,
+    workspace: "agent",
+    sessionFile: sessionFile(response("2026-08-01T10:00:00.000Z", "openai-codex", "gpt-5", { input: index + 1, output: 1 })),
+  }));
+  const first = await Promise.all(sources.map((source) => readSessionUsage(source.sessionFile)));
+  const second = await Promise.all(sources.map((source) => readSessionUsage(source.sessionFile)));
+  second.forEach((samples, index) => assert.equal(samples, first[index]));
+  assert.equal((await buildUsageReport(sources, 0)).total.responses, 600);
 });
 
 test("a session with no file at all reports nothing rather than throwing", async () => {

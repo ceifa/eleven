@@ -61,10 +61,11 @@ export function modelRoutes({ config, gateway, identityOf }: DashboardContext): 
     // provider has left, but what was spent getting there — which is the only
     // half that exists at all for a provider billed per use.
     //
-    // Read off the session transcripts every time: a full history is about a
-    // second of scanning, so there is no index to keep honest. Only what is
-    // still on disk can be counted — gc deletes session files on a retention
-    // timer, and `oldestAt` says where the data actually begins.
+    // Read off the session transcripts: the first report walks the whole
+    // history, and every one after it only what was appended since (usage.ts),
+    // so there is no index on disk to keep honest. Only what is still there can
+    // be counted — gc deletes session files on a retention timer, and
+    // `oldestAt` says where the data actually begins.
     {
       method: "GET",
       pattern: "/usage/tokens",

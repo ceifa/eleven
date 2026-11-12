@@ -31,9 +31,11 @@ const CHANNEL_WORDS = {
     groupsInfo: "Servers the bot lives in — message it inside a server to register it. Each server (and each of its channels) can append its own instructions to the prompt.",
     groupsEmpty: "none yet — message the bot in a server to add it",
     group: "server",
-    topics: "Channels",
+    // "Server channels", not "Channels": the bots on this page are called
+    // channels too, and "add a channel" has to mean one thing.
+    topics: "Server channels",
     topicsInfo: "Every channel and thread is its own thread here and can append its own instructions. They register themselves when someone first speaks in them, along with the category or channel they sit in — whatever is set on a category reaches every channel in it, and a channel's reaches its threads.",
-    topic: "channel",
+    topic: "server channel",
     dmTopics: false,
     tokenHint: "bot token from the Developer Portal (Message Content intent on)",
     profile: undefined,

@@ -46,8 +46,10 @@
      to name its base palette: the two quieter strengths of text, the hairline
      that divides regions, and the wash that lifts a surface off the page.
      Translucent on purpose — they sit correctly on the void and on a card. */
-  --color-muted: color-mix(in oklab, var(--color-base-content) 62%, transparent);
-  --color-faint: color-mix(in oklab, var(--color-base-content) 42%, transparent);
+  /* Faint is as quiet as text gets and still clears 4.5:1 on the page and on
+     a card at 11px, which is where most of it is set. */
+  --color-muted: color-mix(in oklab, var(--color-base-content) 64%, transparent);
+  --color-faint: color-mix(in oklab, var(--color-base-content) 52%, transparent);
   --color-line: color-mix(in oklab, var(--color-base-content) 9%, transparent);
   --color-raise: color-mix(in oklab, var(--color-base-content) 6%, transparent);
 }
@@ -530,6 +532,12 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
   color: var(--color-error);
   background: color-mix(in oklab, var(--color-error) 14%, transparent);
 }
+.btn-ghost.text-error.is-loud { color: var(--color-error); }
+/* Armed: one more click removes it (ui.js, confirmButton). The only filled red
+   on a settings page, for the four seconds it is true. */
+.btn.is-armed, .btn.is-armed:hover, .btn.is-armed:focus-visible {
+  background: var(--color-error); color: var(--color-error-content); font-weight: 600;
+}
 
 /* provider-request chip: a plain, dim meta row that lines up with the message
    column's left edge (no button padding pushing it out of alignment). A row of
@@ -604,7 +612,7 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 .select { appearance: none; padding-right: 1.8rem;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23888' stroke-width='1.5'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 0.5rem center; background-size: 1rem; }
-::placeholder { color: color-mix(in oklab, var(--color-base-content) 36%, transparent); }
+::placeholder { color: color-mix(in oklab, var(--color-base-content) 46%, transparent); }
 
 /* checkbox + toggle */
 .checkbox {
@@ -685,6 +693,12 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
    so grid stretch never reaches it and the target was a 16px square in the
    corner, with a tap on the title landing on nothing. */
 .collapse > input[type="checkbox"] { grid-area: 1 / 1; z-index: 2; appearance: none; width: 100%; height: 100%; opacity: 0; cursor: pointer; margin: 0; }
+/* …and being invisible, it has no ring of its own: the title wears it. */
+.collapse:has(> input:focus-visible) > .collapse-title {
+  outline: 2px solid color-mix(in oklab, var(--color-primary) 80%, transparent);
+  outline-offset: -2px;
+  border-radius: var(--radius-field);
+}
 .collapse-title { grid-area: 1 / 1; z-index: 1; position: relative; padding: 0.5rem 0.9rem; padding-right: 2rem; }
 /* .collapse > … keeps this one notch more specific than the .flex utility the
    content rows also carry, so the closed state actually hides them. */
@@ -1435,7 +1449,7 @@ video.msg-media { max-width: 22rem; }
 }
 .chain-step:first-child .chain-role { color: var(--color-base-content); }
 
-/* subscription usage meters: how much of a quota window is already burned */
+/* subscription usage meters: how much of a quota window is left */
 .usage-label { min-width: 5.5rem; color: var(--color-muted); }
 .meter {
   flex: 1 1 auto; min-width: 4rem; max-width: 16rem; height: 5px;
@@ -1446,64 +1460,179 @@ video.msg-media { max-width: 22rem; }
 .meter.warn > i { background: var(--color-warning); }
 .meter.crit > i { background: var(--color-error); }
 
-/* ---------- usage page: tokens, cache, list price ---------- */
+/* ---------- usage page: what is left, what was spent, and on what ---------- */
 
-/* Series colours for the daily chart and the table swatches that key it. Five
-   is deliberate: past that the eye stops telling hues apart, and a sixth model
-   is a rounding error on this page anyway — it just reuses the last colour. */
-.series-0 { --series: var(--color-primary); }
-.series-1 { --series: var(--color-accent); }
-.series-2 { --series: var(--color-success); }
-.series-3 { --series: oklch(65% 0.15 250); }
-.series-4 { --series: oklch(68% 0.14 320); }
+/* The colours a model wears in the chart, the legend and the table. Four hues,
+   in an order checked for colour-blind separation between neighbours on this
+   surface, and one neutral that every model past the fourth shares (and that
+   compaction, which nobody picked, always wears). None of them is the red, the
+   amber or the green: those mean act, running and fine everywhere else on the
+   page — including the cache-hit figure right above the chart. */
+.series-0 { --series: #3987e5; }
+.series-1 { --series: #d55181; }
+.series-2 { --series: #9085e9; }
+.series-3 { --series: #1a9fb0; }
+.series-4 { --series: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
+/* The four kinds of token, dearest first: one ink, stepped down. An order, not
+   four identities — which is why it is not the series palette. */
+.makeup-0 { --series: var(--color-base-content); }
+.makeup-1 { --series: color-mix(in oklab, var(--color-base-content) 76%, transparent); }
+.makeup-2 { --series: color-mix(in oklab, var(--color-base-content) 56%, transparent); }
+/* The quietest step is the biggest segment — cache reads are most of the bar —
+   so it stops at 3:1 against the page, not below it. */
+.makeup-3 { --series: color-mix(in oklab, var(--color-base-content) 40%, transparent); }
 
-/* Four figures on one line, with the rule under them that the rest of the page
-   hangs from — not four boxes competing with the chart for the eye. */
-.usage-tiles {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem 2rem;
-  padding-bottom: 1.5rem;
-  border-bottom: 1px solid var(--color-line);
+.usage-page { display: flex; flex-direction: column; gap: 2.5rem; max-width: 80rem; }
+.usage-controls { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+
+/* What was spent on the left, what is left on the right: the two halves of the
+   question the page is opened to answer, both above the fold. */
+.usage-top { display: flex; align-items: flex-start; gap: 2.5rem; padding-bottom: 2rem; border-bottom: 1px solid var(--color-line); }
+.usage-summary { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 1.6rem; }
+.usage-quota {
+  flex: 0 0 21rem; display: flex; flex-direction: column; gap: 0.9rem;
+  padding-left: 2.5rem; border-left: 1px solid var(--color-line);
 }
-@media (min-width: 900px) { .usage-tiles { grid-template-columns: repeat(4, 1fr); } }
+.usage-quota-provider { display: flex; flex-direction: column; gap: 0.45rem; }
+/* In a column this narrow the meter gets a line of its own under its words:
+   beside them, every bar was a different length and none could be compared. */
+.usage-quota .usage-meter { flex-wrap: wrap; row-gap: 0.3rem; justify-content: space-between; }
+.usage-quota .usage-meter .usage-label { min-width: 0; }
+.usage-quota .usage-meter .meter { order: 1; flex: 1 0 100%; max-width: none; }
+@media (max-width: 1150px) {
+  .usage-top { flex-direction: column; gap: 1.75rem; }
+  .usage-summary { flex: none; width: 100%; }
+  .usage-quota { flex: none; width: 100%; padding: 1.75rem 0 0; border-left: 0; border-top: 1px solid var(--color-line); }
+}
 
+.usage-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem 2rem; }
+@media (min-width: 900px) { .usage-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .usage-tile { display: flex; flex-direction: column; gap: 0.15rem; }
-.usage-tile-value { font-size: 1.75rem; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
-.usage-tile.is-good .usage-tile-value { color: var(--color-success); }
-.usage-tile.is-warn .usage-tile-value { color: var(--color-warning); }
-.usage-tile.is-bad .usage-tile-value { color: var(--color-error); }
+/* Proportional figures: at this size tabular ones leave a hole beside every 1. */
+.usage-tile-value { font-size: 1.9rem; font-weight: 600; line-height: 1.15; letter-spacing: -0.015em; }
+.usage-tile-hint { font-size: 0.75rem; color: var(--color-faint); }
 
-/* Bars are plain flex boxes rather than an SVG: the chart has no axes and no
-   text inside it, so there is nothing a viewBox would buy that percentage
-   heights don't already give — including reflowing with the sidebar. */
-.usage-chart { display: flex; align-items: flex-end; gap: 2px; height: 9rem; }
-.usage-col { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
-.usage-stack {
-  display: flex; flex-direction: column-reverse; /* the leading series on the floor */
-  /* A week is seven columns across the whole page; left to fill them, the bars
-     were seven red slabs. Capped, they are bars at any window. */
-  width: min(100%, 2.25rem); align-self: center;
-  min-height: 1px; border-radius: 3px; overflow: hidden;
-  background: color-mix(in oklab, var(--color-base-content) 10%, transparent);
-}
-.usage-stack > i { display: block; background: var(--series, var(--color-base-300)); }
-.usage-col:hover .usage-stack { filter: brightness(1.25); }
-.usage-xlabel {
-  height: 1rem; padding-top: 0.2rem;
-  font-family: var(--font-mono); font-size: 0.6rem; text-align: center;
-  color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
-  overflow: hidden; white-space: nowrap;
-}
-
+/* A swatch, a name and a figure: the unit every key on this page is made of. */
+.usage-key { display: inline-flex; align-items: baseline; gap: 0.35rem; white-space: nowrap; font-size: 0.78rem; }
+.usage-key .series-swatch { align-self: center; margin-right: 0; }
+.usage-key-name { color: var(--color-muted); }
+.usage-key-value { font-variant-numeric: tabular-nums; }
+.usage-key-share { color: var(--color-faint); font-variant-numeric: tabular-nums; }
+.usage-key.is-absent { opacity: 0.45; }
 .series-swatch {
-  display: inline-block; width: 0.5rem; height: 0.5rem; margin-right: 0.4rem;
+  display: inline-block; flex: none; width: 0.55rem; height: 0.55rem; margin-right: 0.45rem;
   border-radius: 2px; background: var(--series, var(--color-base-300));
 }
 
-/* Six columns don't fit a phone, and wrapping every cell turns the table into
-   an unreadable stack — so it scrolls sideways instead. */
+.usage-makeup { display: flex; flex-direction: column; gap: 0.65rem; }
+/* 2px of the page between segments does the separating; a sliver too small to
+   see still gets its 2px, because a kind of token that exists should show. */
+.usage-makeup-bar { display: flex; gap: 2px; height: 8px; }
+.usage-makeup-bar > i { flex: 1 0 2px; border-radius: 999px; background: var(--series); }
+.usage-makeup-key { display: flex; flex-wrap: wrap; gap: 0.3rem 1.5rem; }
+.usage-cold { max-width: 46rem; font-size: 0.8rem; line-height: 1.5; color: var(--color-muted); }
+.usage-cold strong { font-weight: 600; color: var(--color-base-content); }
+.usage-cold.is-warn strong { color: var(--color-warning); }
+
+.usage-section { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+.usage-section-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+.usage-section-note, .usage-footnote { font-size: 0.75rem; color: var(--color-faint); }
+
+/* -- per day -- */
+
+/* The legend, which is also where a picked day's figures are read. Its height
+   is reserved, so the chart does not jump when a long day's line wraps. */
+.usage-readout { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2rem 1.4rem; min-height: 1.5rem; }
+.usage-readout-when { min-width: 7.5rem; font-size: 0.8rem; color: var(--color-muted); }
+.usage-readout-total { font-size: 0.95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-readout-noun { font-size: 0.78rem; font-weight: 400; color: var(--color-faint); }
+.usage-readout-series { display: flex; flex-wrap: wrap; gap: 0.2rem 1.4rem; margin-left: auto; }
+
+/* Bars are plain flex boxes rather than an SVG: percentage heights reflow with
+   the page, and a column is a real button a keyboard can land on. */
+.usage-plot {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 11rem auto; column-gap: 0.6rem;
+  padding-top: 0.5rem; /* room for the top tick's label */
+}
+.usage-yaxis { position: relative; min-width: 2.2rem; }
+.usage-yaxis > span {
+  position: absolute; right: 0; transform: translateY(50%);
+  font-size: 0.68rem; line-height: 1; color: var(--color-faint); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* The widest label sizes the gutter; absolutely placed ones cannot, so the top
+   one is also laid out in flow, invisibly. */
+.usage-yaxis::before { content: attr(data-widest); visibility: hidden; font-size: 0.68rem; white-space: nowrap; }
+/* pan-y: a finger dragged sideways across the plot picks days; dragged up or
+   down it still scrolls the page. */
+.usage-chart { position: relative; display: flex; align-items: stretch; touch-action: pan-y; }
+.usage-grid { position: absolute; left: 0; right: 0; height: 1px; background: var(--color-line); pointer-events: none; }
+.usage-grid:last-of-type { background: color-mix(in oklab, var(--color-base-content) 18%, transparent); } /* the floor */
+/* The whole slot is the target, not the bar in it: a day nothing ran on, or
+   one with a 3px bar, is still a day someone may ask about. */
+.usage-col {
+  position: relative; flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; justify-content: flex-end; align-items: center;
+  border-radius: 3px 3px 0 0; cursor: default;
+  transition: background-color 0.12s;
+}
+.usage-col.is-picked { background: var(--color-raise); }
+.usage-col:focus-visible { outline-offset: -2px; }
+.usage-stack {
+  display: flex; flex-direction: column-reverse; gap: 2px; /* the dearest model on the floor */
+  /* A week is seven columns across the whole page; left to fill them the bars
+     were seven slabs. Capped, they are bars at any window. */
+  width: min(calc(100% - 2px), 1.5rem); min-height: 2px;
+  transition: opacity 0.12s;
+}
+.usage-stack > i { display: block; flex: 1 0 1px; background: var(--series); }
+.usage-stack > i:last-child { border-radius: 4px 4px 0 0; }
+/* Ninety columns leave no room for a gap or a rounded end. */
+.usage-chart:has(> .usage-col:nth-of-type(46)) .usage-stack { gap: 1px; width: calc(100% - 1px); }
+.usage-chart:has(> .usage-col:nth-of-type(46)) .usage-stack > i:last-child { border-radius: 1px 1px 0 0; }
+.usage-chart.has-pick .usage-col:not(.is-picked) .usage-stack { opacity: 0.4; }
+.usage-xaxis { grid-column: 2; display: flex; padding-top: 0.4rem; }
+.usage-xaxis > span {
+  flex: 1 1 0; min-width: 0; display: flex; justify-content: center;
+  font-size: 0.68rem; line-height: 1; color: var(--color-faint); white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) { .usage-col, .usage-stack { transition: none; } }
+
+/* -- by model -- */
+
+.table .num { text-align: right; }
+.usage-model-name { white-space: nowrap; }
+.usage-unpriced { color: var(--color-faint); white-space: nowrap; }
+.usage-models td.is-bad { color: var(--color-error); }
+.usage-share { display: flex; align-items: center; gap: 0.6rem; min-width: 9rem; }
+.usage-share-track { flex: 1 1 auto; height: 6px; border-radius: 999px; background: var(--color-raise); overflow: hidden; }
+.usage-share-track > i { display: block; height: 100%; min-width: 2px; border-radius: 999px; background: var(--series); }
+.usage-share > span { flex: none; width: 2.6rem; text-align: right; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+
+/* Seven columns don't fit a phone, and wrapping every cell turns the table
+   into an unreadable stack — so it scrolls sideways instead. */
 .usage-scroll { overflow-x: auto; }
-.usage-scroll .table { min-width: 34rem; }
-.usage-thread { display: inline-block; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.usage-scroll .table { min-width: 40rem; }
+
+/* -- by thread -- */
+
+.usage-threads { list-style: none; padding: 0; display: flex; flex-direction: column; }
+.usage-thread {
+  display: grid; grid-template-columns: minmax(0, 24rem) minmax(4rem, 1fr) 5rem 5rem;
+  align-items: center; column-gap: 1.25rem;
+  padding: 0.4rem 0.55rem; margin-inline: -0.55rem;
+  border-radius: var(--radius-field);
+}
+.usage-thread + .usage-thread { box-shadow: 0 -1px 0 var(--color-line); }
+.usage-thread:hover { background: var(--color-raise); }
+.usage-thread-name { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; text-decoration: none; }
+.usage-thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
+.usage-thread-name:hover .usage-thread-title { text-decoration: underline; }
+.usage-thread-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.72rem; color: var(--color-faint); }
+.usage-thread-bar { height: 6px; border-radius: 999px; background: var(--color-raise); overflow: hidden; }
+.usage-thread-bar > i { display: block; height: 100%; min-width: 2px; border-radius: 999px; background: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
+.usage-thread-value, .usage-thread-other { text-align: right; font-size: 0.88rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-thread-other { color: var(--color-muted); }
 
 /* ---------- misc components ---------- */
 
@@ -1525,13 +1654,63 @@ video.msg-media { max-width: 22rem; }
 .section { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 2.75rem; }
 .section:last-child { margin-bottom: 0; }
 
-/* A workspace: its name over a rule, and everything it owns under that. The
-   rule is the only frame it gets. */
-.scope-block { max-width: 62rem; margin-bottom: 3.5rem; }
-.scope-title { padding-bottom: 0.75rem; border-bottom: 1px solid var(--color-line); }
+/* Which of a page's things is on screen: a row of names over a rule, the
+   chosen one bright and underlined in the page's one red. Links, so each has
+   an address and the back button moves between them. */
+.tabs {
+  display: flex; align-items: stretch; gap: 1.6rem;
+  max-width: 62rem; margin-bottom: 1.75rem;
+  border-bottom: 1px solid var(--color-line);
+}
+/* The names scroll sideways when there are too many; what comes after them in
+   the row stays put. The fade says there is more past the edge. */
+.tabs-names {
+  flex: 0 1 auto; min-width: 0; display: flex; gap: 1.6rem;
+  /* the fade falls on this padding, not on the last name, until names
+     actually run past the edge */
+  padding-right: 1.5rem;
+  overflow-x: auto; scrollbar-width: none;
+  mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent);
+}
+.tabs-names::-webkit-scrollbar { display: none; }
+.tab {
+  flex: none; padding: 0.45rem 0 0.6rem;
+  font-family: var(--font-mono); font-size: 0.9rem; white-space: nowrap; text-decoration: none;
+  color: var(--color-muted);
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: color 0.15s, box-shadow 0.15s;
+}
+.tab:hover { color: var(--color-base-content); }
+.tab.is-active { color: var(--color-base-content); box-shadow: inset 0 -2px 0 var(--color-primary); }
+.tab:focus-visible { outline-offset: -2px; }
+/* Not a workspace, so not in the workspaces' typeface — and pushed to the far
+   end, away from the names it would otherwise read as one of. */
+.tab-add { margin-left: auto; font-family: var(--font-sans); font-size: 0.85rem; color: var(--color-muted); }
 
-/* A topic, hanging off the group or person it belongs to. */
-.topic-block { padding-left: 0.9rem; border-left: 1px solid color-mix(in oklab, var(--color-base-content) 16%, transparent); }
+/* A workspace: everything it owns, in one column of a readable width. */
+.scope-block { display: flex; flex-direction: column; gap: 2.5rem; max-width: 62rem; }
+.scope-block > .section { margin-bottom: 0; }
+.scope-end { display: flex; justify-content: flex-end; padding-top: 1rem; border-top: 1px solid var(--color-line); }
+
+/* How many rows a list's label stands over. */
+.count-mark { color: var(--color-faint); font-variant-numeric: tabular-nums; }
+
+/* Topics, folded: a ruled list of names under the group or person they belong
+   to. One opens into its settings in place and is the only filled row. */
+.topic-list-head { display: flex; align-items: center; gap: 0.75rem; min-height: 1.6rem; }
+.topic-filter { margin-left: auto; width: 13rem; max-width: 55%; }
+.topic-filter::-webkit-search-cancel-button { filter: grayscale(1) opacity(0.5); }
+.topic-list { display: flex; flex-direction: column; border-top: 1px solid var(--color-line); border-bottom: 1px solid var(--color-line); }
+.topic-row { border-radius: 0; }
+.topic-row + .topic-row { border-top: 1px solid var(--color-line); }
+.topic-row > .collapse-title { padding: 0.4rem 2rem 0.4rem 0.6rem; }
+.topic-id { padding-right: 0.25rem; }
+.topic-row > .collapse-content { padding: 0.3rem 0.6rem 0.9rem; }
+.topic-row:hover, .topic-row:has(> input:checked) { background: var(--color-raise); }
+.topic-list > .text-xs { padding: 0.5rem 0.6rem; }
+/* "Show all 110 channels": a line of text that happens to be a button. */
+.more-toggle { align-self: flex-start; padding: 0.15rem 0; font-size: 0.8rem; color: var(--color-muted); text-decoration: underline; text-underline-offset: 0.2em; text-decoration-color: color-mix(in oklab, currentColor 40%, transparent); }
+.more-toggle:hover { color: var(--color-base-content); }
 
 /* A provider: who it is, whether it is signed in, how much of it is left. A
    row in a list, ruled off from the next. */
@@ -1779,6 +1958,7 @@ video.msg-media { max-width: 22rem; }
 .flex-wrap { flex-wrap: wrap; }
 .flex-1 { flex: 1 1 0%; }
 .items-center { align-items: center; }
+.items-baseline { align-items: baseline; }
 .justify-center { justify-content: center; }
 .justify-end { justify-content: flex-end; }
 .self-start { align-self: flex-start; }
@@ -1860,9 +2040,11 @@ video.msg-media { max-width: 22rem; }
 .text-success { color: var(--color-success); }
 .text-error { color: var(--color-error); }
 
-.opacity-40 { opacity: 0.4; }
-.opacity-50 { opacity: 0.5; }
-.opacity-60 { opacity: 0.6; }
+/* Named for their place in the scale, set where 11px text still reads: at a
+   literal 0.4 the footnotes were under 3.5:1. */
+.opacity-40 { opacity: 0.52; }
+.opacity-50 { opacity: 0.58; }
+.opacity-60 { opacity: 0.66; }
 
 /* background-color (not the shorthand) so a gradient background-image set on
    the same element — e.g. body's vignette — survives the utility. */
@@ -2114,7 +2296,12 @@ video.msg-media { max-width: 22rem; }
   .collapse-title { padding: 0.5rem 0.6rem; padding-right: 1.7rem; }
   .collapse > .collapse-content { padding: 0 0.6rem 0.6rem; }
   .collapse-arrow > .collapse-title::after { right: 0.7rem; }
-  .topic-block { padding-left: 0.7rem; }
+  .topic-filter { width: 9.5rem; }
+  .tabs, .tabs-names { gap: 1.25rem; }
+  .tabs { margin-bottom: 1.25rem; }
+  .tab { padding-block: 0.6rem 0.7rem; }
+  /* A row a thumb can hit. */
+  .topic-row > .collapse-title { min-height: 2.75rem; }
   /* A name field, an id, two badges and a remove button do not share 280px.
      The field takes the line and the rest follows underneath. */
   .topic-head { flex-wrap: wrap; }
@@ -2125,7 +2312,6 @@ video.msg-media { max-width: 22rem; }
      own — a whole row spent on the one control nobody wants to press. The
      detail gives way instead. */
   .scope-head { flex-wrap: nowrap; min-width: 0; }
-  .scope-head > .display { flex-shrink: 0; }
 
   /* Eight rows of monospace is a third of the screen, and the built-in prompt
      is read-only text nobody scrolled here to read. Still draggable. */
@@ -2162,13 +2348,35 @@ video.msg-media { max-width: 22rem; }
   .skill-filter { width: 100%; }
   .toolcall-result { max-height: 40dvh; }
 
-  /* Info tooltips flip to the left near the right edge so they stay on-screen. */
-  .tooltip-right::before { left: auto; right: 100%; margin-left: 0; margin-right: 0.5rem; }
+  /* An info tip opens as a note along the bottom of the screen. Hung off its
+     icon it ran off whichever edge the icon was nearest, and most of them sit
+     a thumb's width from the left one. */
+  .tooltip::before, .tooltip-right::before {
+    position: fixed;
+    inset: auto calc(0.75rem + var(--safe-r)) calc(var(--tabbar) + 0.75rem) calc(0.75rem + var(--safe-l));
+    width: auto; max-width: none; margin: 0; transform: none;
+    padding: 0.7rem 0.85rem; font-size: 0.85rem;
+  }
 
-  /* Six-column tables and a 22rem thread name don't fit — the table already
-     scrolls sideways, the name just has to stop demanding the width. */
-  .usage-thread { max-width: 11rem; }
-  .usage-tile-value { font-size: 1.25rem; }
+  /* -- the usage page -- */
+  .usage-tile-value { font-size: 1.5rem; }
+  .usage-page { gap: 2rem; }
+  .usage-readout-series { margin-left: 0; }
+  .usage-plot { grid-template-rows: 9rem auto; }
+  /* A ranked row on a phone: the name on its own line, the bar and the two
+     figures under it. The figures get fixed columns, so every bar is drawn on
+     the same track and a longer bar is always a bigger number. */
+  .usage-thread { grid-template-columns: minmax(0, 1fr) 4.2rem 4.2rem; gap: 0.35rem 0.6rem; }
+  /* With three columns hidden the table fits, and nothing scrolls sideways. */
+  .usage-scroll .table { min-width: 0; }
+  /* The share keeps its figure and gives up its bar; a model's name may
+     break where it has to. */
+  .usage-share { min-width: 0; }
+  .usage-share-track { display: none; }
+  .usage-share > span { width: auto; }
+  .usage-model-name { white-space: normal; overflow-wrap: anywhere; }
+  .usage-models th, .usage-models td { padding-inline: 0.35rem; }
+  .usage-thread-name { grid-column: 1 / -1; }
 
   /* Toasts span the width so they read comfortably (.toast-end already sets right:0). */
   /* Above the tab bar when there is one; over the home indicator's strip when not. */

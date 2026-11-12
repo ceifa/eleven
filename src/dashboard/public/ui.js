@@ -77,11 +77,66 @@ const INFO_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" s
 const info = (tip) => h("button", { type: "button", class: "tooltip tooltip-right info-icon", "data-tip": tip, "aria-label": tip, html: INFO_ICON });
 
 function labeled(label, control, tip) {
+  // The visible label is a div beside the field, which names it for the eye
+  // and for nothing else. Give the field the same words.
+  if (control?.matches?.("input, select, textarea") && !control.hasAttribute("aria-label")) control.setAttribute("aria-label", label);
   return h("div", {},
     h("div", { class: "text-xs dim-label mb-1 flex items-center gap-1.5" }, label, tip ? info(tip) : null),
     control,
   );
 }
+
+/**
+ * A button that removes something, and takes two clicks to do it: the first
+ * arms it, the second commits, and four seconds of nothing disarms it again.
+ *
+ * Removing a workspace takes its channels with it, a channel its people and
+ * groups, a group its topics — and every one of those was a single click on a
+ * word in the corner of a row, saved the moment it landed. No native
+ * confirm(): a modal dialog would block scripted browsers.
+ *
+ * `loud` keeps it red at rest, for the one remove on a page that stands alone.
+ */
+function confirmButton(label, action, { class: extra = "", noun, loud = false } = {}) {
+  let armedAt = 0;
+  let timer;
+  const disarm = () => {
+    clearTimeout(timer);
+    armedAt = 0;
+    button.textContent = label;
+    button.classList.remove("is-armed");
+  };
+  const button = h("button", {
+    type: "button",
+    class: `btn btn-ghost btn-xs text-error${loud ? " is-loud" : ""} ${extra}`,
+    title: noun ? `remove ${noun}` : undefined,
+    onclick: async () => {
+      if (!armedAt) {
+        armedAt = Date.now();
+        button.textContent = "Confirm removal";
+        button.classList.add("is-armed");
+        timer = setTimeout(disarm, 4000);
+        return;
+      }
+      // The armed button sits where the resting one was, so the second half
+      // of a double-click lands on it. That is not a decision.
+      if (Date.now() - armedAt < 500) return;
+      // Disarmed before it runs, and dead while it does: a save that fails
+      // must not leave a live trigger behind, and a third click must not
+      // remove the next row that slid into this one's place.
+      disarm();
+      button.disabled = true;
+      try { await action(); } finally { button.disabled = false; }
+    },
+  }, label);
+  return button;
+}
+
+// A fold is a checkbox laid over its title, so Space opens it and Enter — the
+// key everything else on the page answers to — did nothing.
+document.addEventListener?.("keydown", (event) => {
+  if (event.key === "Enter" && event.target?.matches?.(".collapse > input[type=checkbox]")) event.target.click();
+});
 
 /* ---------- route loading indicator ---------- */
 
@@ -124,5 +179,5 @@ async function withLoading(work, { swap = false } = {}) {
 export {
   h, toast, SEARCH_ICON, PLUS_ICON, FILTER_ICON, SEND_ICON, ARROW_DOWN_ICON, CLIP_ICON, MIC_ICON,
   CHECK_ICON, X_ICON, FILE_ICON, atBottom, flare, copyText, isPhone, pageTitle, sectionLabel, info,
-  labeled, withLoading,
+  labeled, confirmButton, withLoading,
 };

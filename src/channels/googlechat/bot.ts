@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { ChannelConfig } from "../../config.ts";
 import { logger } from "../../log.ts";
-import { type InboundMedia, formatInboundBody, mediaNote, sanitizeNoteValue, saveInboundMedia } from "../../media-store.ts";
+import { type InboundMedia, formatInboundBody, mediaNote, sanitizeNoteValue, saveInboundMedia, transcribeMedia } from "../../media-store.ts";
 import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import type { ReplyOptions } from "../index.ts";
@@ -260,13 +260,28 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
         media.notes.push(`[user shared "${sanitizeNoteValue(filename)}" from Google Drive, which this channel cannot read]`);
         continue;
       }
+      let path: string;
       try {
         const buffer = await api.download(resource);
         if (mime.startsWith("image/")) media.images.push({ type: "image", data: buffer.toString("base64"), mimeType: mime });
-        media.notes.push(mediaNote(await saveInboundMedia(buffer, filename), mime));
+        path = await saveInboundMedia(buffer, filename);
+        media.notes.push(mediaNote(path, mime));
       } catch (error) {
         log.warn(`attachment ${filename} failed: ${error}`);
         media.notes.push(`[attachment "${sanitizeNoteValue(filename)}" could not be downloaded: ${sanitizeNoteValue(String(error))}]`);
+        continue;
+      }
+      if (!mime.startsWith("audio/")) continue;
+      const command = deps.transcribeCommand();
+      if (!command) {
+        media.notes.push("[voice message not transcribed; transcription is not configured]");
+        continue;
+      }
+      try {
+        media.transcript = await transcribeMedia(path, command);
+      } catch (error) {
+        log.warn(`transcription of ${filename} failed: ${error}`);
+        media.notes.push("[voice message could not be transcribed]");
       }
     }
     return media;

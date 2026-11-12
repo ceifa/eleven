@@ -9,11 +9,13 @@
    five use each other's bindings only inside functions called later, never
    while the module itself is being evaluated. */
 
-import { keep } from "./snapshot.js";
+import { syncChildren } from "./dom.js";
+import { keep, readSnapshotUnder } from "./snapshot.js";
 import { state } from "./state.js";
 import { api, call, ok, prefetch, started } from "./api.js";
 import { ARROW_DOWN_ICON, atBottom, h, isPhone, withLoading } from "./ui.js";
 import { channelSource, threadName, withoutChannelPrefix } from "./channels.js";
+import { syncPaneChrome } from "./chrome.js";
 import { onThreadsView } from "./router.js";
 import { stopRecording } from "./attachments.js";
 import { isThreadLive, setServerRunning } from "./running.js";
@@ -36,18 +38,50 @@ let openSeq = 0;
  */
 const seenThreads = new Map(); // thread id → the /threads/:id answer
 const SEEN_THREADS = 16;
+// ...and across a cold start, through the snapshot: each read under a key of
+// its own, so remembering one conversation writes one conversation.
+const SEEN_PREFIX = "seen:";
+const seenKey = (id) => `${SEEN_PREFIX}${id}`;
 function rememberThread(data, { persist = true } = {}) {
   seenThreads.delete(data.thread.id); // re-inserted as the newest
   seenThreads.set(data.thread.id, data);
-  while (seenThreads.size > SEEN_THREADS) seenThreads.delete(seenThreads.keys().next().value);
-  if (persist) keepSeen();
+  trimSeen();
+  if (!persist) return;
+  // Without what the turn was doing: that part is never painted from memory,
+  // so it is not worth keeping.
+  const { live, ...read } = data;
+  keep(seenKey(data.thread.id), { at: Date.now(), read });
+}
+function trimSeen() {
+  while (seenThreads.size > SEEN_THREADS) {
+    const oldest = seenThreads.keys().next().value;
+    seenThreads.delete(oldest);
+    keep(seenKey(oldest), undefined);
+  }
 }
 function forgetThread(id) {
-  if (seenThreads.delete(id)) keepSeen();
+  if (seenThreads.delete(id)) keep(seenKey(id), undefined);
 }
-// ...and across a cold start, through the snapshot. Without what the turn was
-// doing: that part is never painted from memory, so it is not worth keeping.
-const keepSeen = () => keep("seen", [...seenThreads.values()].map(({ live, ...read }) => read));
+
+/**
+ * The conversations read lately, back from the snapshot. Not part of the first
+ * frame — the boot restores the one thread the address bar names and nothing
+ * else — so this runs after it, and whatever the page has read in the meantime
+ * is newer than anything it brings back.
+ */
+async function restoreSeenThreads() {
+  const kept = (await readSnapshotUnder(SEEN_PREFIX)).filter((entry) => entry?.read?.thread?.id).sort((a, b) => a.at - b.at);
+  const fresh = [...seenThreads.values()];
+  seenThreads.clear();
+  for (const { read } of kept) seenThreads.set(read.thread.id, read);
+  for (const data of fresh) {
+    seenThreads.delete(data.thread.id);
+    seenThreads.set(data.thread.id, data);
+  }
+  trimSeen();
+  // What an older version of this page kept: every conversation under one key.
+  keep("seen", undefined);
+}
 
 /** A read of the thread under a finger that has just landed, for the click it
  *  is probably about to be. A press that turns into a scroll opens nothing, so
@@ -225,6 +259,7 @@ function paneLoading(id) {
   renderedThreadId = undefined;
   renderedHead = undefined;
   pane.classList.remove("is-composing", "is-running");
+  syncPaneChrome();
   const card = state.threads.find((thread) => thread.id === id);
   pane.replaceChildren(
     // The head also keeps the way back: on a phone this is the whole screen,
@@ -255,6 +290,7 @@ function renderThreadPane() {
   if (!pane) return;
   const thread = state.activeThread;
   pane.classList.remove("is-composing");
+  syncPaneChrome();
   // Anything below that replaces the pane takes a running recorder's UI with it.
   if (!thread || renderedThreadId !== thread.id) stopRecording();
   if (!thread) {
@@ -284,7 +320,7 @@ function renderThreadPane() {
       threadHeader(thread),
       h("div", { class: "messages", id: "messages", onscroll: onTranscriptScroll },
         h("div", { class: "msg-col" },
-          h("div", { id: "transcript" }, durableRows()),
+          h("div", { id: "transcript" }, durableRows({ opening: true })),
           h("div", { id: "pending" }),
           h("div", { id: "live" }),
           h("div", { class: "panel-board", id: "panels" }),
@@ -307,7 +343,11 @@ function renderThreadPane() {
       pane.querySelector(".thread-head")?.replaceWith(threadHeader(thread));
       renderedHead = headSignature(thread);
     }
-    document.getElementById("transcript")?.replaceChildren(...durableRows());
+    // The rows that did not change are the nodes already there (durableRows),
+    // and they are left where they are: a read that brought nothing new touches
+    // nothing, and one that brought a reply adds the reply.
+    const transcript = document.getElementById("transcript");
+    if (transcript) syncChildren(transcript, durableRows());
   }
 
   // The regions live inside the pane, so they can only be filled once it's
@@ -338,6 +378,6 @@ function renderThreadPane() {
 }
 
 export {
-  seenThreads, rememberThread, forgetThread, prefetchThread, readAheadThreads, openThread,
+  seenThreads, seenKey, rememberThread, restoreSeenThreads, forgetThread, prefetchThread, readAheadThreads, openThread,
   scheduleReconcile, forgetRenderedThread, renderThreadPane,
 };

@@ -76,17 +76,43 @@ function seriesSlots(models) {
 
 /* ---------- the view ---------- */
 
+/** The last report read for each window and weight. The daemon builds one by
+ *  walking every session file it has, and the first walk after a restart takes
+ *  a second or two — so a report this page has already shown is painted from
+ *  here at once, and the read that is in flight corrects it when it lands. */
+const reports = new Map(); // "days:metric" → report
+let reading = 0;
+
 async function viewUsage() {
   const days = usageDays();
   const metric = usageMetric();
+  const asked = `${days}:${metric}`;
+  const read = ++reading;
   // /config is what the quota panel derives its provider list from, and it's
   // cached — so switching windows costs one request, not two.
-  const [report, config] = await Promise.all([
+  const fresh = Promise.all([
     api.get(`/usage/tokens?days=${days}${metric === "cost" ? "&by=cost" : ""}`),
     cachedGet("/config"),
   ]);
+  const held = reports.get(asked);
+  if (held && state.config) {
+    paintUsage(held, days, metric);
+    fresh.then(([report, config]) => {
+      state.config = config;
+      reports.set(asked, report);
+      // Only while this is still the page on screen, and only if a number moved.
+      const showing = read === reading && location.hash.startsWith("#/usage");
+      if (showing && JSON.stringify(report) !== JSON.stringify(held)) paintUsage(report, days, metric);
+    }, () => {});
+    return;
+  }
+  const [report, config] = await fresh;
   state.config = config;
+  reports.set(asked, report);
+  paintUsage(report, days, metric);
+}
 
+function paintUsage(report, days, metric) {
   const slotOf = seriesSlots(report.byModel.map((entry) => entry.model));
   const empty = report.total.responses === 0;
   const span = everyDay(report);

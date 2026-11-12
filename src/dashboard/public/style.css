@@ -140,13 +140,30 @@ h1, h2 { font-weight: 700; line-height: 1.2; }
     0 0 22px oklch(55% 0.22 27 / 0.45),
     0 0 50px oklch(55% 0.22 27 / 0.25);
   text-decoration: none;
+  position: relative;
 }
-/* while a turn is streaming, the sign burns brighter — a certain wall of lights */
-.wordmark.live { color: oklch(68% 0.24 27); animation: e11-glow 1.1s ease-in-out infinite alternate; }
-@keyframes e11-glow {
-  from { text-shadow: 0 0 6px oklch(55% 0.22 27 / 0.9), 0 0 22px oklch(55% 0.22 27 / 0.45), 0 0 50px oklch(55% 0.22 27 / 0.25); }
-  to   { text-shadow: 0 0 8px oklch(62% 0.24 27), 0 0 30px oklch(60% 0.24 27 / 0.7), 0 0 70px oklch(58% 0.24 27 / 0.45); }
+/* while a turn is streaming, the sign burns brighter — a certain wall of lights.
+   The brighter glow is a second copy of the word, shadow only, laid over the
+   first and faded in and out. Animating the text-shadow itself says the same
+   thing and costs a repaint of the page on every frame: with a turn streaming
+   that was a third of the main thread, spent for as long as the turn ran.
+   Opacity on a layer of its own is the compositor's work and nobody else's. */
+.wordmark.live { color: oklch(68% 0.24 27); }
+.wordmark::after {
+  /* the empty alternative keeps a screen reader from reading the sign twice;
+     a browser that doesn't know the syntax keeps the line above it */
+  content: "eleven";
+  content: "eleven" / "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: transparent;
+  text-shadow: 0 0 8px oklch(62% 0.24 27), 0 0 30px oklch(60% 0.24 27 / 0.7), 0 0 70px oklch(58% 0.24 27 / 0.45);
+  opacity: 0;
+  pointer-events: none;
 }
+.wordmark.live::after { animation: e11-glow 1.1s ease-in-out infinite alternate; }
+@keyframes e11-glow { from { opacity: 0; } to { opacity: 1; } }
 /* the sign stutters to life when a turn begins — a light finding its feet.
    Placed after .live so it wins the equal-specificity tie while present; when
    the animation ends the class is dropped and the steady glow takes over. */
@@ -162,15 +179,15 @@ h1, h2 { font-weight: 700; line-height: 1.2; }
   72%  { opacity: 1; }
   100% { opacity: 1; }
 }
-@media (prefers-reduced-motion: reduce) { .wordmark.live, .wordmark.flicker { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .wordmark.live::after, .wordmark.flicker { animation: none; } }
 
 /* ---------- string lights (the wall) ---------- */
 
 /* A string of bulbs sagging under the sign. Bulbs idle dim with a slow
    staggered twinkle; every live event flares the next bulb along the wire, so
-   a streaming turn chases light across the string. app.js places the bulbs on
-   the wire and sets each one's --twinkle phase; colors come from the
-   nth-of-type rules below. */
+   a streaming turn chases light across the string. chrome.js places a socket
+   per bulb on the wire — the bulb and the glow around it — and sets each one's
+   --twinkle phase; colors come from the nth-of-type rules below. */
 .string-lights { display: block; width: 100%; height: 30px; overflow: visible; }
 .string-lights .wire { fill: none; stroke: oklch(32% 0.02 25); stroke-width: 1.2; }
 .string-lights .bulb {
@@ -182,29 +199,38 @@ h1, h2 { font-weight: 700; line-height: 1.2; }
      outrank the .lit rule below and delay the flare too. */
   animation-delay: var(--twinkle, 0s);
 }
+/* The glow of a bulb that has just flared: a disc in the bulb's own colour,
+   solid a little past the bulb's edge and fading out to nothing, dark until the
+   flare. A streaming turn flares a bulb with every event, so the wall is
+   animating for as long as the turn runs — and a bulb that swells by transform
+   under a glow drawn by a drop-shadow filter is laid out and repainted on the
+   main thread every frame of that. Fading a disc that is already painted is
+   the compositor's work alone: the swell is the disc's solid heart going out. */
+.string-lights .bulb-glow { opacity: 0; }
+.string-lights .bulb-glow-stop { stop-color: var(--bulb, var(--color-warning)); }
 /* the wall's palette: mostly amber (the fill fallback above), with stray red,
    green and blue — the show's bulbs, muted to the theme. In CSS so another
    [data-theme] block can repaint the wall. */
-.string-lights .bulb:nth-of-type(2), .string-lights .bulb:nth-of-type(8) { --bulb: oklch(62% 0.2 27); }
-.string-lights .bulb:nth-of-type(4) { --bulb: oklch(65% 0.13 150); }
-.string-lights .bulb:nth-of-type(6) { --bulb: oklch(65% 0.1 250); }
-.string-lights .bulb.lit { animation: e11-bulb 0.7s ease-out; }
+.string-lights .socket:nth-of-type(2), .string-lights .socket:nth-of-type(8) { --bulb: oklch(62% 0.2 27); }
+.string-lights .socket:nth-of-type(4) { --bulb: oklch(65% 0.13 150); }
+.string-lights .socket:nth-of-type(6) { --bulb: oklch(65% 0.1 250); }
+.string-lights .socket.lit .bulb { animation: e11-bulb 0.7s ease-out; }
+.string-lights .socket.lit .bulb-glow { animation: e11-bulb-glow 0.7s ease-out; }
 /* turn-error: every light on the wall flares red at once — something's wrong
-   in Hawkins. After .lit so it wins when both land on the same bulb. */
-.string-lights .bulb.err { animation: e11-bulb-err 0.9s ease-out; }
+   in Hawkins. After .lit so it wins when both land on the same bulb. Rare
+   enough to keep its filter: it is one flare, not one per event. */
+.string-lights .socket.err .bulb { animation: e11-bulb-err 0.9s ease-out; }
 @keyframes e11-twinkle { 0%, 100% { opacity: 0.22; } 50% { opacity: 0.4; } }
-@keyframes e11-bulb {
-  0%   { opacity: 1; transform: scale(1.4);
-         filter: drop-shadow(0 0 4px var(--bulb, var(--color-warning))) drop-shadow(0 0 9px var(--bulb, var(--color-warning))); }
-  100% { opacity: 0.3; transform: scale(1); filter: none; }
-}
+@keyframes e11-bulb { 0% { opacity: 1; } 100% { opacity: 0.3; } }
+@keyframes e11-bulb-glow { 0% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes e11-bulb-err {
   0%   { opacity: 1; transform: scale(1.5); fill: var(--color-error);
          filter: drop-shadow(0 0 5px var(--color-error)) drop-shadow(0 0 12px var(--color-error)); }
   100% { opacity: 0.3; transform: scale(1); fill: var(--bulb, var(--color-warning)); filter: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .string-lights .bulb, .string-lights .bulb.lit, .string-lights .bulb.err { animation: none; opacity: 0.3; }
+  .string-lights .bulb, .string-lights .socket.lit .bulb, .string-lights .socket.err .bulb { animation: none; opacity: 0.3; }
+  .string-lights .socket.lit .bulb-glow { animation: none; }
 }
 
 /* ---------- route loading bar ---------- */
@@ -223,13 +249,22 @@ h1, h2 { font-weight: 700; line-height: 1.2; }
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.2s ease;
-  background-image: linear-gradient(90deg, transparent, oklch(68% 0.24 27), oklch(82% 0.16 70), transparent);
-  background-size: 40% 100%;
-  background-repeat: no-repeat;
-  background-position: -45% 0;
+  overflow: hidden;
 }
-body.is-loading .route-progress { opacity: 1; animation: e11-sweep 1s ease-in-out infinite; }
-@keyframes e11-sweep { from { background-position: -45% 0; } to { background-position: 145% 0; } }
+/* The light is an element sliding by transform, not a background moving by
+   position: the first is the compositor's, the second repaints on the main
+   thread every frame — during exactly the moments the page is busiest. */
+.route-progress::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  background-image: linear-gradient(90deg, transparent, oklch(68% 0.24 27), oklch(82% 0.16 70), transparent);
+  transform: translateX(-67.5%);
+}
+body.is-loading .route-progress { opacity: 1; }
+body.is-loading .route-progress::before { animation: e11-sweep 1s ease-in-out infinite; }
+@keyframes e11-sweep { from { transform: translateX(-67.5%); } to { transform: translateX(217.5%); } }
 
 /* The outgoing view stays where it is — swapping it for a skeleton would jump
    the layout to say what the bar already says — but it fades back and stops
@@ -239,7 +274,8 @@ body.is-loading .route-progress { opacity: 1; animation: e11-sweep 1s ease-in-ou
 body.is-swapping #view { opacity: 0.5; pointer-events: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  body.is-loading .route-progress { animation: none; background-image: none; background-color: var(--color-primary); }
+  body.is-loading .route-progress { background-color: var(--color-primary); }
+  .route-progress::before { display: none; }
 }
 
 /* Headings speak in the sign's typeface but not in its voice: set as written,
@@ -298,37 +334,39 @@ button.card { text-align: left; }
 button.card:hover { background-color: var(--color-raise); }
 /* active thread: a red accent bar down the left edge + a faint lift, instead
    of a hard outline ring. The rows are otherwise bare — a list, not a stack of
-   cards — so the open one is the only filled thing in the column. The bar is a pseudo-element (not box-shadow)
-   so the is-live halo below owns box-shadow alone — the combined open+streaming
-   state needs no merged keyframe. overflow clips the bar to the rounded corners. */
+   cards — so the open one is the only filled thing in the column. The bar is a
+   pseudo-element the size of the card that only paints its first 3px, so its
+   own rounded corners are what cut the bar to the card's — the card itself
+   clips nothing, and the is-live halo below, which sits outside the card's
+   box, survives on a thread that is both open and running. */
 .card.is-active,
 button.card.is-active:hover {
   background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
 }
-/* overflow:hidden drops a flex item's automatic min-height to 0, and thread
-   cards sit in an overflowing flex column — without flex-shrink:0 the active
-   card would be the only squeezable item and collapse to nothing. */
-.card.is-active { position: relative; overflow: hidden; flex-shrink: 0; }
+.card.is-active, button.card.is-live { position: relative; }
 .card.is-active::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: var(--color-primary);
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(to right, var(--color-primary) 3px, transparent 3px);
 }
 /* a thread whose turn is running — a neon amber halo that breathes around the
    card. A ring (not a bar), so it reads as its own state and layers cleanly
-   with the is-active accent. button-scoped + placed after the hover rules so
-   it survives hover. Both keyframes carry the SAME two shadow layers (soft
-   bloom + 1px ring) and only shift their strength, so the halo eases in and
-   out instead of a layer popping into existence mid-cycle. */
-button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
-@keyframes e11-live {
-  0%, 100% { box-shadow: 0 0 5px -2px color-mix(in oklab, var(--color-warning) 28%, transparent),
-                         0 0 0 1px color-mix(in oklab, var(--color-warning) 38%, transparent); }
-  50%      { box-shadow: 0 0 14px -2px color-mix(in oklab, var(--color-warning) 60%, transparent),
-                         0 0 0 1px color-mix(in oklab, var(--color-warning) 72%, transparent); }
+   with the is-active accent.
+
+   The halo is a pseudo-element wearing the shadow at full strength, and what
+   breathes is its opacity. Animating the box-shadow itself looks the same and
+   is a repaint on the main thread every frame, for as long as any turn runs:
+   with a few threads working, a page nobody was touching spent a third of its
+   time painting, and everything else on it — a click, a scroll, a keystroke —
+   waited its turn behind that. Opacity is animated by the compositor alone. */
+button.card.is-live::after, .card.is-live .thread-avatar::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  box-shadow: 0 0 14px -2px color-mix(in oklab, var(--color-warning) 60%, transparent),
+              0 0 0 1px color-mix(in oklab, var(--color-warning) 72%, transparent);
+  animation: e11-live 2.4s ease-in-out infinite;
 }
+@keyframes e11-live { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
-  button.card.is-live { animation: none;
-    box-shadow: 0 0 8px -3px color-mix(in oklab, var(--color-warning) 45%, transparent), 0 0 0 1px color-mix(in oklab, var(--color-warning) 60%, transparent); }
+  button.card.is-live::after, .card.is-live .thread-avatar::before { animation: none; opacity: 0.8; }
 }
 /* Dim the thread-list meta via TEXT color, not row opacity: a glyph with
    hardcoded fills sitting in the row would only muddy under alpha dimming. */
@@ -386,6 +424,16 @@ button.card.is-live { animation: e11-live 2.4s ease-in-out infinite; }
 /* A flick that runs out of list stops there instead of handing its momentum to
    whatever is behind the column. */
 .thread-scroll { overscroll-behavior: contain; }
+/* Hundreds of cards are hundreds of boxes to style, lay out and paint whenever
+   the list is touched — and it is touched by every message that arrives. The
+   ones off screen are skipped until they scroll near; `auto` remembers the size
+   a card had once it has been seen, so the scrollbar only guesses at rows it
+   has never drawn. Not the live ones: skipping comes with paint containment,
+   and that would shear the halo off at the card's edge. */
+#thread-list > .card { content-visibility: auto; contain-intrinsic-size: auto 3.95rem; }
+#thread-list > button.card.is-live { content-visibility: visible; }
+/* ...and the same containment would clip a focus ring drawn outside the card. */
+#thread-list > .card:focus-visible { outline-offset: -2px; }
 
 /* ---------- threads toolbar ---------- */
 
@@ -1827,6 +1875,13 @@ video.msg-media { max-width: 22rem; }
   font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.55;
   color: var(--color-faint);
 }
+/* A turn can make hundreds of calls, and a block of them is that many rows to
+   style, lay out and paint when its conversation opens — most of the cost of
+   opening a long one. The rows off screen are skipped until they scroll near.
+   Unlike a message, a call is always exactly one line, so the height a skipped
+   row is assumed to have (its line, padding aside) is the height it has: the
+   scrollbar and the jump to the newest message stay exact. */
+.tool-calls-list > .tool-call { content-visibility: auto; contain-intrinsic-size: auto 1.1625rem; }
 .tool-call.is-clickable { cursor: pointer; }
 .tool-call.is-clickable:hover { color: var(--color-base-content); background: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
 /* The tool's name carries the row; the argument is the caption under it. */
@@ -2190,7 +2245,20 @@ video.msg-media { max-width: 22rem; }
   .threads-list-col { width: 100%; padding: 0; }
   /* Opaque here, where the pane slides over the list it came from. */
   #thread-pane { display: none; border-left: 0; background-color: var(--color-base-100); }
-  .threads-layout.pane-open .threads-list-col { display: none; }
+  /* Under an open conversation the list is out of sight, not out of the page.
+     Taking it out with display:none throws its layout away, and coming back to
+     it then means styling and laying out every row again — most of a second on
+     a phone, spent on the back gesture, the one move made here more than any
+     other. So it stays laid out where it will be when it is the screen again
+     (the same box the swipe back draws it in, below), and is only not painted. */
+  .threads-layout.pane-open .threads-list-col {
+    position: absolute;
+    inset: 0;
+    /* the top bar's room and the tab bar's, less whatever of the second the
+       layout already stops short of */
+    padding: 3.25rem 0 calc(3.3rem + var(--safe-b) - var(--tabbar));
+    visibility: hidden;
+  }
   .threads-layout.pane-open #thread-pane { display: flex; width: 100%; }
 
   /* Whichever of the two is showing, it takes the screen edge to edge. The
@@ -2221,12 +2289,19 @@ video.msg-media { max-width: 22rem; }
      a dead 3.25rem band at the top of the conversation.
      The launcher keeps the tab bar: it is the screen the app opens on, and the
      sections have to be reachable from where you land.
-     :root:has() is how a variable at the top reacts to a class four levels
-     under it; a browser without :has() drops both rules and keeps the bar. */
-  :root:has(.threads-layout.pane-open) { --topbar: env(safe-area-inset-top, 0px); }
-  :root:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) { --tabbar: 0px; }
-  body:has(.threads-layout.pane-open) .topbar { display: none; }
-  body:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) .tabbar { display: none; }
+     The two facts these hang on are said on the root element, by the script
+     that changes them (syncPaneChrome, chrome.js): `on-pane` while a pane is
+     the screen, `on-conversation` while that pane is not the launcher. They
+     used to be read off the page with :root:has() and body:has(), which needs
+     no script and costs every change to the page a look at the whole page:
+     with a :has() anchored that high, anything inserted anywhere under it — a
+     reply streaming in, a clock ticking in a card — makes the browser doubt
+     every rule that hangs on a :has(), and it restyled every bubble in the
+     transcript for each delta of a streaming reply. */
+  :root.on-pane { --topbar: env(safe-area-inset-top, 0px); }
+  :root.on-conversation { --tabbar: 0px; }
+  :root.on-pane .topbar { display: none; }
+  :root.on-conversation .tabbar { display: none; }
   /* The toolbar was riding on the view's gutter, which the list no longer has. */
   .threads-toolbar, .threads-filters { margin: 0; padding-inline: 0.75rem; }
   /* The pane now reaches the bottom of the screen, so the room the home
@@ -2510,8 +2585,7 @@ video.msg-media { max-width: 22rem; }
   }
   .thread-card-workspace { font-family: var(--font-sans); font-size: 0.7rem; }
   /* Running: the halo moves from the card, which has no edges here, to the face. */
-  #thread-list > button.card.is-live { animation: none; box-shadow: none; }
-  .card.is-live .thread-avatar { animation: e11-live 2.4s ease-in-out infinite; }
+  #thread-list > button.card.is-live::after { display: none; }
   /* An older generation: a smaller face in the same column, so every row's text
      still starts at one x. */
   #thread-list > .card.is-older { margin-left: 0; }
@@ -2764,9 +2838,9 @@ video.msg-media { max-width: 22rem; }
     color: var(--color-warning);
   }
 
-  /* 380 rows are 380 rows to lay out on every repaint; the ones off screen are
-     skipped until they scroll near. */
-  #thread-list > .card { content-visibility: auto; contain-intrinsic-size: auto 5.6rem; }
+  /* A row here is a face and three lines: taller than the desktop's card, and
+     the size a row never drawn is assumed to have has to say so. */
+  #thread-list > .card { contain-intrinsic-size: auto 5.6rem; }
   /* Read-only: the sentence on top, its button and the stop underneath. */
   .composer-readonly .composer-box { padding: 0.6rem 0.5rem 0.5rem; }
   .composer-readonly-text { flex: 1 0 100%; padding: 0 0.5rem; }
@@ -2792,21 +2866,19 @@ video.msg-media { max-width: 22rem; }
   @keyframes e11-under-in { from { transform: translateX(-28%); filter: brightness(0.55); } }
 
   /* The swipe back paints the same picture by hand, with --back running 0 (the
-     conversation in place) to 1 (gone off the right edge). The list is brought
-     back under the pane for the length of the drag, in the place it will be
-     once it is the screen again: below the top bar, above the tab bar — so the
-     moment the pane is let go of there is nothing left to move. */
+     conversation in place) to 1 (gone off the right edge). The list is shown
+     under the pane for the length of the drag, in the place it has been all
+     along and will be once it is the screen again: below the top bar, above
+     the tab bar — so the moment the pane is let go of there is nothing left to
+     move, and the drag starts without laying anything out. */
   body.swiping-back .threads-layout.pane-open .threads-list-col {
     display: flex;
-    position: absolute;
-    inset: 0;
-    /* the tab bar's room, less whatever of it the layout already stops short of */
-    padding: 3.25rem 0 calc(3.3rem + var(--safe-b) - var(--tabbar));
+    visibility: visible;
     transform: translateX(calc((var(--back) - 1) * 28%));
     filter: brightness(calc(0.55 + var(--back) * 0.45));
   }
-  body.swiping-back:has(.threads-layout.pane-open) .topbar,
-  body.swiping-back:has(.threads-layout.pane-open > #thread-pane:not(.is-composing)) .tabbar {
+  :root.on-pane body.swiping-back .topbar,
+  :root.on-conversation body.swiping-back .tabbar {
     display: flex;
     height: calc(3.3rem + var(--safe-b)); /* --tabbar reads 0 while the pane is open */
     transform: translateX(calc((var(--back) - 1) * 28%));

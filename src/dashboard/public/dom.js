@@ -33,3 +33,31 @@ export function syncChildren(container, nodes) {
   }
   dropStale();
 }
+
+/**
+ * Make `container` hold what `nodes` describe, leaving alone every child at its
+ * head that already reads the same.
+ *
+ * This is for content that grows at its end and is drawn again whole each time
+ * it does — a reply being streamed, parsed from the top on every delta. The
+ * parse is cheap; what is not is handing the page three hundred new elements to
+ * style, lay out and paint, dozens of times a second, when all but the last
+ * paragraph are the elements it already has. `isEqualNode` is the browser's own
+ * deep comparison, so "reads the same" means exactly that: a change anywhere in
+ * a block — an earlier list turned loose by a blank line, a reference link
+ * resolved by a definition that just arrived — replaces from that block on.
+ */
+export function replaceTail(container, nodes) {
+  let index = 0;
+  let child = container.firstChild;
+  while (child && index < nodes.length && child.isEqualNode(nodes[index])) {
+    child = child.nextSibling;
+    index++;
+  }
+  while (child) {
+    const next = child.nextSibling;
+    child.remove();
+    child = next;
+  }
+  for (; index < nodes.length; index++) container.insertBefore(nodes[index], null);
+}

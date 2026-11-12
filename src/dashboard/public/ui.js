@@ -32,18 +32,25 @@ const CHECK_ICON = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" 
 const X_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg>`;
 const FILE_ICON = `<svg viewBox="0 0 16 16" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M4 1.8h5l3 3v9.4H4z"/><path d="M9 1.8v3h3"/></svg>`;
 
+/** Run `work` when the page has a moment to itself — for what the screen is not
+ *  waiting on. A browser without idle callbacks gets a short timer instead. */
+const whenIdle = window.requestIdleCallback ?? ((work) => setTimeout(work, 60));
+
 // Is the scroll container within a hair of the bottom? Used to decide whether
 // live updates should follow along or leave the reader where they scrolled to.
 const atBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < 60;
 
-// Play a one-shot animation class, replaying from the top if it's mid-flight
-// (class drop + forced reflow), and clear the class when the animation ends.
-// getBoundingClientRect, not offsetWidth: the bulbs are SVG circles, and
-// offsetWidth is HTML-only (undefined on SVG — it wouldn't flush layout).
+// Play a one-shot animation class, replaying from the top if it's mid-flight,
+// and clear the class when the animation ends. Mid-flight it is wound back
+// where it stands: dropping the class and forcing a reflow to make the browser
+// notice restarts it too, but this is called for every event of a streaming
+// turn, and a reflow of the page per event is a turn's worth of layout.
 function flare(el, cls) {
   if (el.classList.contains(cls)) {
-    el.classList.remove(cls);
-    el.getBoundingClientRect();
+    // subtree: the class may animate what is inside the element (a bulb and
+    // its glow), not the element itself.
+    for (const animation of el.getAnimations({ subtree: true })) animation.currentTime = 0;
+    return;
   }
   el.classList.add(cls);
   el.addEventListener("animationend", () => el.classList.remove(cls), { once: true });
@@ -178,6 +185,6 @@ async function withLoading(work, { swap = false } = {}) {
 
 export {
   h, toast, SEARCH_ICON, PLUS_ICON, FILTER_ICON, SEND_ICON, ARROW_DOWN_ICON, CLIP_ICON, MIC_ICON,
-  CHECK_ICON, X_ICON, FILE_ICON, atBottom, flare, copyText, isPhone, pageTitle, sectionLabel, info,
+  CHECK_ICON, X_ICON, FILE_ICON, whenIdle, atBottom, flare, copyText, isPhone, pageTitle, sectionLabel, info,
   labeled, confirmButton, withLoading,
 };

@@ -5,6 +5,7 @@
 import { drafts, NEW_THREAD_DRAFT, prefs, state } from "./state.js";
 import { api } from "./api.js";
 import { h, toast } from "./ui.js";
+import { syncPaneChrome } from "./chrome.js";
 import { composerAttachments, stopRecording } from "./attachments.js";
 import { backButton, closePaneMobile } from "./phone.js";
 import { autoGrow, sendsOnEnter } from "./composer.js";
@@ -30,6 +31,7 @@ function newThreadDialog(preferred) {
   forgetRenderedThread();
   pane.classList.remove("is-running");
   pane.classList.add("is-composing");
+  syncPaneChrome();
 
   const remembered = preferred ?? prefs.get("workspace", "");
   let workspace = workspaces.includes(remembered) ? remembered : workspaces[0];

@@ -20,6 +20,7 @@ import { browserBack } from "./nav-drag.js";
 import { readSnapshot } from "./snapshot.js";
 import { state } from "./state.js";
 import { prefetch, seedCache, started } from "./api.js";
+import { whenIdle } from "./ui.js";
 import { initStringLights } from "./chrome.js";
 import { render, routes } from "./router.js";
 import { setPane, threadsLayout } from "./phone.js";
@@ -27,7 +28,7 @@ import { viewModels } from "./models.js";
 import { viewWorkspaces } from "./workspaces.js";
 import { viewUsage } from "./usage.js";
 import { viewSettings } from "./settings.js";
-import { openThread, rememberThread } from "./thread-pane.js";
+import { openThread, rememberThread, restoreSeenThreads, seenKey } from "./thread-pane.js";
 import { threadsQuery, viewThreads } from "./threads.js";
 import { connectWs, refreshOverview } from "./socket.js";
 
@@ -100,14 +101,19 @@ if (!bootRoute || bootRoute === "threads") {
 /* And while those are in flight, what the page knew the last time it ran: the
    first frame is painted from it, and the reads above correct it as they land
    (snapshot.js). Waited on for a few milliseconds at most — it is local, and a
-   store slower than the network is simply skipped. */
-const restored = await readSnapshot();
+   store slower than the network is simply skipped. Only what the first frame
+   shows is waited for: the overview, the list, and the one conversation the
+   address bar names. The other transcripts the page had read are megabytes
+   between them, and nothing on the first screen is drawn from those. */
+const bootSeen = bootThread ? seenKey(bootThread) : undefined;
+const restored = await readSnapshot(["overview", "threads", ...(bootSeen ? [bootSeen] : [])]);
 if (restored.overview) seedCache("/overview", restored.overview);
 if (restored.threads && !threadsQuery()) {
   state.threads = restored.threads;
   for (const thread of restored.threads) state.sources.add(thread.source);
 }
-for (const read of restored.seen ?? []) rememberThread(read, { persist: false });
+const read = bootSeen ? restored[bootSeen]?.read : undefined;
+if (read) rememberThread(read, { persist: false });
 
 initStringLights();
 connectWs();
@@ -119,3 +125,6 @@ render().finally(() => {
   if (restored.overview) refreshOverview();
   started.clear();
 });
+// The rest of what the page had read, for the taps that come after the first
+// screen — brought back once the page has a moment to itself.
+whenIdle(() => void restoreSeenThreads());

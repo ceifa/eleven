@@ -253,9 +253,10 @@ test("the scrolling thread list pads every side, so the live halo is not sheared
   const threads = readFileSync(join(dir, "threads.js"), "utf8");
   const css = readFileSync(join(dir, "style.css"), "utf8");
 
-  // The halo of a running thread is box-shadow — it paints OUTSIDE the card's
-  // border box, so the card's own padding cannot make room for it.
-  assert.match(css, /button\.card\.is-live \{ animation:/);
+  // The halo of a running thread is a box-shadow on a layer the size of the
+  // card — it paints OUTSIDE the card's border box, so the card's own padding
+  // cannot make room for it.
+  assert.match(css, /button\.card\.is-live::after[^{]*\{[^}]*inset: 0;[^}]*box-shadow:/);
   // And the list it lives in scrolls, which clips on all four edges: overflow-y
   // other than visible turns the visible cross axis into auto.
   const list = threads.match(/class: "([^"]*)", id: "thread-list"/);

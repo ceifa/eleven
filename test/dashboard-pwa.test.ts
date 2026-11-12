@@ -429,7 +429,7 @@ test("the phone layout subtracts the chrome it actually has", () => {
   assert.match(mobile, /--tabbar: calc\([^;]*var\(--safe-b\)\);/);
   assert.match(mobile, /\.tabbar \{[^}]*height: var\(--tabbar\);[^}]*padding: [^;]*var\(--safe-b\)/);
   assert.ok(layout[1].includes("var(--tabbar)"), ".threads-layout must stop at the tab bar");
-  assert.match(mobile, /:root:has\(\.threads-layout\.pane-open > #thread-pane:not\(\.is-composing\)\) \{[^}]*--tabbar: 0px;/);
+  assert.match(mobile, /:root\.on-conversation \{[^}]*--tabbar: 0px;/);
   assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 
   // …and --keyboard only ever holds a number if phone.js measures it. iOS slides
@@ -452,12 +452,12 @@ test("an open conversation stops paying for the bar it no longer shows", () => {
   const hide = mobile.match(/([^\n{}]*\.topbar)\s*\{\s*display: none;\s*\}/);
   assert.ok(hide, "the mobile block should hide the top bar over an open conversation");
   const condition = hide[1].replace(/\s*\.topbar$/, "").trim();
-  assert.match(condition, /:has\(\.threads-layout\.pane-open\)/);
+  assert.equal(condition, ":root.on-pane");
 
-  const override = mobile.match(/([^\n{}]*):has\(\.threads-layout\.pane-open\)[^\n{}]*\{\s*--topbar: ([^;]+);/);
+  const override = mobile.match(/:root\.on-pane \{\s*--topbar: ([^;]+);/);
   assert.ok(override, "hiding the bar has to drop --topbar too, or the height stays reserved");
-  assert.match(override[2], /env\(safe-area-inset-top/); // the notch is all that is left above the pane
-  assert.doesNotMatch(override[2], /3\.25rem/, "--topbar must stop counting a bar that is not on screen");
+  assert.match(override[1], /env\(safe-area-inset-top/); // the notch is all that is left above the pane
+  assert.doesNotMatch(override[1], /3\.25rem/, "--topbar must stop counting a bar that is not on screen");
 
   // …and it has to be read *after* the base value, or the cascade quietly keeps
   // the bar's height.
@@ -477,14 +477,50 @@ test("the launcher keeps the tab bar it opens on", () => {
   // The app lands on the launcher, so a launcher without the tab bar is a first
   // screen with no way to the other sections. The bar and the room the layout
   // leaves for it go on one condition, or the box sits under the bar.
-  const hide = mobile.match(/body:has\(([^\n{}]*)\) \.tabbar \{ display: none; \}/);
+  const hide = mobile.match(/([^\n{}]*) \.tabbar \{ display: none; \}/);
   assert.ok(hide, "the mobile block should hide the tab bar over an open conversation");
-  assert.match(hide[1], /:not\(\.is-composing\)/);
-  assert.ok(mobile.includes(`:root:has(${hide[1]}) { --tabbar: 0px; }`), "--tabbar has to drop on the same condition the bar hides on");
+  const condition = hide[1].trim();
+  assert.equal(condition, ":root.on-conversation");
+  assert.ok(mobile.includes(`${condition} { --tabbar: 0px; }`), "--tabbar has to drop on the same condition the bar hides on");
+  // …and that condition is a pane that is open and is not the launcher.
+  assert.match(read("chrome.js"), /root\.toggle\("on-conversation", open && !composing\);/);
 
   // On the launcher the route already is #/threads, so the Threads link alone
   // would do nothing: the tap has to close the pane itself.
   assert.match(read("phone.js"), /\.tabbar a\[data-view="threads"\]'\)\.addEventListener\("click"[\s\S]{0,160}closePaneMobile\(\);/);
+});
+
+test("the chrome hears of every change to what the threads view is showing", () => {
+  // The bars follow two classes on the root element instead of reading the
+  // page with :has(): anchored on <body>, a :has() makes every insertion
+  // anywhere under it a reason to restyle whatever hangs on any :has() at all,
+  // and a streaming reply restyled the whole transcript per delta. The price
+  // is that the script has to say so whenever either fact changes — every
+  // time, in the same breath, because a layout measured in between is measured
+  // against a bar that is no longer there.
+  const rules = read("style.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(rules, /(?::root|html|body)[^\n{},]*:has\(/, "no :has() anchored on the root or the body");
+
+  const sync = read("chrome.js").match(/function syncPaneChrome\(\) \{([\s\S]*?)\n\}/);
+  assert.ok(sync, "chrome.js should still have syncPaneChrome");
+  assert.match(sync[1], /getElementById\("threads-layout"\)\?\.classList\.contains\("pane-open"\)/);
+  assert.match(sync[1], /getElementById\("thread-pane"\)\?\.classList\.contains\("is-composing"\)/);
+  assert.match(sync[1], /root\.toggle\("on-pane", open\);/);
+
+  // Every write of either class is followed at once by the sync…
+  let writes = 0;
+  for (const file of readdirSync(PUBLIC_DIR).filter((name) => name.endsWith(".js"))) {
+    const source = read(file);
+    for (const write of source.matchAll(/classList\.(?:add|remove|toggle)\([^)]*"(?:pane-open|is-composing)"[^)]*\);/g)) {
+      writes++;
+      const after = source.slice(write.index + write[0].length).trimStart();
+      assert.ok(after.startsWith("syncPaneChrome();"), `${file}: ${write[0]} must be followed by syncPaneChrome()`);
+    }
+  }
+  assert.ok(writes >= 4, "the classes are still written where this test looks for them");
+  // …and so is the layout leaving the page, or being built again.
+  assert.match(read("router.js"), /view\.replaceChildren\(loadFailure\(error\)\);\s*\}[\s\S]{0,120}syncPaneChrome\(\);/);
+  assert.match(read("threads.js"), /id: "thread-pane" \}\),\s*\),\s*\);[\s\S]{0,120}syncPaneChrome\(\);/);
 });
 
 /** Split a CSS shorthand into its sides, keeping calc(…) whole. */

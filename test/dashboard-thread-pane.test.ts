@@ -100,13 +100,20 @@ test("a cold start paints what the page knew before anything is read", () => {
   // The snapshot is read before the first render, and what it holds is put
   // where the render looks: the overview in the read cache, the list in state,
   // the recent transcripts where paneLoading finds them.
-  const restore = app.indexOf("await readSnapshot()");
+  const restore = app.indexOf("await readSnapshot(");
   const render = app.indexOf("render().finally(");
   assert.ok(restore >= 0 && restore < render, "the snapshot has to be restored before the first render");
   const boot = app.slice(restore, render);
   assert.match(boot, /seedCache\("\/overview", restored\.overview\)/);
   assert.match(boot, /state\.threads = restored\.threads/);
   assert.match(boot, /rememberThread\(read, \{ persist: false \}\)/);
+  // The first frame waits for what it paints and nothing else: the overview,
+  // the list and the conversation the address bar names. The other transcripts
+  // read lately are megabytes, and they come back after it.
+  assert.match(boot, /readSnapshot\(\["overview", "threads", \.\.\.\(bootSeen \? \[bootSeen\] : \[\]\)\]\)/);
+  assert.ok(app.indexOf("restoreSeenThreads()") > render, "the rest of the snapshot is restored after the first render starts");
+  // Remembering one conversation writes one conversation, not all of them.
+  assert.match(functionBody(pane, "function rememberThread(data"), /keep\(seenKey\(data\.thread\.id\), \{ at: Date\.now\(\), read \}\)/);
   // Only the unfiltered list is a first frame: opening on an old search's
   // answer would be wrong.
   assert.match(boot, /restored\.threads && !threadsQuery\(\)/);

@@ -48,6 +48,7 @@ const SHELL = [
   "/fonts/grenze-800.woff2",
 ];
 const CACHED_PATHS = new Set(SHELL);
+const SHELL_PAGES = new Set(["/", "/index.html"]);
 
 self.addEventListener("install", (event) => {
   // A file that doesn't arrive must not fail the whole install — the worker is
@@ -72,11 +73,15 @@ self.addEventListener("fetch", (event) => {
   // what the agent is doing, and /api/media is somebody's private attachments.
   if (url.pathname.startsWith("/api/") || url.pathname === "/ws") return;
 
-  // Any address in the SPA renders the same shell, so a navigation is answered
-  // with index.html whatever path was asked for. A navigation is also the one
-  // moment we know the app is being opened, which is when the copy just served
-  // is worth holding against the daemon's.
+  // The app routes in the hash, so it is only ever opened at / — any other path
+  // a navigation asks for belongs to something in front of the daemon. An auth
+  // proxy's sign-in callback (Cloudflare Access's /cdn-cgi/access/authorized)
+  // answered with the cached shell never sets its cookie, and the app comes up
+  // signed out again.
   if (request.mode === "navigate") {
+    if (!SHELL_PAGES.has(url.pathname)) return;
+    // The one moment we know the app is being opened, which is when the copy
+    // just served is worth holding against the daemon's.
     event.respondWith(cacheFirst(request, "/index.html"));
     event.waitUntil(revalidateShell());
     return;

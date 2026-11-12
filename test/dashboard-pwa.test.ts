@@ -155,8 +155,10 @@ function loadWorker(network: Map<string, string | undefined>) {
     put: async (key: string, response: Response) => { store.set(key, response); },
   };
   const posted: string[] = []; // serialized: the worker's objects are from another realm
+  const listeners = new Map<string, (event: unknown) => void>();
   const self = {
-    addEventListener() {},
+    location: { origin: "https://eleven.test" },
+    addEventListener(type: string, listener: (event: unknown) => void) { listeners.set(type, listener); },
     skipWaiting: async () => {},
     clients: { claim: async () => {}, matchAll: async () => [{ postMessage: (message: unknown) => posted.push(JSON.stringify(message)) }] },
   };
@@ -171,7 +173,18 @@ function loadWorker(network: Map<string, string | undefined>) {
   vm.runInContext(read("sw.js"), context);
   const shell = vm.runInContext("SHELL", context) as string[];
   const at = async (path: string) => (await store.get(path)?.clone().text())?.split("@")[1];
-  return { shell, store, posted, at, revalidate: () => vm.runInContext("revalidateShell()", context) as Promise<void> };
+  /** Whether the worker answers a navigation itself or leaves it to the network. */
+  const answersNavigation = (path: string) => {
+    let answered = false;
+    listeners.get("fetch")!({
+      request: { method: "GET", mode: "navigate", url: `https://eleven.test${path}` },
+      // What it answers with is beside the point here, and this fake has no cache to answer from.
+      respondWith: (response: Promise<unknown>) => { answered = true; response.catch(() => {}); },
+      waitUntil: () => {},
+    });
+    return answered;
+  };
+  return { shell, store, posted, at, answersNavigation, revalidate: () => vm.runInContext("revalidateShell()", context) as Promise<void> };
 }
 
 test("a shell that arrives in part is not written over a whole one", async () => {
@@ -202,6 +215,17 @@ test("a shell that arrives in part is not written over a whole one", async () =>
   await worker.revalidate();
   for (const path of worker.shell) assert.equal(await worker.at(path), "new", path);
   assert.deepEqual(worker.posted, [JSON.stringify({ type: "shell-updated" })]);
+});
+
+test("an auth proxy's sign-in callback reaches the proxy, not the cached shell", () => {
+  const worker = loadWorker(new Map());
+  // The app is opened at / and routes in the hash, so that is all the cache answers.
+  assert.equal(worker.answersNavigation("/"), true);
+  assert.equal(worker.answersNavigation("/index.html"), true);
+  // Cloudflare Access sets its cookie on this navigation; answered from the
+  // cache, the cookie is never set and the app comes up signed out again.
+  assert.equal(worker.answersNavigation("/cdn-cgi/access/authorized?nonce=abc"), false);
+  assert.equal(worker.answersNavigation("/oauth2/callback?code=abc"), false);
 });
 
 /** app.js's API helpers, run against a fake browser: what an auth proxy's

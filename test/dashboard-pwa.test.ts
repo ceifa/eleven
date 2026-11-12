@@ -292,6 +292,39 @@ test("the first screen's reads leave together", () => {
   assert.match(app, /api\.get\(`\/threads\/\$\{id\}`\)/);
 });
 
+test("a pairing request the snapshot didn't have gets its approve button, not just a badge", async () => {
+  // The first screen is painted from the snapshot of the last run. The daemon's
+  // overview lands after it and used to repaint only the sidebar badge, so the
+  // workspaces view said 2 requests and showed none to approve.
+  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const source = app.slice(app.indexOf("function refreshOverview()"), app.indexOf("\n// Fetch a fresh overview"));
+  const boot = (hash: string, snapshot: object, daemon: object) => {
+    const rendered: unknown[] = [];
+    const viewWorkspaces = () => {};
+    const context = vm.createContext({
+      state: { overview: snapshot },
+      cachedGet: async () => daemon,
+      keep: () => {},
+      applyPairingBadge: () => {},
+      render: () => rendered.push(context.state.overview),
+      location: { hash },
+      viewWorkspaces,
+      routes: { threads: () => {}, workspaces: viewWorkspaces, channels: viewWorkspaces },
+    });
+    vm.runInContext(`${source}\nrefreshOverview();`, context);
+    return new Promise<unknown[]>((resolve) => setImmediate(() => resolve(rendered)));
+  };
+  const queued = { pairing: [{ id: "a" }, { id: "b" }] };
+
+  assert.deepEqual(await boot("#/workspaces", { pairing: [] }, queued), [queued]);
+  assert.deepEqual(await boot("#/channels", { pairing: [] }, queued), [queued]);
+  // Approved elsewhere since the snapshot: those buttons would act on nothing.
+  assert.equal((await boot("#/workspaces", queued, { pairing: [] })).length, 1);
+  // Nothing to correct, or nothing on screen that shows the queue: no repaint.
+  assert.deepEqual(await boot("#/workspaces", queued, { ...queued }), []);
+  assert.deepEqual(await boot("#/threads", { pairing: [] }, queued), []);
+});
+
 test("the shell asks for the app frame a phone needs", () => {
   const shell = read("index.html");
   assert.match(shell, /<link rel="manifest" href="\/manifest\.webmanifest"/);

@@ -453,7 +453,7 @@ function connectWs() {
       invalidate("/overview");
       toast(`pairing request: ${message.request.chatTitle ?? message.request.name ?? message.request.userId}`);
       // render() refetches /overview and repaints the badge itself — don't double-fetch.
-      location.hash.startsWith("#/workspaces") ? render() : updatePairingBadge();
+      onWorkspacesView() ? render() : updatePairingBadge();
     }
   };
 }
@@ -591,11 +591,17 @@ function applyPairingBadge() {
 /** The daemon's overview over the snapshot's, without repainting the page. */
 function refreshOverview() {
   cachedGet("/overview", { force: true }).then((overview) => {
+    const painted = pairingIds(state.overview);
     state.overview = overview;
     keep("overview", overview);
     applyPairingBadge();
+    // Except the one thing the badge counts: the workspaces view drew its
+    // approve buttons from the snapshot's queue, not this one.
+    if (onWorkspacesView() && pairingIds(overview) !== painted) render();
   }, () => {});
 }
+const pairingIds = (overview) => (overview?.pairing ?? []).map((request) => request.id).join();
+const onWorkspacesView = () => routes[location.hash.replace("#/", "").split("/")[0]] === viewWorkspaces;
 
 // Fetch a fresh overview, then repaint the badge (used when only the badge,
 // not the whole view, needs to react — e.g. an incoming pairing request).

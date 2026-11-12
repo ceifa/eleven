@@ -273,6 +273,11 @@ test("an audio attachment is transcribed with the configured command, and says s
   await until(() => turns.length > 0);
   assert.match(turns[0]!.text, /^\[Transcript\]\nheard %PDF-1\.7\n\n\[media attached: \S+ \(audio\/mp4\)\]$/);
 
+  const ogg = harness({}, undefined, undefined, 'printf heard');
+  await ogg.bot.handleEvent(message(GABRIEL, DM, { text: "", attachment: [{ ...voice, contentName: "nota.ogg", contentType: "application/ogg" }] }));
+  await until(() => ogg.turns.length > 0);
+  assert.match(ogg.turns[0]!.text, /^\[Transcript\]\nheard\n/);
+
   const unconfigured = harness();
   await unconfigured.bot.handleEvent(message(GABRIEL, DM, { text: "", attachment: [voice] }));
   await until(() => unconfigured.turns.length > 0);

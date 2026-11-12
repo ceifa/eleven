@@ -1,98 +1,31 @@
-import { DeliveryBlocked } from "../replies.ts";
-import { logger } from "../../log.ts";
 import { canRetrySend } from "./rest.ts";
 import type { ConfigStore } from "../../config.ts";
 import type { Gateway } from "../../gateway.ts";
 import { AVATARS_DIR } from "../../paths.ts";
 import { AvatarCache, type Avatar } from "../avatars.ts";
-import { BotPool } from "../bots.ts";
-import type { Channel, ChannelStatus, DeliveryTarget, ReplyOptions } from "../index.ts";
-import type { PairingRequest, PairingStore } from "../pairing.ts";
+import { BotChannel } from "../bots.ts";
+import type { PairingStore } from "../pairing.ts";
 import { startDiscordBot, type BotHandle } from "./bot.ts";
 import { parseDiscordSessionKey } from "./session-key.ts";
-
-const log = logger("discord");
 
 // People and servers change their pictures now and then; a day behind is fine
 // for a face in a list.
 const PICTURE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Discord, one gateway connection per channel configured across workspaces. */
-export class DiscordChannel implements Channel {
-  readonly type = "discord";
+export class DiscordChannel extends BotChannel<BotHandle> {
   private avatars: AvatarCache;
-  private pool: BotPool<BotHandle>;
 
   constructor(config: ConfigStore, gateway: Gateway, pairing: PairingStore, avatarsDir = AVATARS_DIR) {
+    super("discord", "Discord", config, { gateway, pairing }, startDiscordBot, canRetrySend);
     this.avatars = new AvatarCache(avatarsDir);
-    this.pool = new BotPool("discord", config, { gateway, pairing }, startDiscordBot);
-  }
-
-  private owner(sessionKey: string): BotHandle | undefined {
-    const target = parseDiscordSessionKey(sessionKey);
-    return target && this.pool.get(target.channel);
-  }
-
-  async welcome(request: PairingRequest): Promise<void> {
-    await this.pool.get(request.bot)?.welcome(request);
-  }
-
-  async sendToSession(sessionKey: string, text: string, options: ReplyOptions = {}): Promise<DeliveryTarget> {
-    const target = parseDiscordSessionKey(sessionKey);
-    if (!target) throw new Error("thread has no Discord delivery target");
-    const handle = this.pool.get(target.channel);
-    if (!handle) throw new Error(`Discord channel ${target.channel} is not running`);
-    try { await handle.send(sessionKey, text, options); }
-    catch (error) {
-      if (options.onChunk && !canRetrySend(error)) throw new DeliveryBlocked(`Discord send needs inspection: ${error}`);
-      throw error;
-    }
-    return { channel: "discord", bot: target.channel, chatId: target.guildId ?? target.userId!, topic: target.channelId };
-  }
-
-  private requiredOwner(sessionKey: string): BotHandle {
-    const handle = this.owner(sessionKey);
-    if (!handle) throw new Error("Discord channel is not running");
-    return handle;
-  }
-
-  openThread(sessionKey: string, name: string, text: string, persistent = false) {
-    return this.requiredOwner(sessionKey).openThread(sessionKey, name, text, persistent);
-  }
-
-  async destinations() {
-    return (await Promise.all([...this.pool.bots.values()].map(({ handle }) => handle.destinations()))).flat();
-  }
-
-  describe(sessionKey: string) {
-    return this.requiredOwner(sessionKey).describe(sessionKey);
-  }
-
-  prompt(sessionKey: string, text: string) {
-    return this.requiredOwner(sessionKey).prompt(sessionKey, text);
-  }
-
-  archive(sessionKey: string) {
-    return this.requiredOwner(sessionKey).archive(sessionKey);
-  }
-
-  discardPending(sessionKey: string): boolean {
-    return this.owner(sessionKey)?.discardBurst(sessionKey) ?? false;
-  }
-
-  wakeInterrupted(turns: { sessionKey: string }[]): void {
-    for (const { sessionKey } of turns) void this.owner(sessionKey)?.wake(sessionKey).catch((error) => log.warn(String(error)));
-  }
-
-  wake(sessionKey: string, text: string, threadId?: string): Promise<void> {
-    return this.requiredOwner(sessionKey).wake(sessionKey, text, threadId);
   }
 
   /** A DM's face is the person's avatar. Every server conversation is a
    *  channel, and a channel has no picture of its own. Only for people this
    *  channel knows: a session key off the street does not get to make the bot
    *  look up arbitrary users. */
-  async avatar(sessionKey: string): Promise<Avatar | undefined> {
+  override async avatar(sessionKey: string): Promise<Avatar | undefined> {
     const target = parseDiscordSessionKey(sessionKey);
     const userId = target?.userId;
     if (!target || !userId || !this.pool.find(target.channel)?.channel.users?.[userId]) return undefined;
@@ -100,18 +33,5 @@ export class DiscordChannel implements Channel {
     return this.avatars.get(`discord-${target.channel}-user-${userId}`, PICTURE_TTL_MS, () =>
       handle ? handle.picture("user", userId) : Promise.reject(new Error(`channel ${target.channel} is not running`)),
     );
-  }
-
-  status(): ChannelStatus[] {
-    return [...this.pool.bots.entries()].map(([name, { handle }]) => ({
-      type: "discord" as const,
-      name,
-      username: handle.username,
-      connected: handle.connected(),
-    }));
-  }
-
-  stop() {
-    return this.pool.stop();
   }
 }

@@ -5,22 +5,18 @@ import { normalizeContext, type AssistantMessage, type Context, type Message, ty
 import type { Query, SDKMessage, SDKUserMessage, Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
   CLAUDE_CODE_MODELS,
-  claudeAttemptId,
-  claudeInputHash,
-  claudeShell,
   cleanToolName,
   createClaudeCodeProvider,
   nativeToolsForNestedContext,
   nativeToolsForPolicy,
   registerClaudeSession,
-  RESUME_PROMPT,
   runWithClaudeSession,
-  setClaudeEarlyAnswerListener,
-  setClaudeProseListener,
-  setClaudePanelListener,
+  observeClaudeTurn,
   steerClaudeSession,
   unregisterClaudeSession,
 } from "../src/agent/claude-code.ts";
+import { claudeShell, RESUME_PROMPT } from "../src/agent/claude-env.ts";
+import { claudeAttemptId, claudeInputHash } from "../src/agent/claude-input.ts";
 
 const model = CLAUDE_CODE_MODELS[0] as Model;
 
@@ -249,7 +245,7 @@ test("Claude Code keeps native tools inside its own loop and reports clean activ
       state: fakeState(),
     });
     const registration = (await import("../src/agent/claude-code.ts"));
-    registration.setClaudeToolListener(piSessionId, (name) => activity.push(name));
+    registration.observeClaudeTurn(piSessionId, { onToolCall: (name) => activity.push(name) });
     const context: Context = { systemPrompt: "eleven prompt", messages: [user("hello")], tools: [] };
     // An empty context.tools means a truly tool-less internal request. Main
     // agent turns carry their active tools, so include Read here.
@@ -320,7 +316,7 @@ test("nothing in the runtime's own task stream reaches the turn's panels", async
   const activities: Array<import("../src/agent/panels.ts").PanelUpdate> = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudePanelListener(piSessionId, (event) => activities.push(event));
+    observeClaudeTurn(piSessionId, { onPanels: (event) => activities.push(event) });
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(taskMessages, () => {}),
       deleteSession: (async () => {}) as never,
@@ -361,7 +357,7 @@ test("a resume that reports jobs orphaned by an earlier process still answers th
   const activities: Array<import("../src/agent/panels.ts").PanelUpdate> = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudePanelListener(piSessionId, (event) => activities.push(event));
+    observeClaudeTurn(piSessionId, { onPanels: (event) => activities.push(event) });
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(messages, () => {}),
       deleteSession: (async () => {}) as never,
@@ -683,7 +679,7 @@ test("every message sent while a turn runs reaches it live, and one folded in wa
   const seen: string[] = [];
   const early: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
-  setClaudeEarlyAnswerListener(piSessionId, (text) => early.push(text));
+  observeClaudeTurn(piSessionId, { onEarlyAnswer: (text) => early.push(text) });
   try {
     const provider = createClaudeCodeProvider({
       query: steerableQuery(() => {
@@ -763,7 +759,7 @@ test("a steered message queued behind the seed's own result is still answered", 
   const seen: string[] = [];
   const early: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
-  setClaudeEarlyAnswerListener(piSessionId, (text) => early.push(text));
+  observeClaudeTurn(piSessionId, { onEarlyAnswer: (text) => early.push(text) });
   try {
     const provider = createClaudeCodeProvider({
       query: lateSteerQuery(() => {
@@ -1076,7 +1072,7 @@ test("prose Claude writes before going back to work leaves the turn while it is 
   const order: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudeProseListener(piSessionId, (text) => prose.push(text));
+    observeClaudeTurn(piSessionId, { onProse: (text) => prose.push(text) });
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(messages, () => {}),
       deleteSession: (async () => {}) as never,
@@ -1123,7 +1119,7 @@ test("prose already streamed is never answered a second time", async () => {
   const prose: string[] = [];
   registerClaudeSession(piSessionId, { cwd: "/tmp", workspaceTools: ["read"], customTools: [] });
   try {
-    setClaudeProseListener(piSessionId, (text) => prose.push(text));
+    observeClaudeTurn(piSessionId, { onProse: (text) => prose.push(text) });
     const provider = createClaudeCodeProvider({
       query: scriptedQuery(messages, () => {}),
       deleteSession: (async () => {}) as never,

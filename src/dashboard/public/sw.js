@@ -20,9 +20,8 @@
    attachments included (/api/media), and none of it belongs in a store that
    outlives the tab. */
 
-// v4: a v3 cache can hold a half-updated shell (see refreshShell), and a new
-// name is the one way to make every phone start over from a whole one.
-const CACHE = "eleven-shell-v4";
+// v5: app.js became the modules below, and a v4 cache holds none of them.
+const CACHE = "eleven-shell-v5";
 
 // The app shell: what a cold start needs to paint the app with no network at
 // all. Fonts are in here too — they are immutable and small, and the wordmark
@@ -31,6 +30,29 @@ const SHELL = [
   "/",
   "/index.html",
   "/app.js",
+  "/state.js",
+  "/api.js",
+  "/ui.js",
+  "/format.js",
+  "/channels.js",
+  "/chrome.js",
+  "/router.js",
+  "/modals.js",
+  "/attachments.js",
+  "/running.js",
+  "/transcript.js",
+  "/phone.js",
+  "/config.js",
+  "/models.js",
+  "/workspaces.js",
+  "/usage.js",
+  "/settings.js",
+  "/thread-head.js",
+  "/composer.js",
+  "/thread-pane.js",
+  "/launcher.js",
+  "/threads.js",
+  "/socket.js",
   "/dom.js",
   "/live-turn.js",
   "/markdown.js",

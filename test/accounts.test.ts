@@ -20,8 +20,9 @@ test.after(() => rmSync(scratch, { recursive: true, force: true }));
 const { accountCredentials, accountDir, claudeEmail, runOnAccount, signedInAccounts } = await import("../src/accounts.ts");
 const { usageLogins } = await import("../src/provider-usage.ts");
 const {
-  CLAUDE_CODE_MODELS, claudeAccountDir, createClaudeCodeProvider, registerClaudeSession, unregisterClaudeSession,
+  CLAUDE_CODE_MODELS, createClaudeCodeProvider, registerClaudeSession, unregisterClaudeSession,
 } = await import("../src/agent/claude-code.ts");
+const { claudeAccountDir } = await import("../src/agent/claude-env.ts");
 const { modelRuntime } = await import("../src/agent/pi.ts");
 const { ConfigStore, validate, DEFAULT_CONFIG } = await import("../src/config.ts");
 const { FailoverOffers } = await import("../src/channels/failover.ts");

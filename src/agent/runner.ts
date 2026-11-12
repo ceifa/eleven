@@ -4,17 +4,12 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
-  type AgentSessionEvent,
-  estimateTokens,
-  type CompactionResult,
   type ExtensionAPI,
-  type SessionBeforeCompactEvent,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, AssistantMessage, ImageContent, JsonObject, JsonValue, Model, UserMessage } from "@earendil-works/pi-ai";
-import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import type { Api, AssistantMessage, Model, UserMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { existsSync } from "node:fs";
 import { agentDir, findModel, modelRef, modelRuntime } from "./pi.ts";
 import {
   abandonClaudeSession,
@@ -22,17 +17,14 @@ import {
   commitClaudeSession,
   compactClaudeSession,
   claudeIdleCompactionAt,
+  observeClaudeTurn,
   registerClaudeSession,
   runWithClaudeSession,
-  setClaudeEarlyAnswerListener,
-  setClaudeProseListener,
-  setClaudePanelListener,
-  setClaudeToolListener,
   setClaudeEntry,
   steerClaudeSession,
   unregisterClaudeSession,
 } from "./claude-code.ts";
-import { buildSystemPrompt, type PromptConfig, type RuntimeContext } from "./system-prompt.ts";
+import { buildSystemPrompt } from "./system-prompt.ts";
 import { dateContextMessage } from "./turn-context.ts";
 import {
   TOOL_CALLS_ENTRY_TYPE,
@@ -46,9 +38,14 @@ import { runOnAccount } from "../accounts.ts";
 import { activeToolNames, elevenOwnedTools } from "./tool-policy.ts";
 import { contentText, keyedLane, lruTouch } from "../util.ts";
 import { logger } from "../log.ts";
-import { readToolPanels, type PanelUpdate } from "./panels.ts";
+import { readToolPanels } from "./panels.ts";
 import { runInTurn } from "./host-api.ts";
 import { LoadedImages, loadImages, storeImages } from "../media-store.ts";
+import { boundRuntimeResults, keepRuntimeInputsInContext, withToolResults } from "./context.ts";
+import { handOff, handoffCompaction, type Handoff } from "./handoff.ts";
+import { createProseBlocks, followProse } from "./prose.ts";
+import { workspaceResources } from "./skills.ts";
+import { TurnFailure, turnFailure, type SessionTarget, type TurnEvents, type TurnRequest, type TurnResult } from "./turn.ts";
 
 const log = logger("runner");
 
@@ -65,13 +62,6 @@ const MAX_WARM_SESSIONS = 32;
 // turns send them again, an idle conversation needn't hold them.
 const IMAGES_IDLE_MS = 5 * 60 * 1000;
 
-/** Everything needed to reach a conversation's pi session on disk. */
-export interface SessionTarget {
-  /** Absolute path of the pi session file; absent when none was ever created. */
-  sessionFile?: string;
-  sessionDir: string;
-  workspacePath: string;
-}
 
 /**
  * Open the conversation's session, creating it when the file is missing. Pi
@@ -83,203 +73,6 @@ function openOrCreateSession({ sessionFile, sessionDir, workspacePath }: Session
   if (sessionFile && existsSync(sessionFile)) return SessionManager.open(sessionFile, sessionDir, workspacePath);
   const id = sessionFile?.match(/_([0-9a-f-]{36})\.jsonl$/i)?.[1];
   return SessionManager.create(workspacePath, sessionDir, id ? { id } : undefined);
-}
-
-export interface TurnRequest extends SessionTarget {
-  runtime: RuntimeContext;
-  /** Ordered candidates: primary first, then fallbacks — each with its own
-   * reasoning level and tool allowlist. */
-  models: ModelEntry[];
-  /** Provider-neutral workspace capability allowlist; undefined enables the curated default. */
-  tools?: WorkspaceTool[];
-  /** Runtime-native tools this workspace withholds — it supplies its own. */
-  excludeNativeTools?: string[];
-  customTools?: ToolDefinition[];
-  /** Resolved prompt for this turn (workspace system prompt + channel appends). */
-  prompt?: PromptConfig;
-  text: string;
-  images?: ImageContent[];
-  /** Discard a failed attempt before this turn starts — a manual restart runs
-   * the request as if it had never been tried. */
-  rewind?: TurnRewind;
-  /** Whether the conversation may be compacted while it sits idle (see
-   * scheduleIdleCompaction) — asked again when the time comes. Absent means never. */
-  compactWhenIdle?: () => boolean;
-  /** Channel delivery of the finished turn. Runs inside the thread's turn lane
-   * (before onTurnEnd fires and before the next queued turn can start), so a
-   * durable handoff can replace generation recovery with literal delivery. */
-  deliver?: (result: TurnResult) => Promise<void>;
-  /** Start a later turn in this conversation (see host-api.ts). */
-  wake?: (text: string) => Promise<void>;
-  sessionSignal?: AbortSignal;
-  createBackground?: import("./host-api.ts").BackgroundStatusFactory;
-}
-
-export interface TurnEvents {
-  /** Streamed assistant text delta. */
-  onDelta?: (delta: string) => void;
-  /** A complete assistant message finished (text may be empty for tool-only messages). */
-  onAssistantText?: (text: string) => void;
-  /** Prose the runtime settled mid-turn, while its own tool loop kept running —
-   * what the model said before going back to work, not the turn's answer. The
-   * channel ships it right away; the answer still arrives through `deliver`. */
-  onProse?: (text: string) => void;
-  /** An answer to the message the turn started with, settled while a message
-   * that arrived mid-turn is still waiting for its own. A channel that ships it
-   * now keeps the two replies in the order they were asked for; one that
-   * ignores this still receives both through `deliver`. */
-  onEarlyAnswer?: (text: string) => void;
-  /** The attempt failed and is retrying on a fallback model — its prose is abandoned. */
-  onFailover?: () => void;
-  /** A retryable provider error (529, stream drop) and the runtime is running the
-   * same turn again. Minutes of silence otherwise indistinguishable from thinking. */
-  onRetry?: (notice: RetryNotice) => void;
-  /** Raw pi event passthrough (channel lifecycle handling). */
-  onEvent?: (event: AgentSessionEvent) => void;
-  /** Provider-neutral tool activity for the dashboard. `id` is the call's
-   *  durable id — pi's toolCallId, or the id the nested-runtime record was
-   *  written under — so a live row can open the same detail view (args, and
-   *  the result once it lands) a persisted one does. */
-  onToolCall?: (name: string, args: Record<string, unknown>, id: string) => void;
-  /** A producer replaced the panels it shows (see panels.ts). */
-  onPanels?: (update: PanelUpdate) => void;
-}
-
-export interface RetryNotice {
-  attempt: number;
-  maxAttempts: number;
-  errorMessage: string;
-}
-
-/**
- * Folds one assistant message's stream into settled blocks of prose.
- *
- * A runtime that speaks more than once in a message — Claude Code, narrating
- * between its own tool calls — settles a block per text_end, and each is a unit
- * a channel can ship on its own instead of waiting for the turn to end. A
- * provider that streams nothing and only reports the text on message_end is
- * caught up by the tail below, measured against the whole message rather than
- * its last open block.
- */
-export function createProseBlocks(onDelta: (delta: string) => void, onBlock: (block: string) => void) {
-  let current = "";
-  let settled: string[] = [];
-  const endBlock = () => {
-    const block = current;
-    current = "";
-    settled.push(block);
-    onBlock(block);
-  };
-  return {
-    startMessage() {
-      current = "";
-      settled = [];
-    },
-    delta(delta: string) {
-      current += delta;
-      onDelta(delta);
-    },
-    endBlock,
-    /** `full` is the message's whole text as the provider finally reported it.
-     * Returns the blocks this message settled, in order. */
-    endMessage(full: string): string[] {
-      // Once a block has settled, the message is already accounted for — and how
-      // `full` joined those blocks is the reader's business, not a tail to
-      // stream again. The catch-up is for a provider that streamed nothing.
-      if (!settled.length && full.length > current.length) {
-        const tail = full.slice(current.length);
-        current += tail;
-        onDelta(tail);
-      }
-      endBlock();
-      return settled;
-    },
-  };
-}
-
-/**
- * The prose half of a session's event stream, folded into `prose`.
- *
- * A Pi-native model runs its tool loop as one assistant message per step, and
- * prose that settles in a message carrying tool calls is the model saying what
- * it is about to do — the same narration Claude Code's loop reports through its
- * prose listener. It goes to `onInterim` the moment its message ends: held to
- * the end of the turn it reaches the chat glued to the answer, minutes after it
- * was written, reading as if the work had not started yet.
- */
-export function followProse(prose: ReturnType<typeof createProseBlocks>, onInterim: (text: string) => void) {
-  return (event: AgentSessionEvent | AgentEvent) => {
-    if (event.type === "message_start") {
-      prose.startMessage();
-    } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      prose.delta(event.assistantMessageEvent.delta);
-    } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
-      prose.endBlock();
-    } else if (event.type === "message_end" && event.message.role === "assistant") {
-      const message = event.message;
-      const blocks = prose.endMessage(contentText(message.content));
-      if (!message.content.some((block) => block.type === "toolCall")) return;
-      for (const block of blocks) if (block.trim()) onInterim(block.trim());
-    }
-  };
-}
-
-export interface TurnResult {
-  sessionFile: string;
-  /** All assistant prose produced this turn, message boundaries joined by blank lines. */
-  text: string;
-  model: string;
-  status: "completed" | "stopped";
-}
-
-/**
- * A turn that gave up with candidates still untried. The runner never fails over
- * automatically once an attempt ran tools — a transcript rewind cannot undo a
- * Bash command, an edit or a sent message — so the untried tail is handed to the
- * channel, which can offer the person a manual failover instead of a dead end.
- */
-export class TurnFailure extends Error {
-  readonly failedModel: string;
-  /** Plan entries after the one that stopped the turn, in order. */
-  readonly remaining: ModelEntry[];
-  /** The branch a restart of this turn would rewind, filled in once the failure
-   * is recorded (that record is what `from` has to still point at). */
-  rewind?: TurnRewind;
-  /** Isolated nested calls that are display-only, unlike the owning runtime's
-   * tool history. A continuation must be told about side effects it cannot see. */
-  hiddenToolCalls: RecordedToolCall[] = [];
-
-  constructor(message: string, failedModel: string, remaining: ModelEntry[]) {
-    super(message);
-    this.name = "TurnFailure";
-    this.failedModel = failedModel;
-    this.remaining = remaining;
-  }
-}
-
-/**
- * Branch a failed attempt away before running its turn again: navigate back to
- * `to`, but only while the session's leaf is still `from`. Anything appended
- * since (a turn run from the dashboard, say) sits on the branch the rewind would
- * discard — leaving it alone costs a duplicated request, dropping it costs a
- * conversation.
- */
-export interface TurnRewind {
-  from: string;
-  to: string;
-}
-
-/**
- * The error a failed turn throws: a `TurnFailure` when the plan had candidates
- * after the one that stopped it, the plain error when the plan is exhausted
- * (nothing left to offer).
- */
-export function turnFailure(error: unknown, plan: ModelEntry[], stoppedAt: number): Error {
-  const failure = error instanceof Error ? error : new Error(error ? String(error) : "all models failed");
-  const remaining = plan.slice(stoppedAt + 1);
-  const failed = plan[stoppedAt]?.model;
-  if (!remaining.length || !failed) return failure;
-  return new TurnFailure(failure.message, failed, remaining);
 }
 
 interface ActiveTurn {
@@ -625,21 +418,23 @@ export class Runner {
     // Hooks can also observe nested calls that the top-level SDK history omits.
     let claudeToolCallCount = 0;
     let hiddenToolCalls: RecordedToolCall[] = [];
-    setClaudeToolListener(session.sessionId, (name, args, nested) => {
-      attemptHadToolActivity = true;
-      if (!nested) return;
-      const call: RecordedToolCall = { id: `claude:${claudeToolCallCount++}:${Date.now()}`, name, args };
-      hiddenToolCalls.push(call);
-      try {
-        sessionManager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [call] } satisfies ToolCallsEntryData);
-      } catch (error) {
-        log.warn(`failed to record tool call ${name} for ${threadId}: ${error}`);
-      }
-      events.onToolCall?.(name, args, call.id);
+    const stopObserving = observeClaudeTurn(session.sessionId, {
+      onToolCall: (name, args, nested) => {
+        attemptHadToolActivity = true;
+        if (!nested) return;
+        const call: RecordedToolCall = { id: `claude:${claudeToolCallCount++}:${Date.now()}`, name, args };
+        hiddenToolCalls.push(call);
+        try {
+          sessionManager.appendCustomEntry(TOOL_CALLS_ENTRY_TYPE, { calls: [call] } satisfies ToolCallsEntryData);
+        } catch (error) {
+          log.warn(`failed to record tool call ${name} for ${threadId}: ${error}`);
+        }
+        events.onToolCall?.(name, args, call.id);
+      },
+      onPanels: (update) => events.onPanels?.(update),
+      onProse: (text) => events.onProse?.(text),
+      onEarlyAnswer: (text) => events.onEarlyAnswer?.(text),
     });
-    setClaudePanelListener(session.sessionId, (update) => events.onPanels?.(update));
-    setClaudeProseListener(session.sessionId, (text) => events.onProse?.(text));
-    setClaudeEarlyAnswerListener(session.sessionId, (text) => events.onEarlyAnswer?.(text));
     const onProseEvent = followProse(prose, (text) => events.onProse?.(text));
     const unsubscribe = session.subscribe((event) => {
       events.onEvent?.(event);
@@ -774,10 +569,7 @@ export class Runner {
       this.dropSession(threadId);
       throw error;
     } finally {
-      setClaudeToolListener(session.sessionId, undefined);
-      setClaudePanelListener(session.sessionId, undefined);
-      setClaudeProseListener(session.sessionId, undefined);
-      setClaudeEarlyAnswerListener(session.sessionId, undefined);
+      stopObserving();
       unsubscribe();
       // A message went into the runtime and the transcript but not into the
       // session's context snapshot — rebuild it so the next turn can see it.
@@ -1022,198 +814,6 @@ export class Runner {
   }
 }
 
-/** Native history and directly delivered input bypass Pi's running snapshot.
- * Drain them into its next turn before preparation, so compaction sees them
- * without having the original messages reinserted after its summary. */
-export function keepRuntimeInputsInContext(session: AgentSession, takeInputs: () => AgentMessage[]): void {
-  const { agent } = session;
-  const previous = agent.prepareNextTurnWithContext;
-  agent.prepareNextTurnWithContext = async (turn, signal) => {
-    const messages = withRuntimeInputs(turn.context.messages, takeInputs());
-    if (messages === turn.context.messages) return previous?.(turn, signal);
-    const context = { ...turn.context, messages };
-    const snapshot = await previous?.({ ...turn, context }, signal);
-    return { ...snapshot, context: snapshot?.context ?? context };
-  };
-}
-
-/**
- * A live turn's context with the input and tool history Pi's snapshot missed put back
- * where it happened: before the answer that was being written when it arrived,
- * which is where the durable transcript records it too. Messages already in the
- * context are left alone — the loop carries the array forward from one turn to
- * the next, so this runs again on its own output, and a compaction mid-turn
- * hands back the same message reloaded from the transcript as a new object.
- * Returns the original array when there is nothing to add, so pi's snapshot is
- * passed through untouched.
- */
-export function withRuntimeInputs(messages: AgentMessage[], injected: AgentMessage[]): AgentMessage[] {
-  const present = new Set(messages.map(runtimeInputKey));
-  const missing = injected.filter((message) => !present.has(runtimeInputKey(message)));
-  if (!missing.length) return messages;
-  // Never between an assistant's tool calls and their results: when the turn
-  // used tools, those results are the tail and the input goes after them.
-  const cut = messages.length - (messages.at(-1)?.role === "assistant" ? 1 : 0);
-  return [...messages.slice(0, cut), ...missing, ...messages.slice(cut)];
-}
-
-/** A message steered during a native call is recorded immediately; its result
- * must still precede that input in the model's tool protocol. */
-export function withToolResults(messages: AgentMessage[]): AgentMessage[] {
-  const results = new Map(messages.flatMap((message) => message.role === "toolResult" ? [[message.toolCallId, message] as const] : []));
-  const moved = new Set<AgentMessage>();
-  const ordered: AgentMessage[] = [];
-  for (const message of messages) {
-    if (moved.has(message)) continue;
-    ordered.push(message);
-    if (message.role === "toolResult") results.delete(message.toolCallId);
-    if (message.role !== "assistant") continue;
-    for (const block of message.content) {
-      if (block.type !== "toolCall") continue;
-      const result = results.get(block.id);
-      if (!result) continue;
-      ordered.push(result);
-      moved.add(result);
-      results.delete(block.id);
-    }
-  }
-  return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
-}
-
-const RESULT_HEAD_CHARS = 2_000;
-const RESULTS_BUDGET_CHARS = 60_000;
-const ANSWERED_ARGUMENT_CHARS = 300;
-
-/** Claude Code's tool history never entered Pi's context before, and a real
- * thread's runs past a million tokens. A provider picking such a thread up gets
- * every call with short arguments and the head of the newest outputs, up to a
- * fixed budget — not all of it cold. Turns still unanswered keep everything a
- * continuation needs. */
-export function boundRuntimeResults(messages: AgentMessage[]): AgentMessage[] {
-  const answered = messages.findLastIndex((message) => message.role === "assistant" && message.stopReason === "stop");
-  const runtimeCalls = new Set(messages.slice(0, answered).flatMap((message) =>
-    message.role === "assistant" && message.provider === CLAUDE_CODE_PROVIDER
-      ? message.content.flatMap((block) => block.type === "toolCall" ? [block.id] : [])
-      : []));
-  if (!runtimeCalls.size) return messages;
-  // Newest first, and once one does not fit nothing older does: the window stays contiguous.
-  const kept = new Set<number>();
-  let budget = RESULTS_BUDGET_CHARS;
-  for (let index = answered - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) continue;
-    const size = Math.min(contentText(message.content).length, RESULT_HEAD_CHARS);
-    if (size > budget) break;
-    budget -= size;
-    kept.add(index);
-  }
-  return messages.map((message, index) => {
-    if (index > answered) return message;
-    if (message.role === "assistant") {
-      if (message.provider !== CLAUDE_CODE_PROVIDER) return message;
-      const content = message.content.map((block) => block.type === "toolCall" ? { ...block, arguments: shortenStrings(block.arguments) as JsonObject } : block);
-      return JSON.stringify(content) === JSON.stringify(message.content) ? message : { ...message, content };
-    }
-    if (message.role !== "toolResult" || !runtimeCalls.has(message.toolCallId)) return message;
-    const text = contentText(message.content);
-    const images = message.content.some((block) => block.type === "image");
-    if (!kept.has(index)) {
-      return { ...message, content: [{ type: "text", text: `[older output omitted for context (${text.length.toLocaleString("en-US")} characters). Run the tool again if you need it.]` }] };
-    }
-    if (text.length <= RESULT_HEAD_CHARS && !images) return message;
-    const shown = Math.min(text.length, RESULT_HEAD_CHARS).toLocaleString("en-US");
-    const notice = `[output shortened for context: ${shown} of ${text.length.toLocaleString("en-US")} characters${images ? ", images omitted" : ""}. Run the tool again if you need the rest.]`;
-    return { ...message, content: [{ type: "text", text: `${text.slice(0, RESULT_HEAD_CHARS)}\n${notice}` }] };
-  });
-}
-
-function shortenStrings(value: JsonValue): JsonValue {
-  if (typeof value === "string") {
-    return value.length > ANSWERED_ARGUMENT_CHARS ? `${value.slice(0, ANSWERED_ARGUMENT_CHARS)}… [${value.length.toLocaleString("en-US")} characters]` : value;
-  }
-  if (Array.isArray(value)) return value.map(shortenStrings);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, shortenStrings(item)]));
-  return value;
-}
-
-/** Below this a model switch carries the conversation whole: re-reading it
- * uncached costs less than what cutting it would lose. */
-const HANDOFF_MIN_TOKENS = 100_000;
-const HANDOFF_REQUEST_CHARS = 4_000;
-
-interface Handoff {
-  from: string;
-  to: string;
-}
-
-/**
- * A model that takes over a long conversation has none of it cached, so every
- * request it makes re-reads all of it at full price — and a fallback tends to
- * take over exactly when a long task drained the model before it. Hand it the
- * recent part instead: a compaction that keeps Pi's recent window and replaces
- * the rest with a pointer to the transcript, written here rather than by a model
- * that would have to read everything to summarize it.
- */
-async function handOff(warm: WarmSession, model: Model<Api>): Promise<void> {
-  const { session } = warm;
-  const from = lastModelThatRan(session.agent.state.messages);
-  const to = modelRef(model);
-  if (!from || from === to) return;
-  const tokens = session.getContextUsage()?.tokens ?? session.agent.state.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
-  if (tokens < HANDOFF_MIN_TOKENS) return;
-  warm.handoff.current = { from, to };
-  try {
-    await session.compact();
-    log.info(`handed ${to} the recent part of a ${tokens}-token conversation from ${from}`);
-  } catch (error) {
-    log.warn(`handoff from ${from} to ${to} kept the whole conversation: ${error}`);
-  } finally {
-    warm.handoff.current = undefined;
-  }
-}
-
-/** The model behind the latest response that cost anything — operator-written
- * messages are recorded as assistant turns too, with no usage. */
-function lastModelThatRan(messages: AgentMessage[]): string | undefined {
-  const last = messages.findLast((message) => message.role === "assistant" && message.usage.totalTokens > 0);
-  return last?.role === "assistant" ? `${last.provider}/${last.model}` : undefined;
-}
-
-/** The compaction a handoff writes: Pi's cut point, and in place of a summary,
- * where the rest is and the requests the cut would otherwise hide. */
-function handoffCompaction(
-  preparation: SessionBeforeCompactEvent["preparation"],
-  { from, to }: Handoff,
-  sessionFile: string | undefined,
-): CompactionResult {
-  const firstRequest = preparation.messagesToSummarize.find((message) => message.role === "user");
-  const currentRequest = preparation.isSplitTurn ? preparation.turnPrefixMessages.find((message) => message.role === "user") : undefined;
-  const quote = (message: AgentMessage) => {
-    const text = message.role === "user" ? contentText(message.content) : "";
-    return text.length > HANDOFF_REQUEST_CHARS ? `${text.slice(0, HANDOFF_REQUEST_CHARS)}… [${text.length.toLocaleString("en-US")} characters]` : text;
-  };
-  const sections = [
-    `This conversation moved from ${from} to ${to}, which has none of it cached, so only its most recent part follows.`
-      + (sessionFile ? ` The full transcript is ${sessionFile} (a Pi session, one JSON entry per line): read what you need from it instead of guessing.` : ""),
-    preparation.previousSummary && `Summary from an earlier compaction:\n${preparation.previousSummary}`,
-    firstRequest && `The earliest request in the omitted part, verbatim:\n${quote(firstRequest)}`,
-    currentRequest && `The request being worked on when the cut was made, verbatim:\n${quote(currentRequest)}`,
-  ];
-  return {
-    summary: sections.filter(Boolean).join("\n\n"),
-    firstKeptEntryId: preparation.firstKeptEntryId,
-    tokensBefore: preparation.tokensBefore,
-    details: { handoff: { from, to } },
-  };
-}
-
-/** Identifies one message across a transcript round-trip: the arrival instant
- * plus what was said. Two messages of the same turn never share both. */
-function runtimeInputKey(message: AgentMessage): string {
-  const timestamp = (message as { timestamp?: number }).timestamp ?? 0;
-  const callId = message.role === "toolResult" ? message.toolCallId : "";
-  return `${message.role}\0${timestamp}\0${callId}\0${JSON.stringify((message as { content?: unknown }).content)}`;
-}
 
 /**
  * Branch the session back to the turn's starting entry so a failover retry
@@ -1238,80 +838,3 @@ async function rewindFailedAttempt(
     log.warn(`rewind of failed attempt did not apply: ${error}`);
   }
 }
-
-/** The skills a turn in this workspace would load — same discovery as runTurn. */
-export async function listWorkspaceSkills(workspacePath: string): Promise<{ name: string; description: string }[]> {
-  const loader = new DefaultResourceLoader({
-    cwd: workspacePath,
-    agentDir,
-    settingsManager: SettingsManager.create(workspacePath, agentDir),
-    noExtensions: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    additionalSkillPaths: workspaceResources(workspacePath).skillDirs,
-  });
-  await loader.reload();
-  return loader
-    .getSkills()
-    .skills.map(({ name, description }) => ({ name, description }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-interface WorkspaceResources {
-  /** Nested `.agents/skills` dirs — pi only discovers cwd + ancestors. */
-  skillDirs: string[];
-}
-
-const resourceCache = new Map<string, { resources: WorkspaceResources; at: number }>();
-const RESOURCE_CACHE_MS = 60_000;
-
-/**
- * pi discovers `.agents/skills` only in cwd and its ancestors. Monorepo
- * workspaces keep skill packs in nested context directories — surface them.
- * (Nested AGENTS.md are the agent's own job: the workspace's root AGENTS.md
- * instructs it to read the closest one before working in a context.)
- * The walk is sync and sits on the message hot path, so results are cached.
- */
-function workspaceResources(root: string, depth = 3): WorkspaceResources {
-  const cached = resourceCache.get(root);
-  if (cached && Date.now() - cached.at < RESOURCE_CACHE_MS) return cached.resources;
-  const resources: WorkspaceResources = { skillDirs: [] };
-  const walk = (dir: string, level: number) => {
-    if (level > depth) return;
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (error: unknown) {
-      // A directory we cannot enumerate drops every skill pack beneath it, and
-      // the result is cached — so the loss outlives the fault while `/skills`
-      // just looks short. Say so instead of pretending the subtree is empty.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        log.warn(`skill scan: cannot enumerate ${dir} — skills below it are missing: ${error}`);
-      }
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-      const child = join(dir, entry.name);
-      if (!entry.isDirectory() && !(entry.isSymbolicLink() && isDirectory(child))) continue;
-      const skills = join(child, ".agents", "skills");
-      if (existsSync(skills)) resources.skillDirs.push(skills);
-      walk(child, level + 1);
-    }
-  };
-  walk(root, 1);
-  resourceCache.set(root, { resources, at: Date.now() });
-  return resources;
-}
-
-/** Follows symlinks; stat is far cheaper than listing the directory. */
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** A workspace can ship pi extensions (pi's own project convention). pi wants
- * entry-point files here, not the directory. */

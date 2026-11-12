@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ModelEntry } from "../config.ts";
-import type { TurnFailure } from "../agent/runner.ts";
+import type { TurnFailure } from "../agent/turn.ts";
 import type { RecordedToolCall } from "../threads/reader.ts";
 import { summarizeToolArgs } from "../util.ts";
 

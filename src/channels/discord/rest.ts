@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { basename } from "node:path";
 import { Agent, FormData, fetch as undiciFetch, type RequestInit, type Response } from "undici";
 import { logger } from "../../log.ts";
+import { failedBeforeConnecting } from "../network.ts";
 
 const log = logger("discord/rest");
 
@@ -17,9 +18,6 @@ const REQUEST_TIMEOUT_MS = 10_000;
 // slow link, and whether it landed decides where the command's answer goes.
 const INTERACTION_TIMEOUT_MS = 6_000;
 const INTERACTION_HEDGE_MS = 1_000;
-
-/** Errors that provably happened before the request reached Discord. */
-const PRE_CONNECT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 
 /** Discord's error codes for "already in the state you wanted". */
 const NOOP_CODES = new Set([
@@ -42,7 +40,7 @@ export class DiscordApiError extends Error {
 export class DiscordSendUncertain extends Error {}
 
 export const canRetrySend = (error: unknown) => !(error instanceof DiscordSendUncertain) &&
-  (preConnect(error) || error instanceof DiscordApiError && error.status === 429);
+  (failedBeforeConnecting(error) || error instanceof DiscordApiError && error.status === 429);
 
 export function isNoop(error: unknown): boolean {
   return error instanceof DiscordApiError && error.code !== undefined && NOOP_CODES.has(error.code);
@@ -92,8 +90,8 @@ export class DiscordRest {
         ({ response, body } = await this.exchange(method, path, options, dispatcher, AbortSignal.timeout(REQUEST_TIMEOUT_MS)));
       } catch (error) {
         this.drop(dispatcher);
-        if (message && !preConnect(error)) uncertain = true;
-        if (attempt >= MAX_ATTEMPTS || !(repeatable || preConnect(error))) throw terminal(error);
+        if (message && !failedBeforeConnecting(error)) uncertain = true;
+        if (attempt >= MAX_ATTEMPTS || !(repeatable || failedBeforeConnecting(error))) throw terminal(error);
         await this.wait(path, attempt, undefined, error);
         continue;
       }
@@ -216,7 +214,3 @@ function retryAfterMs(response: Response, body: Record<string, unknown> | undefi
   return Math.min(seconds * 1000, RETRY_AFTER_CAP_MS);
 }
 
-function preConnect(error: unknown): boolean {
-  const code = (error as { code?: string })?.code ?? ((error as Error)?.cause as { code?: string })?.code;
-  return code !== undefined && PRE_CONNECT_CODES.has(code);
-}

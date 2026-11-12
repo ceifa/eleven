@@ -74,11 +74,11 @@ test("the worker precaches files that are actually there", () => {
   // And the daemon has to know about them too: SHELL_FILES is what the shell
   // version is stamped from, so a module missing from it is one whose edits
   // never tell an open page to reload.
-  const server = readFileSync(join(import.meta.dirname, "..", "src", "dashboard", "server.ts"), "utf8");
+  const server = readFileSync(join(import.meta.dirname, "..", "src", "dashboard", "shell-files.ts"), "utf8");
   const served = server.match(/const SHELL_FILES = \[([\s\S]*?)\n\];/);
-  assert.ok(served, "server.ts should still declare SHELL_FILES");
+  assert.ok(served, "shell-files.ts should still declare SHELL_FILES");
   for (const module of modules) {
-    assert.ok(served[1].includes(`"${module.slice(1)}"`), `${module} is part of the shell and server.ts doesn't list it`);
+    assert.ok(served[1].includes(`"${module.slice(1)}"`), `${module} is part of the shell and shell-files.ts doesn't list it`);
   }
 });
 
@@ -228,11 +228,26 @@ test("an auth proxy's sign-in callback reaches the proxy, not the cached shell",
   assert.equal(worker.answersNavigation("/oauth2/callback?code=abc"), false);
 });
 
-/** app.js's API helpers, run against a fake browser: what an auth proxy's
+/** Every module the page is made of: app.js and whatever it imports, the
+ *  vendored parser aside. Walked off the imports rather than the directory, so
+ *  a scratch file another test leaves in public/ is not part of it. */
+function pageSource() {
+  const modules = new Map<string, string>();
+  const visit = (name: string) => {
+    if (modules.has(name) || name.startsWith("vendor/")) return;
+    const text = read(name);
+    modules.set(name, text);
+    for (const [, next] of text.matchAll(/ from "\.\/([^"]+)";/g)) visit(next);
+  };
+  visit("app.js");
+  return [...modules.values()].join("\n");
+}
+
+/** api.js's helpers, run against a fake browser: what an auth proxy's
  *  redirect looks like to the page, and where the page sends it. */
 function apiHelpers(answer: { type: string; status?: number }) {
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
-  const pick = (from: string, to: string) => app.slice(app.indexOf(from), app.indexOf(to));
+  const api = read("api.js");
+  const pick = (from: string, to: string) => api.slice(api.indexOf(from), api.indexOf(to));
   const source = [
     pick("const call =", "\nconst api ="),
     pick("class SignInExpired", "\n/** Reads that were already in flight"),
@@ -278,29 +293,32 @@ test("an auth proxy's expired session sends the page to sign in, not to 'can't r
   assert.deepEqual(failing.assigned, []);
 
   // Every API request has to go through that helper, or it is the one that
-  // still says the daemon is down.
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
-  assert.deepEqual(app.match(/fetch\(`\/api/g), ["fetch(`/api"], "only call() should fetch the API");
-  assert.match(app, /error instanceof SignInExpired[\s\S]{0,300}signIn\(\{ force: true \}\)/);
+  // still says the daemon is down. Across every module of the page: the one
+  // that fetches on its own is the one this is looking for.
+  const page = pageSource();
+  assert.deepEqual(page.match(/fetch\(`\/api/g), ["fetch(`/api"], "only call() should fetch the API");
+  assert.match(read("api.js"), /const call = \(path, init\) => fetch\(`\/api/);
+  assert.match(read("router.js"), /error instanceof SignInExpired[\s\S]{0,300}signIn\(\{ force: true \}\)/);
 });
 
 test("the first screen's reads leave together", () => {
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const app = read("app.js"); // the boot
+  const api = read("api.js");
 
   // With the shell cached, what is left of a cold start is the API — and the
   // router walks into those reads one at a time: /overview, then the list, then
   // the conversation the hash names. Three round trips through a tunnel, none
   // of which needs the one before it. The boot starts them all at once and
   // api.get takes whatever is already in flight for the path it is asked for.
-  assert.match(app, /get: \(path\) => take\(path\) \?\? call\(path\)/);
+  assert.match(api, /get: \(path\) => take\(path\) \?\? call\(path\)/);
   assert.match(app, /prefetch\("\/overview"\)/);
   assert.match(app, /prefetch\(`\/threads\$\{threadsQuery\(\)\}`\)/);
   assert.match(app, /prefetch\(`\/threads\/\$\{bootThread\}`\)/);
 
   // A prefetch is only ever taken once, and only by the boot render — an answer
   // nobody claimed is dropped rather than kept around to be served stale later.
-  const take = app.match(/function take\(path\)\s*\{([\s\S]*?)\n\}/);
-  assert.ok(take, "app.js should still have the take() that claims a prefetch");
+  const take = api.match(/function take\(path\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(take, "api.js should still have the take() that claims a prefetch");
   assert.match(take[1], /started\.delete\(path\)/);
   assert.match(app, /render\(\)\.finally\(\(\) => \{[^}]*started\.clear\(\);\s*\}\)/);
   // A restored overview is painted in place of a read, so the real read still
@@ -310,18 +328,19 @@ test("the first screen's reads leave together", () => {
   assert.ok(boot.indexOf("refreshOverview()") < boot.indexOf("started.clear()"));
 
   // Every prefetched path has to be spelled the way the code that consumes it
-  // spells it, or the read is done twice and the prefetch is pure cost.
-  assert.match(app, /cachedGet\("\/overview"\)/);
-  assert.match(app, /api\.get\(`\/threads\$\{threadsQuery\(\)\}`\)/);
-  assert.match(app, /api\.get\(`\/threads\/\$\{id\}`\)/);
+  // spells it, or the read is done twice and the prefetch is pure cost: the
+  // router's render, the list's read, and the open of a thread.
+  assert.match(read("router.js"), /cachedGet\("\/overview"\)/);
+  assert.match(read("threads.js"), /api\.get\(`\/threads\$\{threadsQuery\(\)\}`\)/);
+  assert.match(read("thread-pane.js"), /api\.get\(`\/threads\/\$\{id\}`\)/);
 });
 
 test("a pairing request the snapshot didn't have gets its approve button, not just a badge", async () => {
   // The first screen is painted from the snapshot of the last run. The daemon's
   // overview lands after it and used to repaint only the sidebar badge, so the
   // workspaces view said 2 requests and showed none to approve.
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
-  const source = app.slice(app.indexOf("function refreshOverview()"), app.indexOf("\n// Fetch a fresh overview"));
+  const socket = read("socket.js");
+  const source = socket.slice(socket.indexOf("function refreshOverview()"), socket.indexOf("\n// Fetch a fresh overview"));
   const boot = (hash: string, snapshot: object, daemon: object) => {
     const rendered: unknown[] = [];
     const viewWorkspaces = () => {};
@@ -393,7 +412,7 @@ test("an installed iPhone app fills the screen from launch, not after a drag", (
 
 test("the phone layout subtracts the chrome it actually has", () => {
   const css = read("style.css");
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const phone = read("phone.js");
 
   // The threads screen is sized by subtraction, so every term has to be there:
   // the top bar (notch included) and the keyboard.
@@ -413,16 +432,15 @@ test("the phone layout subtracts the chrome it actually has", () => {
   assert.match(mobile, /:root:has\(\.threads-layout\.pane-open > #thread-pane:not\(\.is-composing\)\) \{[^}]*--tabbar: 0px;/);
   assert.match(mobile, /\.threads-layout\.pane-open \.composer \{ padding-bottom: calc\([^)]*var\(--safe-b\)\); \}/);
 
-  // …and --keyboard only ever holds a number if app.js measures it. iOS slides
+  // …and --keyboard only ever holds a number if phone.js measures it. iOS slides
   // the keyboard over the page instead of resizing it, so dvh keeps reporting
   // the whole screen while the composer sits behind the keys.
-  assert.match(app, /visualViewport/);
-  assert.match(app, /setProperty\("--keyboard"/);
+  assert.match(phone, /visualViewport/);
+  assert.match(phone, /setProperty\("--keyboard"/);
 });
 
 test("an open conversation stops paying for the bar it no longer shows", () => {
   const css = read("style.css");
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
   const mobileAt = css.indexOf("@media (max-width: 768px)");
   const mobile = css.slice(mobileAt);
 
@@ -448,13 +466,12 @@ test("an open conversation stops paying for the bar it no longer shows", () => {
 
   // What makes the bar expendable is that the pane has another way back to the
   // list — the sections live there, in the tab bar that goes away with the bar.
-  assert.match(app, /"aria-label": "Back to threads"/);
-  assert.match(app, /class: "thread-head"[\s\S]{0,80}backButton\(\)/);
+  assert.match(read("phone.js"), /"aria-label": "Back to threads"/);
+  assert.match(read("thread-head.js"), /class: "thread-head"[\s\S]{0,80}backButton\(\)/);
 });
 
 test("the launcher keeps the tab bar it opens on", () => {
   const css = read("style.css");
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
 
   // The app lands on the launcher, so a launcher without the tab bar is a first
@@ -467,7 +484,7 @@ test("the launcher keeps the tab bar it opens on", () => {
 
   // On the launcher the route already is #/threads, so the Threads link alone
   // would do nothing: the tap has to close the pane itself.
-  assert.match(app, /\.tabbar a\[data-view="threads"\]'\)\.addEventListener\("click"[\s\S]{0,160}closePaneMobile\(\);/);
+  assert.match(read("phone.js"), /\.tabbar a\[data-view="threads"\]'\)\.addEventListener\("click"[\s\S]{0,160}closePaneMobile\(\);/);
 });
 
 /** Split a CSS shorthand into its sides, keeping calc(…) whole. */
@@ -512,7 +529,7 @@ test("an expanded group cannot push the page wider than the screen", () => {
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
   assert.match(mobile, /\.topic-head \{ flex-wrap: wrap; \}/);
   assert.match(mobile, /\.topic-head > \.input \{ width: 100%; \}/);
-  assert.match(readFileSync(join(PUBLIC_DIR, "app.js"), "utf8"), /class: "topic-head/);
+  assert.match(read("workspaces.js"), /class: "topic-head/);
 });
 
 test("the threads screen cancels the view's padding exactly", () => {

@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { listWorkspaceSkills, Runner } from "../src/agent/runner.ts";
+import { Runner } from "../src/agent/runner.ts";
+import { listWorkspaceSkills } from "../src/agent/skills.ts";
 import { TelegramChannel } from "../src/channels/telegram/index.ts";
+import { sendToTelegramSession } from "../src/channels/telegram/bot.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
 import { supervisorEnv } from "../src/service.ts";
 import { readThreadTimeline, TOOL_CALLS_ENTRY_TYPE, TURN_ERROR_ENTRY_TYPE } from "../src/threads/reader.ts";
@@ -234,11 +236,11 @@ test("a turn that failed stays in the transcript, where it failed", async () => 
 
 test("the hidden attribute outranks the component styles that would keep it on screen", () => {
   const dir = join(import.meta.dirname, "..", "src", "dashboard", "public");
-  const app = readFileSync(join(dir, "app.js"), "utf8");
+  const chrome = readFileSync(join(dir, "chrome.js"), "utf8");
   const css = readFileSync(join(dir, "style.css"), "utf8");
 
   // The dashboard hides things by attribute — the stop button, the pairing badge.
-  assert.match(app, /\.hidden = /);
+  assert.match(chrome, /\.hidden = /);
   // And the browser's own [hidden] { display: none } is a *user-agent* rule, so
   // every author rule that sets display (.btn, .badge, .card — most of this
   // file) silently outranks it: the element stays visible and the script has no
@@ -248,7 +250,7 @@ test("the hidden attribute outranks the component styles that would keep it on s
 
 test("the scrolling thread list pads every side, so the live halo is not sheared off", () => {
   const dir = join(import.meta.dirname, "..", "src", "dashboard", "public");
-  const app = readFileSync(join(dir, "app.js"), "utf8");
+  const threads = readFileSync(join(dir, "threads.js"), "utf8");
   const css = readFileSync(join(dir, "style.css"), "utf8");
 
   // The halo of a running thread is box-shadow — it paints OUTSIDE the card's
@@ -256,7 +258,7 @@ test("the scrolling thread list pads every side, so the live halo is not sheared
   assert.match(css, /button\.card\.is-live \{ animation:/);
   // And the list it lives in scrolls, which clips on all four edges: overflow-y
   // other than visible turns the visible cross axis into auto.
-  const list = app.match(/class: "([^"]*)", id: "thread-list"/);
+  const list = threads.match(/class: "([^"]*)", id: "thread-list"/);
   assert.ok(list, "#thread-list should still be built with a class list");
   assert.match(list[1], /overflow-y-auto/);
   assert.match(list[1], /thread-scroll/);
@@ -276,20 +278,17 @@ test("Telegram delivery resolves bot, chat and forum topic from a session key", 
   const config = { on() {}, channels: () => [] };
   const telegram = new TelegramChannel(config as never, {} as never, {} as never);
   const sent: Record<string, unknown>[] = [];
-  (telegram as unknown as { pool: { bots: Map<string, unknown> } }).pool.bots.set("main", {
-    token: "test",
-    handle: {
-      bot: {
-        api: {
-          raw: {
-            sendRichMessage: async (payload: Record<string, unknown>) => {
-              sent.push(payload);
-              return { message_id: 1 };
-            },
-          },
-        },
+  const api = {
+    raw: {
+      sendRichMessage: async (payload: Record<string, unknown>) => {
+        sent.push(payload);
+        return { message_id: 1 };
       },
     },
+  };
+  (telegram as unknown as { pool: { bots: Map<string, unknown> } }).pool.bots.set("main", {
+    token: "test",
+    handle: { send: (sessionKey: string, text: string) => sendToTelegramSession(api as never, sessionKey, text) },
   });
 
   const target = await telegram.sendToSession("telegram:main:-123:topic:45", "**hello**");

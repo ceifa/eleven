@@ -5,9 +5,7 @@ import {
   tool as sdkTool,
   type Options,
   type Query,
-  type SDKControlGetUsageResponse,
   type SDKMessage,
-  type SDKUserMessage,
   type Settings,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -28,15 +26,12 @@ import {
 } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BUILTIN_TOOLS, POLICY_TO_NATIVE, type WorkspaceTool } from "../config.ts";
-import { accountDir, currentAccount } from "../accounts.ts";
-import { contentText } from "../util.ts";
 import { logger } from "../log.ts";
+import { claudeChildEnv, probeClaudeCodeAuth } from "./claude-env.ts";
+import { claudeAttemptId, claudeInputHash, humanMessage, InputQueue, promptBlocks, trailingUserStart, userBlocks } from "./claude-input.ts";
 import { claudeSessionState } from "./claude-session-state.ts";
 import { readToolPanels, type PanelUpdate } from "./panels.ts";
 import { nestedDirectory } from "./host-api.ts";
@@ -74,13 +69,6 @@ const STEER_DRAIN_GRACE_MS = 15_000;
 // said. Recognizing only emptiness let them through, so eleven answered the
 // user with the literal string and closed the stream on a prompt still queued.
 const SYNTHETIC_RESULT_TEXT = new Set(["No response requested.", "(no content)"]);
-
-/** Overrides CLAUDE_CODE_RESUME_PROMPT for sessions eleven resumes (see claudeChildEnv). */
-export const RESUME_PROMPT =
-  "[This session was resumed after its previous turn was cut off. Your output is delivered as a chat message,"
-  + " so ending the turn silently reads to the user as being ignored: if you had already finished a reply that"
-  + " never went out, send it again — otherwise carry on and answer. No need to mention the interruption unless"
-  + " it changes your answer.]";
 
 /** The settings layer eleven supplies itself. `settingSources: []` keeps the
  * machine's own settings files out of the child, so this is the only place a
@@ -177,14 +165,35 @@ export interface ClaudeSessionRegistration {
   onHistory?: (message: AssistantMessage | ToolResultMessage) => void;
 }
 
-interface RegisteredSession extends ClaudeSessionRegistration {
+/** What a running turn hears from its session's Claude Code child. */
+export interface ClaudeTurnObserver {
+  /** A tool is about to run. `nested` marks a call made by an isolated session
+   * (a compaction, an extension's own agent): Pi's transcript never shows it. */
   onToolCall?: (name: string, args: Record<string, unknown>, nested: boolean) => void;
   onPanels?: (update: PanelUpdate) => void;
+  /**
+   * Prose Claude produced mid-loop, the moment it produced it. Claude runs its
+   * whole tool loop inside one Pi turn, so its narration would otherwise reach the
+   * chat glued to the answer, minutes after it was written — and by then it reads
+   * as a summary of what happened instead of what is about to. Only interim prose
+   * comes through here: the turn's actual answer stays on the normal stream, where
+   * the channel delivers it inside the turn's durable window.
+   */
   onProse?: (text: string) => void;
-  /** An answer settled while human input the child took mid-turn is still
-   * waiting for its own — it answers what was asked first, and holding it until
-   * the turn ends would deliver it under the reply to what came after. */
+  /**
+   * An answer the child settled for the prompt this turn started with, while the
+   * message that arrived meanwhile still has its own answer coming. Unlike prose,
+   * this is a reply someone is waiting on — it goes out as an answer, not as
+   * narration. Held to the end of the turn the two would reach the chat as one
+   * block, the reply to what was said first sitting under the reply to what was
+   * said next.
+   */
   onEarlyAnswer?: (text: string) => void;
+}
+
+interface RegisteredSession extends ClaudeSessionRegistration {
+  /** Whoever is running this session's turn right now (see observeClaudeTurn). */
+  observer?: ClaudeTurnObserver;
   /** The open input stream of a live turn, while one is running. */
   live?: InputQueue;
   /** The last committed-to-be turn's request and its cache, for an idle
@@ -196,84 +205,6 @@ interface RegisteredSession extends ClaudeSessionRegistration {
    * answer a message it has already answered. Entries are consumed on the first
    * request that carries them. */
   runtimeDelivered: string[];
-}
-
-/**
- * The SDK input stream of one live turn. It stays open for the whole turn (MCP
- * needs it), which also makes it the only way to hand Claude Code human input
- * mid-loop: Claude runs its entire tool loop inside a single Pi turn, so Pi's
- * own boundary injection would park a steered message until the loop ends —
- * minutes, in a real investigation.
- */
-class InputQueue {
-  private readonly buffer: SDKUserMessage[] = [];
-  private waiting: ((message: SDKUserMessage | undefined) => void) | undefined;
-  private open = true;
-  /** Uuids of the messages handed to the child that no result has answered yet,
-   * in the order they were handed over. */
-  private readonly unanswered = new Set<string>();
-
-  /** The message this turn was created for; it answers the caller's own prompt. */
-  seed(message: SDKUserMessage): void {
-    this.unanswered.add(message.uuid!);
-    this.buffer.push(message);
-  }
-
-  /**
-   * Queue a human follow-up — as many as arrive while the turn runs. Claude
-   * folds one that lands before a tool boundary into the running turn, and runs
-   * one that lands after the last boundary as a turn of its own; either way the
-   * result names the messages it answered (see settle), so input can stay open
-   * for the next one. False once the turn is wrapping up: the caller falls back
-   * to Pi's own steering.
-   */
-  push(message: SDKUserMessage): boolean {
-    if (!this.open) return false;
-    this.unanswered.add(message.uuid!);
-    const resume = this.waiting;
-    this.waiting = undefined;
-    if (resume) resume(message);
-    else this.buffer.push(message);
-    return true;
-  }
-
-  /**
-   * Cross off the messages one SDK result answered; true while another message
-   * still waits for a result of its own. A result carries the uuid of every
-   * message its turn consumed, the ones folded in mid-loop included. One that
-   * carries none (an older CLI) answers the oldest message still waiting.
-   */
-  settle(result: { user_message_uuid?: string; user_message_uuids?: string[] }): boolean {
-    const answered = result.user_message_uuids ?? (result.user_message_uuid ? [result.user_message_uuid] : []);
-    if (answered.length) for (const uuid of answered) this.unanswered.delete(uuid);
-    else for (const uuid of this.unanswered) { this.unanswered.delete(uuid); break; }
-    return this.unanswered.size > 0;
-  }
-
-  /** Stop accepting input without ending the stream (the turn is wrapping up). */
-  seal(): void {
-    this.open = false;
-  }
-
-  close(): void {
-    this.seal();
-    this.waiting?.(undefined);
-    this.waiting = undefined;
-  }
-
-  async *drain(): AsyncGenerator<SDKUserMessage> {
-    for (;;) {
-      const queued = this.buffer.shift();
-      if (queued) {
-        yield queued;
-        continue;
-      }
-      if (!this.open) return;
-      const next = await new Promise<SDKUserMessage | undefined>((resolve) => (this.waiting = resolve));
-      if (!next) return;
-      yield next;
-    }
-  }
 }
 
 const sessions = new Map<string, RegisteredSession>();
@@ -424,12 +355,17 @@ export async function compactClaudeSession(sessionId: string): Promise<boolean> 
   return true;
 }
 
-export function setClaudeToolListener(
-  sessionId: string,
-  listener: ((name: string, args: Record<string, unknown>, nested: boolean) => void) | undefined,
-): void {
+/**
+ * Listen to the session's child for the length of one turn. Returns the call
+ * that stops listening; a registration replaced in the meantime is left alone.
+ */
+export function observeClaudeTurn(sessionId: string, observer: ClaudeTurnObserver): () => void {
   const session = sessions.get(sessionId);
-  if (session) session.onToolCall = listener;
+  if (!session) return () => {};
+  session.observer = observer;
+  return () => {
+    if (session.observer === observer) session.observer = undefined;
+  };
 }
 
 /**
@@ -448,46 +384,6 @@ export function steerClaudeSession(sessionId: string, text: string, images?: Ima
   if (!session.live.push(humanMessage(userBlocks(text, images)))) return false;
   session.runtimeDelivered.push(text);
   return true;
-}
-
-export function setClaudePanelListener(
-  sessionId: string,
-  listener: ((update: PanelUpdate) => void) | undefined,
-): void {
-  const session = sessions.get(sessionId);
-  if (session) session.onPanels = listener;
-}
-
-/**
- * Prose Claude produced mid-loop, the moment it produced it. Claude runs its
- * whole tool loop inside one Pi turn, so its narration would otherwise reach the
- * chat glued to the answer, minutes after it was written — and by then it reads
- * as a summary of what happened instead of what is about to. Only interim prose
- * comes through here: the turn's actual answer stays on the normal stream, where
- * the channel delivers it inside the turn's durable window.
- */
-export function setClaudeProseListener(
-  sessionId: string,
-  listener: ((text: string) => void) | undefined,
-): void {
-  const session = sessions.get(sessionId);
-  if (session) session.onProse = listener;
-}
-
-/**
- * An answer the child settled for the prompt this turn started with, while the
- * message that arrived meanwhile still has its own answer coming. Unlike prose,
- * this is a reply someone is waiting on — it goes out as an answer, not as
- * narration. Held to the end of the turn the two would reach the chat as one
- * block, the reply to what was said first sitting under the reply to what was
- * said next.
- */
-export function setClaudeEarlyAnswerListener(
-  sessionId: string,
-  listener: ((text: string) => void) | undefined,
-): void {
-  const session = sessions.get(sessionId);
-  if (session) session.onEarlyAnswer = listener;
 }
 
 /**
@@ -517,27 +413,6 @@ const PI_TO_NATIVE: Record<string, readonly string[]> = {
 export function nativeToolsForNestedContext(toolNames: string[], granted: readonly string[]): string[] {
   const wanted = new Set(toolNames.flatMap((name) => PI_TO_NATIVE[name] ?? []));
   return granted.filter((name) => wanted.has(name));
-}
-
-/** A deterministic UUID for one transactional Claude attempt. Each successful
- * Pi transcript prefix maps to one resumable Claude fork, so daemon restarts do
- * not need a second mapping store. */
-export function claudeAttemptId(piSessionId: string, modelId: string, messages: Context["messages"]): string {
-  const hash = createHash("sha256")
-    .update("eleven/claude-code/session/v1\0")
-    .update(piSessionId)
-    .update("\0")
-    .update(modelId)
-    .update("\0")
-    .update(claudeInputHash(messages))
-    .digest("hex");
-  // Agent SDK session ids are UUIDs. Stamp RFC 4122 version/variant bits into
-  // the stable digest instead of keeping a separate random-id mapping.
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-${["8", "9", "a", "b"][parseInt(hash[16], 16) % 4]}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-}
-
-export function claudeInputHash(messages: Context["messages"]): string {
-  return createHash("sha256").update(JSON.stringify(messages.map(messageFingerprint))).digest("hex");
 }
 
 type ClaudeStateBackend = Pick<typeof claudeSessionState, "get" | "begin" | "markTool" | "commit" | "fail" | "ackDeleted">;
@@ -699,51 +574,9 @@ async function consumeClaudeQuery(
   const charged = emptyAssistant(model).usage;
 
   try {
-    let currentStart = trailingUserStart(messages);
-    if (currentStart === messages.length) throw new Error("Claude Code provider received no user message");
-
-    const persisted = isolated ? undefined : deps.state.get(ownerSessionId);
-    const active = persisted?.active;
-    let baseId: string | undefined;
-    let bootstrap = true;
-    let recovering = false;
-
-    if (active) {
-      const prefix = messages.slice(0, active.inputCount);
-      const prefixMatches = prefix.length === active.inputCount && claudeInputHash(prefix) === active.inputHash;
-      // A prior subprocess died after accepting this input. Its hidden Claude
-      // transcript is the side-effect authority even if Pi lost its deferred
-      // first-turn file or compacted its visible prefix meanwhile. Resume it
-      // and send only input that arrived after the crash; never replay the old
-      // user request from a reconstructed Pi transcript.
-      baseId = active.id;
-      currentStart = prefixMatches ? active.inputCount : trailingUserStart(messages);
-      bootstrap = false;
-      recovering = true;
-    }
-
-    if (!baseId && !isolated) {
-      const history = messages.slice(0, currentStart);
-      const previous = history.at(-1);
-      const canResume = previous?.role === "assistant"
-        && previous.provider === CLAUDE_CODE_PROVIDER
-        && previous.stopReason === "stop";
-      if (canResume) {
-        baseId = persisted?.committed ?? claudeAttemptId(ownerSessionId, previous.model, history.slice(0, -1));
-        bootstrap = false;
-      }
-    }
-
-    attemptId = claudeAttemptId(isolated ? requestSessionId : ownerSessionId, model.id, messages);
-    if (attemptId === baseId) attemptId = randomUUID();
-    if (!recovering) {
-      try {
-        await deps.deleteSession(attemptId, { dir: cwd });
-      } catch {
-        // Never append into a stale deterministic fork whose deletion failed.
-        attemptId = randomUUID();
-      }
-    }
+    const lineage = await resolveLineage(deps, { isolated, ownerSessionId, requestSessionId, modelId: model.id, messages, cwd });
+    attemptId = lineage.attemptId;
+    const { baseId, bootstrap, currentStart } = lineage;
 
     const historyCalls = new Map<string, string>();
     const historyResults = new Set<string>();
@@ -757,7 +590,7 @@ async function consumeClaudeQuery(
       if (id) seenToolCalls.add(id);
       seenToolSignatures.add(signature);
       if (!isolated) deps.state.markTool(ownerSessionId);
-      registration.onToolCall?.(cleanName, args, isolated);
+      registration.observer?.onToolCall?.(cleanName, args, isolated);
     };
 
     const activeCustomNames = new Set(toolNames);
@@ -891,7 +724,7 @@ async function consumeClaudeQuery(
           const working = message.message.content.some((block) => block.type === "tool_use");
           if (working && hasModelProse(text) && !isolated) {
             flushed.add(emit(text));
-            registration.onProse?.(text.trim());
+            registration.observer?.onProse?.(text.trim());
             lastTopLevelText = "";
           } else {
             lastTopLevelText = text;
@@ -972,7 +805,7 @@ async function consumeClaudeQuery(
           const pending = answers.splice(0).join("\n\n");
           if (pending && !isolated) {
             flushed.add(emit(pending));
-            registration.onEarlyAnswer?.(pending);
+            registration.observer?.onEarlyAnswer?.(pending);
           }
           continue;
         }
@@ -1045,6 +878,71 @@ async function consumeClaudeQuery(
     if (isolated && attemptId) await deps.deleteSession(attemptId, { dir: cwd }).catch(() => {});
   }
 }
+/** Which hidden Claude session a request continues, and under which id it runs. */
+interface ClaudeLineage {
+  /** The Claude session to resume and fork from; absent on a cold start. */
+  baseId?: string;
+  /** Nothing to resume: the child is told the conversation so far as a transcript. */
+  bootstrap: boolean;
+  /** Index of the first message the child has not been given yet. */
+  currentStart: number;
+  /** The id this attempt's own Claude session is created under. */
+  attemptId: string;
+}
+
+async function resolveLineage(
+  deps: ClaudeProviderDeps,
+  request: { isolated: boolean; ownerSessionId: string; requestSessionId: string; modelId: string; messages: Context["messages"]; cwd: string },
+): Promise<ClaudeLineage> {
+  const { isolated, ownerSessionId, requestSessionId, modelId, messages, cwd } = request;
+  let currentStart = trailingUserStart(messages);
+  if (currentStart === messages.length) throw new Error("Claude Code provider received no user message");
+
+  const persisted = isolated ? undefined : deps.state.get(ownerSessionId);
+  const active = persisted?.active;
+  let baseId: string | undefined;
+  let bootstrap = true;
+  let recovering = false;
+
+  if (active) {
+    const prefix = messages.slice(0, active.inputCount);
+    const prefixMatches = prefix.length === active.inputCount && claudeInputHash(prefix) === active.inputHash;
+    // A prior subprocess died after accepting this input. Its hidden Claude
+    // transcript is the side-effect authority even if Pi lost its deferred
+    // first-turn file or compacted its visible prefix meanwhile. Resume it
+    // and send only input that arrived after the crash; never replay the old
+    // user request from a reconstructed Pi transcript.
+    baseId = active.id;
+    currentStart = prefixMatches ? active.inputCount : trailingUserStart(messages);
+    bootstrap = false;
+    recovering = true;
+  }
+
+  if (!baseId && !isolated) {
+    const history = messages.slice(0, currentStart);
+    const previous = history.at(-1);
+    const canResume = previous?.role === "assistant"
+      && previous.provider === CLAUDE_CODE_PROVIDER
+      && previous.stopReason === "stop";
+    if (canResume) {
+      baseId = persisted?.committed ?? claudeAttemptId(ownerSessionId, previous.model, history.slice(0, -1));
+      bootstrap = false;
+    }
+  }
+
+  let attemptId = claudeAttemptId(isolated ? requestSessionId : ownerSessionId, modelId, messages);
+  if (attemptId === baseId) attemptId = randomUUID();
+  if (!recovering) {
+    try {
+      await deps.deleteSession(attemptId, { dir: cwd });
+    } catch {
+      // Never append into a stale deterministic fork whose deletion failed.
+      attemptId = randomUUID();
+    }
+  }
+  return { baseId, bootstrap, currentStart, attemptId };
+}
+
 function buildMcpServer(
   customTools: AgentTool[],
   ownerSessionId: string,
@@ -1072,7 +970,7 @@ function buildMcpServer(
           // contract either way: the tool publishes panels, this forwards them.
           const scope = request.requestId ?? `${tool.name}-${randomUUID()}`;
           const onUpdate = (partial: unknown) => {
-            const listener = sessions.get(ownerSessionId)?.onPanels;
+            const listener = sessions.get(ownerSessionId)?.observer?.onPanels;
             if (!listener) return;
             const update = readToolPanels(partial, scope, tool.name);
             if (update) listener(update);
@@ -1099,98 +997,6 @@ function buildMcpServer(
     );
   });
   return createSdkMcpServer({ name: MCP_SERVER, version: "1.0.0", tools, alwaysLoad: true });
-}
-
-/** The content blocks of the turn's own prompt: the pending user input, plus a
- * transcript of everything that happened in another runtime before it.
- *
- * `delivered` is input this child already took mid-turn, which reaches the
- * context afterwards looking exactly like new input. A bootstrapping child took
- * nothing, so it is only ever consulted for a resume. */
-function promptBlocks(
-  messages: Context["messages"],
-  currentStart: number,
-  bootstrap: boolean,
-  delivered: string[] = [],
-): Array<Record<string, unknown>> {
-  const blocks: Array<Record<string, unknown>> = [];
-  if (bootstrap && currentStart > 0) {
-    blocks.push({
-      type: "text",
-      text: `The conversation before this turn happened in another runtime. Continue it faithfully from this transcript:\n\n${formatTranscript(messages.slice(0, currentStart))}`,
-    });
-  }
-  for (const message of messages.slice(currentStart)) {
-    if (message.role !== "user") continue; // failed-attempt assistant envelopes are not new human input
-    const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
-    // One entry answers for one message: the same text typed twice is two
-    // messages, and the second one is still waiting for an answer.
-    const alreadyDelivered = delivered.indexOf(contentText(content));
-    if (alreadyDelivered !== -1) {
-      delivered.splice(alreadyDelivered, 1);
-      continue;
-    }
-    blocks.push(...userBlocks(content));
-  }
-  return blocks;
-}
-
-function userBlocks(content: string | (TextContent | ImageContent)[], images?: ImageContent[]): Array<Record<string, unknown>> {
-  const parts = typeof content === "string" ? [{ type: "text" as const, text: content }, ...(images ?? [])] : content;
-  const blocks: Array<Record<string, unknown>> = [];
-  for (const block of parts) {
-    if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
-    if (block.type === "image") {
-      blocks.push({
-        type: "image",
-        source: { type: "base64", media_type: block.mimeType, data: block.data },
-      });
-    }
-  }
-  return blocks;
-}
-
-function humanMessage(blocks: Array<Record<string, unknown>>): SDKUserMessage {
-  return {
-    type: "user",
-    // The key each result names its answered messages by (InputQueue.settle).
-    uuid: randomUUID(),
-    message: { role: "user", content: blocks as never },
-    parent_tool_use_id: null,
-    origin: { kind: "human" },
-  };
-}
-
-function formatTranscript(messages: Context["messages"]): string {
-  return messages.map((message) => {
-    const extended = message as unknown as { role: string; summary?: string; content?: unknown };
-    if (extended.role === "compactionSummary") return `Conversation summary: ${extended.summary ?? "[unavailable]"}`;
-    if (message.role === "toolResult") return `Tool result (${message.toolName}): ${contentText(message.content)}`;
-    const label = message.role === "assistant" ? "Assistant" : "User";
-    const text = contentText(message.content);
-    const toolCalls = message.role === "assistant"
-      ? message.content.filter((block) => block.type === "toolCall").map((block) => `[called ${block.name} ${JSON.stringify(block.arguments)}]`).join("\n")
-      : "";
-    return `${label}: ${[text, toolCalls].filter(Boolean).join("\n") || "[non-text content]"}`;
-  }).join("\n\n");
-}
-
-function trailingUserStart(messages: Context["messages"]): number {
-  let index = messages.length;
-  while (index > 0 && messages[index - 1].role === "user") index--;
-  return index;
-}
-
-function messageFingerprint(message: Context["messages"][number]): unknown {
-  const extended = message as unknown as { role: string; summary?: string };
-  if (extended.role === "compactionSummary") return { role: extended.role, summary: extended.summary };
-  if (message.role === "assistant") {
-    return { role: message.role, provider: message.provider, model: message.model, content: message.content };
-  }
-  if (message.role === "toolResult") {
-    return { role: message.role, toolCallId: message.toolCallId, toolName: message.toolName, content: message.content, isError: message.isError };
-  }
-  return { role: message.role, content: message.content };
 }
 
 function assistantText(message: Extract<SDKMessage, { type: "assistant" }>): string {
@@ -1277,188 +1083,6 @@ function foregroundToolInput(name: string, input: Record<string, unknown>): Reco
   return undefined;
 }
 
-const SHELL_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
-
-/** The shell Claude Code's Bash tool will run, or undefined if there is none.
- * The CLI only runs zsh or bash: any other $SHELL (fish, nu) makes it fall back
- * to one of those, yet its Environment block still prints $SHELL verbatim, so
- * the model writes syntax for a shell that never sees it. */
-export function claudeShell(shell: string | undefined, exists: (path: string) => boolean = existsSync): string | undefined {
-  if (shell && /(bash|zsh)$/.test(basename(shell))) return shell;
-  return ["zsh", "bash"].flatMap((name) => SHELL_DIRS.map((dir) => `${dir}/${name}`)).find(exists);
-}
-
-/** Where Claude Code keeps the machine's own login and every transcript. */
-function claudeHome(): string {
-  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
-}
-
-/**
- * The Claude Code config dir of an account: `CLAUDE_CONFIG_DIR=<it> claude auth
- * login` signs it in. A full login rather than a `setup-token` token, because
- * that one lacks the profile scope the usage windows are read with.
- *
- * Its `projects` links to the machine's own: transcripts live there, and a
- * turn that fails over to another account resumes the hidden Claude session
- * the last one left. A dir of its own would strand them on the old account.
- */
-export function claudeAccountDir(account: string, root?: string, home = claudeHome()): string {
-  const dir = join(accountDir(account, root), "claude");
-  const projects = join(dir, "projects");
-  mkdirSync(join(home, "projects"), { recursive: true });
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const existing = lstatSync(projects, { throwIfNoEntry: false });
-  if (!existing) symlinkSync(join(home, "projects"), projects);
-  else if (!existing.isSymbolicLink()) {
-    throw new Error(`${projects} is a real directory, so account "${account}" cannot resume another account's sessions — remove it`);
-  }
-  return dir;
-}
-
-/** Do not hand Telegram/provider tokens from Eleven's daemon environment to
- * the child. Claude's local login lives under HOME/CLAUDE_CONFIG_DIR, or under
- * the account's own dir when the turn runs on one. */
-function claudeChildEnv(): Record<string, string | undefined> {
-  const account = currentAccount();
-  const keys = [
-    "HOME", "PATH", "SHELL", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
-    "LANG", "LC_ALL", "TZ", "TERM",
-    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR",
-    "DBUS_SESSION_BUS_ADDRESS", "CLAUDE_CONFIG_DIR",
-    "SSL_CERT_FILE", "SSL_CERT_DIR",
-  ];
-  // Pin execution to the same shell the prompt announces, so the two cannot drift.
-  const shell = claudeShell(process.env.SHELL);
-  return {
-    ...Object.fromEntries(keys.map((key) => [key, process.env[key]])),
-    ...(account && { CLAUDE_CONFIG_DIR: claudeAccountDir(account) }),
-    ...(shell && { SHELL: shell, CLAUDE_CODE_SHELL: shell }),
-    ENABLE_CLAUDEAI_MCP_SERVERS: "false",
-    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-    // eleven forces every Bash call into the foreground anyway (see
-    // foregroundToolInput): a detached job would be killed the moment Claude
-    // returns a result, and there is no next terminal prompt to report it at.
-    // Without this the CLI still advertises `run_in_background` — a parameter
-    // whose description promises the opposite of what eleven does with it. The
-    // flag removes both the parameter and its paragraph from the Bash tool, so
-    // the model is not told something untrue and the turn is that much cheaper.
-    // The hook stays as the backstop for a runtime that ignores the flag.
-    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
-    CLAUDE_AGENT_SDK_CLIENT_APP: "eleven",
-    // Pi's bash tool has no default timeout and caps at setTimeout's own ceiling;
-    // the Agent SDK caps a requested timeout at 10 minutes, so the same command
-    // that runs fine under every other model gets killed under Claude. Match pi's
-    // ceiling, for the same reason pi picked it: past 2^31-1 ms a Node timer
-    // overflows and fires immediately. This lifts the ceiling only — the default
-    // stays short, so a hung command still needs an explicit timeout to hang long.
-    BASH_MAX_TIMEOUT_MS: "2147483647",
-    // Resuming a session whose turn never finished, Claude Code injects its own
-    // "Continue from where you left off." — written for a terminal, where the
-    // user is watching the work. Here the turn's output *is* a chat message, so
-    // a resumed turn that ends quietly reads as being ignored. Say that, and
-    // stop the CLI's default from colliding with eleven's own wake prompt.
-    CLAUDE_CODE_RESUME_PROMPT: RESUME_PROMPT,
-  };
-}
-
 export function cleanToolName(name: string): string {
   return name.startsWith(MCP_PREFIX) ? name.slice(MCP_PREFIX.length) : name;
-}
-
-export interface ClaudeAuthProbe {
-  ok: boolean;
-  detail?: string;
-}
-
-/** Per account: each one is a login of its own. */
-const authCache = new Map<string | undefined, { value: ClaudeAuthProbe; at: number }>();
-const AUTH_CACHE_MS = 60_000;
-
-/** Read the same subscription windows as Claude Code's /usage dialog without
- * issuing a model request. The SDK marks the shape experimental, so the caller
- * intentionally consumes only its small stable-looking rate-limit subset. */
-export async function fetchClaudeCodeRateLimits(): Promise<SDKControlGetUsageResponse> {
-  const abort = new AbortController();
-  let release!: () => void;
-  const parked = new Promise<void>((resolve) => (release = resolve));
-  async function* noPrompt(): AsyncGenerator<SDKUserMessage> { await parked; }
-  const sdk = sdkQuery({
-    prompt: noPrompt(),
-    options: {
-      cwd: process.cwd(), tools: [], mcpServers: {}, strictMcpConfig: true,
-      settingSources: [], skills: [], plugins: [], persistSession: false,
-      abortController: abort,
-      env: claudeChildEnv(),
-      stderr: () => {},
-    },
-  });
-  const timeout = setTimeout(() => abort.abort(), 15_000);
-  timeout.unref();
-  const timed = <T>(promise: Promise<T>) => Promise.race([
-    promise,
-    new Promise<never>((_, reject) => abort.signal.addEventListener(
-      "abort", () => reject(new Error("Claude Code usage lookup timed out")), { once: true },
-    )),
-  ]);
-  try {
-    await timed(sdk.initializationResult());
-    return await timed(sdk.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET());
-  } finally {
-    clearTimeout(timeout);
-    release();
-    abort.abort();
-    try { sdk.close(); } catch { /* already closed */ }
-  }
-}
-
-/** Initialize the bundled official runtime without sending a model prompt. */
-export async function probeClaudeCodeAuth(queryFn: typeof sdkQuery = sdkQuery): Promise<ClaudeAuthProbe> {
-  const cached = authCache.get(currentAccount());
-  if (queryFn === sdkQuery && cached && Date.now() - cached.at < AUTH_CACHE_MS) return cached.value;
-  const abort = new AbortController();
-  let release!: () => void;
-  const parked = new Promise<void>((resolve) => (release = resolve));
-  async function* noPrompt(): AsyncGenerator<SDKUserMessage> { await parked; }
-  const sdk = queryFn({
-    prompt: noPrompt(),
-    options: {
-      cwd: process.cwd(),
-      tools: [],
-      mcpServers: {},
-      strictMcpConfig: true,
-      settingSources: [],
-      skills: [],
-      plugins: [],
-      persistSession: false,
-      abortController: abort,
-      env: claudeChildEnv(),
-      stderr: () => {},
-    },
-  });
-  let value: ClaudeAuthProbe;
-  const timeout = setTimeout(() => abort.abort(), 15_000);
-  timeout.unref();
-  try {
-    const init = await Promise.race([
-      sdk.initializationResult(),
-      new Promise<never>((_, reject) => abort.signal.addEventListener(
-        "abort",
-        () => reject(new Error("Claude Code initialization timed out")),
-        { once: true },
-      )),
-    ]);
-    const account = init.account;
-    const ambientProvider = account?.apiProvider && account.apiProvider !== "firstParty";
-    const authenticated = !!(ambientProvider || account?.email || account?.subscriptionType || account?.tokenSource || account?.apiKeySource);
-    value = { ok: authenticated, detail: account?.subscriptionType || account?.apiProvider };
-  } catch (error) {
-    value = { ok: false, detail: error instanceof Error ? error.message : String(error) };
-  } finally {
-    clearTimeout(timeout);
-    release();
-    abort.abort();
-    try { sdk.close(); } catch { /* already closed */ }
-  }
-  if (queryFn === sdkQuery) authCache.set(currentAccount(), { value, at: Date.now() });
-  return value;
 }

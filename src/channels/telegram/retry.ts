@@ -1,5 +1,6 @@
 import { GrammyError } from "grammy";
 import { logger } from "../../log.ts";
+import { failedBeforeConnecting } from "../network.ts";
 
 const log = logger("telegram/retry");
 
@@ -8,22 +9,9 @@ const BASE_DELAY_MS = 400;
 const MAX_DELAY_MS = 30_000;
 const RETRY_AFTER_CAP_MS = 60_000;
 
-/** Errors that provably happened before the request reached Telegram. */
-const PRE_CONNECT_CODES = new Set([
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ENETDOWN",
-  "ENETUNREACH",
-  "EHOSTUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT",
-]);
-
-function preConnect(error: unknown): boolean {
-  const cause = (error as { error?: unknown })?.error ?? error;
-  const code = (cause as { code?: string })?.code ?? ((cause as Error)?.cause as { code?: string })?.code;
-  return code !== undefined && PRE_CONNECT_CODES.has(code);
-}
+/** Errors that provably happened before the request reached Telegram. grammy
+ * wraps a network failure in an HttpError that carries the real one. */
+const preConnect = (error: unknown) => failedBeforeConnecting((error as { error?: unknown })?.error ?? error);
 
 /** Flood-wait duration from a Telegram 429, capped. */
 export function retryAfterMs(error: unknown, capMs = RETRY_AFTER_CAP_MS): number | undefined {

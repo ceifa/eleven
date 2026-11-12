@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { startDashboard } from "../src/dashboard/server.ts";
-import { TurnFailure } from "../src/agent/runner.ts";
+import { TurnFailure } from "../src/agent/turn.ts";
 import { continuePrompt } from "../src/channels/failover.ts";
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "dashboard", "public");
@@ -39,10 +39,10 @@ function get(url: string, headers: Record<string, string> = {}) {
 }
 
 /** A JSON request with a body — the state-changing half of the API. */
-function post(url: string, body: unknown = {}) {
+function post(url: string, body: unknown = {}, method = "POST") {
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
-    const payload = Buffer.from(JSON.stringify(body));
-    const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", "content-length": payload.length } }, (res) => {
+    const payload = typeof body === "string" ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
+    const req = httpRequest(url, { method, headers: { "content-type": "application/json", "content-length": payload.length } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString() }));
@@ -619,5 +619,58 @@ test("thread references read only the active branch and support unique prefixes"
     assert.deepEqual(JSON.parse(empty.body.toString()).messages, []);
     spy.topic.id = "11111111-bbbb-cccc-dddd-eeeeeeeeeeee";
     assert.equal((await get(`${base}/api/threads/11111111/read`)).status, 409);
+  });
+});
+
+// A refusal and a fault used to answer alike: every error a handler did not
+// give a status of its own came back 400, so a failing disk told the caller to
+// fix a request there was nothing wrong with, and a workspace that does not
+// exist was a bad request rather than a missing thing.
+test("an error answers with whose fault it was", async () => {
+  const { ApiError, errorStatus } = await import("../src/dashboard/http.ts");
+  assert.equal(errorStatus(new ApiError(409, "taken")), 409);
+  assert.equal(errorStatus(new Error("message is required")), 400);
+  assert.equal(errorStatus(Object.assign(new Error("EACCES: permission denied, open 'x'"), { code: "EACCES", syscall: "open" })), 500);
+  assert.equal(errorStatus(new TypeError("Cannot read properties of undefined")), 500);
+
+  await withDashboard(async (base) => {
+    assert.equal((await get(`${base}/api/workspaces/nope`)).status, 404);
+    // A body a handler cannot read fields off is refused before it gets there.
+    for (const body of ["null", "[1]", "42", "{ not json"]) {
+      const response = await post(`${base}/api/threads`, body);
+      assert.equal(response.status, 400, body);
+      assert.match(response.body, /request body/);
+    }
+    // A config missing a whole section is still the request's fault.
+    const malformed = await post(`${base}/api/config`, { dashboard: { host: "127.0.0.1", port: 1 } }, "PUT");
+    assert.equal(malformed.status, 400);
+    assert.match(malformed.body, /malformed config/);
+  });
+});
+
+test("a thread started from the dashboard is described like any other thread", async () => {
+  await withDashboard(async (base) => {
+    const response = await post(`${base}/api/threads`, { workspace: "agent", text: "hello" });
+    assert.equal(response.status, 201);
+    const started = JSON.parse(response.body);
+    // The view, not the stored record: no path into the state directory, and
+    // the fields the list draws a card from.
+    assert.equal("sessionFile" in started, false);
+    assert.equal(started.source, "dashboard");
+    assert.equal(started.composable, true);
+  });
+});
+
+// Anything that is not the API is the app shell or one of its files, and used
+// to be answered as such whatever the method: a POST to any path got the page
+// back with a 200, as if it had been taken.
+test("only the API takes anything but a read", async () => {
+  await withDashboard(async (base) => {
+    const refused = await post(`${base}/anything`, { a: 1 });
+    assert.equal(refused.status, 405);
+    assert.equal((await post(`${base}/`, {})).status, 405);
+    // The bare prefix is the API's, not a page of the app.
+    assert.equal((await get(`${base}/api`)).status, 404);
+    assert.equal((await get(`${base}/some/deep/link`)).status, 200); // the SPA fallback still reads
   });
 });

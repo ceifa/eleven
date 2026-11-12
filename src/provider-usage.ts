@@ -1,6 +1,6 @@
 import { credentials, modelRuntime } from "./agent/pi.ts";
 import { currentAccount, runOnAccount, signedInAccounts } from "./accounts.ts";
-import { fetchClaudeCodeRateLimits } from "./agent/claude-code.ts";
+import { fetchClaudeCodeRateLimits } from "./agent/claude-env.ts";
 import { logger } from "./log.ts";
 
 const log = logger("usage");
@@ -457,4 +457,16 @@ function formatNumber(value: number): string {
 
 function titleCase(value: string): string {
   return value.trim().replace(/(^|[_\s-])\p{L}/gu, (match) => match.toUpperCase()).replaceAll("_", " ");
+}
+
+/** Every configured login's subscription windows, as the markdown `/usage` answers with. */
+export async function providerUsageSummary(configured: { provider: string; account?: string }[]): Promise<string> {
+  const logins = usageLogins(configured);
+  if (!logins.length) throw new Error("no providers configured");
+  const reports = await collectProviderUsage(logins);
+  return reports
+    .map((report) => report.usage
+      ? formatProviderUsage(report.usage)
+      : `**${report.provider}${report.account ? ` (${report.account})` : ""}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
+    .join("\n\n");
 }

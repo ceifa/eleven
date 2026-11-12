@@ -122,7 +122,7 @@ const SHARED_DM = { name: "spaces/SHARED", type: "DM", spaceType: "DIRECT_MESSAG
 const ROOM = { name: "spaces/ROOM", type: "ROOM", spaceType: "SPACE", displayName: "Produto" };
 
 type History = { thread?: string; before: string; pageSize: number };
-function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, options: History) => Promise<unknown[]> = async () => [], sessionSince?: number) {
+function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, options: History) => Promise<unknown[]> = async () => [], sessionSince?: number, transcribeCommand?: string) {
   const config: ChannelConfig = { type: "googlechat", name: "oracle", token: "key.json", users: { "111": { name: "Old name" } }, groups: { ROOM: {} }, ...channel };
   const posted: { space: string; text: string; thread?: string }[] = [];
   const turns: { sessionKey: string; text: string; images: unknown[] }[] = [];
@@ -151,7 +151,7 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
     pairing: pairing as never,
     botConfig: () => config,
     workspace: () => "oracle",
-    transcribeCommand: () => undefined,
+    transcribeCommand: () => transcribeCommand,
     autoFailover: () => false,
     updateGroup: (id, mutate) => { if (config.groups?.[id] && mutate(config.groups[id]!)) saved++; },
     updateUser: (id, mutate) => { if (config.users?.[id] && mutate(config.users[id]!)) saved++; },
@@ -264,6 +264,24 @@ test("attachments are downloaded as the app; images also go to the model, Drive 
   assert.deepEqual(paths.map(([, mime]) => mime), ["image/png", "application/pdf"]);
   assert.equal(readFileSync(paths[1]![0]!, "utf8"), "%PDF-1.7");
   assert.match(turn!.text, /shared "Plan" from Google Drive, which this channel cannot read/);
+});
+
+test("an audio attachment is transcribed with the configured command, and says so when it can't be", async () => {
+  const voice = { contentName: "voice.m4a", contentType: "audio/mp4", attachmentDataRef: { resourceName: "pdf" } };
+  const { bot, turns } = harness({}, undefined, undefined, 'printf "heard %s" "$(cat "{{file}}")"');
+  await bot.handleEvent(message(GABRIEL, DM, { text: "", attachment: [voice] }));
+  await until(() => turns.length > 0);
+  assert.match(turns[0]!.text, /^\[Transcript\]\nheard %PDF-1\.7\n\n\[media attached: \S+ \(audio\/mp4\)\]$/);
+
+  const unconfigured = harness();
+  await unconfigured.bot.handleEvent(message(GABRIEL, DM, { text: "", attachment: [voice] }));
+  await until(() => unconfigured.turns.length > 0);
+  assert.match(unconfigured.turns[0]!.text, /transcription is not configured/);
+
+  const failing = harness({}, undefined, undefined, "exit 1");
+  await failing.bot.handleEvent(message(GABRIEL, DM, { text: "listen", attachment: [voice] }));
+  await until(() => failing.turns.length > 0);
+  assert.match(failing.turns[0]!.text, /^listen\n\n\[media attached: [^\n]+\n\n\[voice message could not be transcribed\]$/);
 });
 
 test("commands are answered by the channel, and a DM reached from its key finds its space", async () => {

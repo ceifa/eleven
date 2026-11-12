@@ -115,7 +115,7 @@ function buildThreadCard(thread, older) {
     "button",
     {
       "data-thread-id": thread.id,
-      class: `card card-sm w-full bg-base-200 ${older ? "is-older" : ""}`,
+      class: `card card-sm w-full ${older ? "is-older" : ""}`,
       // The full reading (channel · group · topic) is one hover away; the card
       // itself only has room for the part that identifies it.
       title: thread.conversation,
@@ -133,10 +133,10 @@ function buildThreadCard(thread, older) {
         // "something is happening here" from the corner of your eye, and this
         // says it plainly. Painting it as a class keeps the card cacheable.
         h("i", { class: "spinner card-spinner", "aria-hidden": "true" }),
-        h("span", { class: "ml-auto shrink-0 text-xs thread-meta font-mono", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
+        h("span", { class: "ml-auto shrink-0 text-xs thread-meta", "data-since": thread.lastActivityAt }, timeAgo(thread.lastActivityAt)),
       ),
-      h("div", { class: "thread-card-line flex items-center gap-2 text-xs thread-meta font-mono" },
-        h("span", { class: "thread-card-workspace text-warning shrink-0" }, thread.workspace),
+      h("div", { class: "thread-card-line flex items-center gap-2 text-xs thread-meta" },
+        h("span", { class: "thread-card-workspace shrink-0" }, thread.workspace),
         h("span", { class: "thread-card-title truncate min-w-0" }, thread.title ?? "(untitled)"),
       ),
       // Why this thread is in the results: what was said, where it was said.
@@ -342,8 +342,8 @@ async function viewThreads() {
   if (!state.threads.length) await reading;
   renderedFilters = ""; // the markup below is a fresh DOM — the filters have to be built into it again
   view.replaceChildren(
-    h("div", { class: "threads-layout flex gap-4", id: "threads-layout" },
-      h("div", { class: "threads-list-col w-72 shrink-0 flex flex-col gap-2" },
+    h("div", { class: "threads-layout flex", id: "threads-layout" },
+      h("div", { class: "threads-list-col shrink-0 flex flex-col gap-2" },
         h("div", { class: "threads-toolbar" },
           searchBox(),
           h("button", {
@@ -366,9 +366,9 @@ async function viewThreads() {
           }),
         ),
         h("div", { class: "threads-filters", id: "thread-filters", hidden: true }),
-        h("div", { class: "flex flex-col gap-2 overflow-y-auto thread-scroll", id: "thread-list" }),
+        h("div", { class: "flex flex-col overflow-y-auto thread-scroll", id: "thread-list" }),
       ),
-      h("div", { class: "flex-1 min-w-0 flex flex-col bg-base-100 border rounded-box", id: "thread-pane" }),
+      h("div", { class: "flex-1 min-w-0 flex flex-col", id: "thread-pane" }),
     ),
   );
   renderThreadList();

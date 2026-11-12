@@ -96,8 +96,8 @@ const PROVIDER_LOGIN_HINTS = { "claude-code": "run `claude auth login`" };
 function providerCard(provider) {
   const authEntry = (state.auth ?? []).find((a) => a.provider === provider);
   const configured = authEntry?.configured;
-  return h("div", { class: "card bg-base-200 border" },
-    h("div", { class: "card-body gap-2 p-4" },
+  return h("div", { class: "provider-row" },
+    h("div", { class: "flex flex-col gap-2" },
       h("div", { class: "flex items-center gap-2 wrap-mobile" },
         h("span", { class: "font-mono font-semibold" }, provider),
         configured
@@ -168,10 +168,13 @@ function modelCard(entry, index, models, ops, opts = {}) {
 
   return h("div", { class: "chain-step" },
     h("div", { class: `chain-node ${index === 0 ? "is-lead" : ""}` }, String(index + 1)),
-    h("div", { class: `card ${opts.compact ? "bg-base-100" : "bg-base-200"} border` },
-      h("div", { class: `card-body gap-3 ${opts.compact ? "p-3" : "p-4"}` },
+    // Inside a workspace, a group or a topic the sequence is already three
+    // levels into something else, so its steps hang off the wire bare: the
+    // numbered node is the frame. On the Models page each one gets a surface.
+    h("div", { class: `card ${opts.compact ? "" : "bg-base-200"}` },
+      h("div", { class: `card-body gap-3 ${opts.compact ? "p-0" : "p-4"}` },
         h("div", { class: "flex items-center gap-2 wrap-mobile" },
-          h("span", { class: "chain-role" }, index === 0 ? "leads every turn" : "fallback"),
+          h("span", { class: "chain-role" }, index === 0 ? "Leads every turn" : "Fallback"),
           !meta ? h("span", { class: "badge badge-error badge-xs badge-soft", title: "not in pi's model registry" }, "unknown model") : null,
           meta && authEntry && !authEntry.configured
             ? h("span", { class: "badge badge-error badge-xs badge-soft", title: "no credentials for this provider" }, "no auth")
@@ -333,7 +336,7 @@ function providersSection() {
     inUse.length === 0 ? h("div", { class: "text-sm opacity-50" }, "No providers in use yet — they show up here once a model is added.") : null,
     ...inUse.map((provider) => providerCard(provider)),
     others.length
-      ? h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": "providers:others" },
+      ? h("div", { class: "collapse collapse-arrow border", "data-collapse": "providers:others" },
           h("input", { type: "checkbox" }),
           h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
             h("span", { class: "opacity-60" }, "Other providers"),

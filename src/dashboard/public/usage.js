@@ -174,7 +174,7 @@ function usageThreadsTable(report) {
             href: `#/threads/${thread.id}`,
             title: thread.title ?? thread.conversation ?? thread.id,
           }, thread.title ?? thread.conversation ?? thread.id.slice(0, 8))),
-          h("td", { class: "text-warning text-xs" }, thread.workspace),
+          h("td", { class: "font-mono text-xs opacity-60" }, thread.workspace),
           h("td", {}, fmtTokens(tokensOf(thread))),
           h("td", {}, fmtMoney(thread.cost)),
           h("td", { class: "font-mono text-xs opacity-60" }, modelLabel(thread.lastModel)),

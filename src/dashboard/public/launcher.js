@@ -124,7 +124,7 @@ function newThreadDialog(preferred) {
             )
           : h("div", { class: "new-thread-ws" },
               h("span", { class: "dim-label text-xs" }, "Workspace"),
-              h("span", { class: "font-mono text-xs text-warning" }, workspace ?? "none configured"),
+              h("span", { class: "font-mono text-xs" }, workspace ?? "none configured"),
             ),
         h("div", { class: "new-thread-actions" },
           h("span", { class: "composer-hint" }, "Enter to start · paste or drop to attach"),

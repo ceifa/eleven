@@ -30,18 +30,16 @@ async function viewWorkspaces() {
     modelsDatalist(),
     pairing.length ? pairingPanel(pairing) : null,
     ...Object.entries(state.config.workspaces).map(([name, workspace]) => workspaceCard(name, workspace)),
-    h("div", { class: "card bg-base-200 max-w-3xl" },
-      h("div", { class: "card-body gap-3" },
-        h("h2", { class: "card-title text-base" }, "Add workspace"),
-        addWorkspaceForm(),
-      ),
+    h("section", { class: "section max-w-3xl" },
+      sectionLabel("Add workspace"),
+      addWorkspaceForm(),
     ),
   ];
   view.replaceChildren(...children.filter(Boolean));
 }
 
 function pairingPanel(requests) {
-  return h("div", { class: "card warn max-w-3xl mb-4" },
+  return h("div", { class: "card warn max-w-3xl mb-6" },
     h("div", { class: "card-body gap-2" },
       h("h2", { class: "card-title text-base" }, "Pairing requests", h("span", { class: "badge badge-warning badge-sm" }, requests.length)),
       ...requests.map((request) => {
@@ -83,12 +81,12 @@ function pairingAvatar(request, title) {
 }
 
 function workspaceCard(name, workspace) {
-  return h("div", { class: "card bg-base-200 border mb-6" },
-    h("div", { class: "card-body gap-5" },
+  return h("section", { class: "scope-block" },
+    h("div", { class: "flex flex-col gap-6" },
       // scope-head, not wrap-mobile: wrapping sent "remove workspace" to a line
       // of its own, so a phone spent a whole row on a button nobody presses.
       // The path is what gives way instead — it truncates.
-      h("div", { class: "scope-head flex items-center gap-3" },
+      h("div", { class: "scope-head scope-title flex items-center gap-3" },
         h("h2", { class: "display text-xl" }, name),
         h("span", { class: "text-xs opacity-50 font-mono truncate min-w-0" }, workspace.path),
         h("button", { class: "btn btn-ghost btn-xs ml-auto shrink-0 text-error", onclick: () =>
@@ -105,8 +103,6 @@ function workspaceCard(name, workspace) {
           : null,
         addChannelForm(name),
       ),
-
-      h("div", { class: "divider my-0" }),
 
       // -- agent settings --
       h("div", { class: "flex flex-col gap-3" },
@@ -144,7 +140,7 @@ function channelCard(workspaceName, channel, index) {
   const save = (patch) => updateWorkspace(workspaceName, (ws) => {
     ws.channels[index] = { ...ws.channels[index], ...patch };
   });
-  return h("div", { class: "card bg-base-100 border" },
+  return h("div", { class: "card bg-base-200" },
     h("div", { class: "card-body gap-4 p-4" },
       h("div", { class: "scope-head flex items-center gap-2" },
         h("span", { class: "shrink-0", html: CHANNEL_ICONS[channel.type] ?? "" }),
@@ -291,7 +287,7 @@ function topicsSection(workspaceName, owner, inherited, select, words) {
   return [
     h("div", { class: "text-xs dim-label mt-1 flex items-center gap-1.5" }, words.topics, info(words.topicsInfo)),
     ...Object.entries(owner.topics ?? {}).map(([topicId, topic]) =>
-      h("div", { class: "border border-base-300 rounded-box p-3 flex flex-col gap-2" },
+      h("div", { class: "topic-block flex flex-col gap-2" },
         h("div", { class: "topic-head flex items-center gap-2" },
           h("input", { class: "input input-xs w-44", value: topic.title ?? "", placeholder: `${words.topic} name (optional)`,
             onchange: (e) => patchTopic(topicId, { title: e.target.value.trim() || undefined }) }),
@@ -317,7 +313,7 @@ function userRow(workspaceName, chIndex, id, user, words) {
     const ch = ws.channels[chIndex];
     ch.users = { ...ch.users, [id]: { ...ch.users?.[id], ...patch } };
   });
-  return h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": `user:${workspaceName}:${chIndex}:${id}` },
+  return h("div", { class: "collapse collapse-arrow border", "data-collapse": `user:${workspaceName}:${chIndex}:${id}` },
     h("input", { type: "checkbox" }),
     h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
       h("span", { class: "font-semibold" }, user.name ?? id),
@@ -343,7 +339,7 @@ function groupRow(workspaceName, chIndex, id, group, words) {
     const ch = ws.channels[chIndex];
     ch.groups = { ...ch.groups, [id]: { ...ch.groups?.[id], ...patch } };
   }, opts);
-  return h("div", { class: "collapse collapse-arrow bg-base-200 border", "data-collapse": `group:${workspaceName}:${chIndex}:${id}` },
+  return h("div", { class: "collapse collapse-arrow border", "data-collapse": `group:${workspaceName}:${chIndex}:${id}` },
     h("input", { type: "checkbox" }),
     h("div", { class: "collapse-title flex items-center gap-2 min-h-0 py-2 text-sm" },
       h("span", { class: "font-semibold" }, group.title ?? id),

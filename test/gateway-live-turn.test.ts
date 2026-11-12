@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import type { Gateway as GatewayType } from "../src/gateway.ts";
-import type { RunnerHooks, TurnEvents } from "../src/agent/runner.ts";
+import type { RunnerHooks } from "../src/agent/runner.ts";
+import type { TurnEvents } from "../src/agent/turn.ts";
 
 // The gateway's ledgers live in the state directory, which paths.ts resolves at
 // import time — so it has to point at a temp dir before the module is loaded.

@@ -1,6 +1,6 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ModelEntry } from "../config.ts";
-import { TurnFailure, type TurnRewind } from "../agent/runner.ts";
+import { TurnFailure, type TurnRewind } from "../agent/turn.ts";
 import type { Gateway, IncomingMessage } from "../gateway.ts";
 import type { logger } from "../log.ts";
 import { summarizeToolArgs } from "../util.ts";

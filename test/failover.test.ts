@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TurnFailure, turnFailure } from "../src/agent/runner.ts";
+import { TurnFailure, turnFailure } from "../src/agent/turn.ts";
 import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../src/channels/failover.ts";
 
 const PLAN = [

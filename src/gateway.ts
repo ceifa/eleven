@@ -3,7 +3,9 @@ import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { isChannelSessionKey, type ConfigStore, type ModelEntry, type ModelScope, type WorkspaceConfig } from "./config.ts";
-import { listWorkspaceSkills, Runner, type TurnEvents, type TurnResult, type TurnRewind } from "./agent/runner.ts";
+import { Runner } from "./agent/runner.ts";
+import { listWorkspaceSkills } from "./agent/skills.ts";
+import type { TurnEvents, TurnResult, TurnRewind } from "./agent/turn.ts";
 import { findModel } from "./agent/pi.ts";
 import type { RuntimeContext } from "./agent/system-prompt.ts";
 import { ThreadStore, type ThreadEntry } from "./threads/store.ts";
@@ -16,9 +18,10 @@ import { rm } from "node:fs/promises";
 import { THREADS_DIR } from "./paths.ts";
 import { logger } from "./log.ts";
 import { summarizeToolArgs } from "./util.ts";
-import { collectProviderUsage, formatProviderUsage, usageLogins } from "./provider-usage.ts";
+import { providerUsageSummary } from "./provider-usage.ts";
 import { cleanupClaudeSessions } from "./agent/claude-code.ts";
-import { PanelBoard, type Panel } from "./agent/panels.ts";
+import type { Panel } from "./agent/panels.ts";
+import { LiveTurns, type LiveItem, type LiveTurnView } from "./live-turns.ts";
 
 const log = logger("gateway");
 
@@ -32,42 +35,8 @@ const GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // sane window before the restart that kills them.
 const WAKE_WINDOW_MS = 5 * 60 * 1000;
 const PENDING_HEARTBEAT_MS = 60 * 1000;
-// In-memory activity of a running turn, so a dashboard opened mid-turn can
-// catch up on what already happened (WS events only reach pages already open).
-// It records prose, tool calls and provider requests *in order*: tool calls are
-// also persisted to the session file, but the streamed prose is not, so the
-// on-disk transcript alone can't say whether text came before or after a call.
-const LIVE_TEXT_MAX_CHARS = 64_000;
-const LIVE_ITEMS_MAX = 400;
 
-export type LiveItem =
-  | { kind: "text"; text: string }
-  | { kind: "tool"; id: string; name: string; summary: string; args?: Record<string, unknown>; at: number }
-  | { kind: "request"; id: string; model: string; at: number }
-  // A message that arrived while the turn was running and was steered into it.
-  // It is persisted immediately too, but only the live record knows *where* in
-  // the turn it landed — the transcript cannot see the streamed prose it fell
-  // between.
-  | { kind: "message"; role: "user" | "assistant"; text: string; at: number };
-
-export interface LiveTurn {
-  startedAt: number;
-  /** What the turn has produced so far, oldest first. */
-  items: LiveItem[];
-  /** Streamed characters kept so far, against LIVE_TEXT_MAX_CHARS. */
-  chars: number;
-  /** The panels the turn's producers show. Unlike `items` this is state, not a
-   *  log: a page opened mid-turn needs them as they stand, not the updates that
-   *  built them — so the whole set is what gets broadcast and served. */
-  panels: PanelBoard;
-}
-
-/** The live turn as the dashboard consumes it (a board is not JSON on its own). */
-export interface LiveTurnView {
-  startedAt: number;
-  items: LiveItem[];
-  panels: Panel[];
-}
+export type { LiveItem, LiveTurnView } from "./live-turns.ts";
 
 export interface IncomingMessage {
   /** Durable conversation identity, e.g. "telegram:main:12345". */
@@ -102,14 +71,29 @@ export interface IncomingMessage {
  * The daemon core: resolves conversations to workspaces and threads, runs agent
  * turns, and broadcasts activity (consumed live by the dashboard).
  */
-export class Gateway extends EventEmitter {
+/** What the gateway announces as conversations move, each with its payload. */
+export interface GatewayEvents {
+  "thread-started": [{ threadId: string; workspace: string }];
+  "thread-activity": [{ thread: ThreadEntry; direction: "in" | "out"; text: string }];
+  "turn-start": [{ threadId: string; startedAt: number; items: LiveItem[] }];
+  "turn-done": [{ threadId: string }];
+  "turn-error": [{ threadId: string; error: string }];
+  "turn-rewound": [{ threadId: string }];
+  delta: [{ threadId: string; delta: string }];
+  "tool-call": [{ threadId: string; id: string; name: string; args: Record<string, unknown>; summary: string; at: number }];
+  "provider-request": [{ threadId: string; id: string; model: string }];
+  panels: [{ threadId: string; panels: Panel[] }];
+  "reply-queued": [];
+}
+
+export class Gateway extends EventEmitter<GatewayEvents> {
   readonly threads = new ThreadStore();
   readonly requests = new RequestLog();
   readonly pending = new PendingTurns();
   readonly runner = new Runner({
     onProviderRequest: (threadId, model, payload, images) => {
       const meta = this.requests.record(threadId, model, payload, images);
-      this.pushLive(threadId, { kind: "request", id: meta.id, model, at: Date.now() });
+      this.live.push(threadId, { kind: "request", id: meta.id, model, at: Date.now() });
       this.emit("provider-request", { threadId, id: meta.id, model });
     },
     onTurnStart: (threadId, sessionFile) => {
@@ -120,18 +104,17 @@ export class Gateway extends EventEmitter {
       // handle() opens the record when the message arrives, so the turn already
       // has the message that started it; only a turn nobody opened one for
       // (a woken interrupted turn) starts from scratch here.
-      if (!this.liveTurns.has(threadId)) this.liveTurns.set(threadId, { startedAt: Date.now(), items: [], chars: 0, panels: new PanelBoard() });
+      const { startedAt, items } = this.live.open(threadId);
       // Queued messages run back to back on the same thread: this is the only
       // point where a watcher can tell one turn's output from the next one's.
       // The record rides along: a watcher that starts the turn over from nothing
       // drops the message that opened it, which on a first turn exists nowhere else.
-      const { startedAt, items } = this.liveTurns.get(threadId)!;
       this.emit("turn-start", { threadId, startedAt, items: [...items] });
     },
     // Live activity always ends; a failed durable handoff stays recoverable.
     onTurnEnd: (threadId, preservePending) => {
       if (!preservePending) this.pending.end(threadId);
-      this.liveTurns.delete(threadId);
+      this.live.end(threadId);
     },
     // The failure is already in the transcript; pin the thread to the file it
     // went into, so a first turn that never got a reply still has one to read.
@@ -144,7 +127,7 @@ export class Gateway extends EventEmitter {
    *  the channels own delivery, and the gateway does not know them. */
   waker?: (sessionKey: string, text: string, threadId?: string) => Promise<void>;
   private config: ConfigStore;
-  private liveTurns = new Map<string, LiveTurn>();
+  private live = new LiveTurns();
   private sessionLifetimes = new Map<string, AbortController>();
 
   constructor(config: ConfigStore) {
@@ -182,23 +165,15 @@ export class Gateway extends EventEmitter {
     // thread's first turn that record is the only place the message exists —
     // pi keeps a brand-new session in memory until the model's first reply, so
     // there is no transcript file for a dashboard to read until the turn ends.
-    if (!this.liveTurns.has(thread.id)) this.liveTurns.set(thread.id, { startedAt: Date.now(), items: [], chars: 0, panels: new PanelBoard() });
-    this.pushLive(thread.id, { kind: "message", role: "user", text: incoming.text, at: Date.now() });
+    this.live.open(thread.id);
+    this.live.push(thread.id, { kind: "message", role: "user", text: incoming.text, at: Date.now() });
     this.emit("thread-activity", { thread, direction: "in", text: incoming.text });
 
     const events: TurnEvents = {
       ...incoming.events,
       onDelta: (delta) => {
         incoming.events?.onDelta?.(delta);
-        const live = this.liveTurns.get(thread.id);
-        if (live && live.chars < LIVE_TEXT_MAX_CHARS) {
-          live.chars += delta.length;
-          // Prose after a tool call is a new paragraph of the turn, not a
-          // continuation of the last one — that's what keeps the order readable.
-          const last = live.items.at(-1);
-          if (last?.kind === "text") last.text += delta;
-          else this.pushLive(thread.id, { kind: "text", text: delta });
-        }
+        this.live.text(thread.id, delta);
         this.emit("delta", { threadId: thread.id, delta });
       },
       onEvent: (event) => incoming.events?.onEvent?.(event),
@@ -207,11 +182,7 @@ export class Gateway extends EventEmitter {
       // the live view too, instead of leaving orphan prose glued to the retry.
       onFailover: () => {
         incoming.events?.onFailover?.();
-        const live = this.liveTurns.get(thread.id);
-        if (live) {
-          live.items = [];
-          live.chars = 0;
-        }
+        this.live.rewind(thread.id);
         this.emit("turn-rewound", { threadId: thread.id });
       },
       // Pi and nested runtimes report through the same clean event. Claude MCP
@@ -223,7 +194,7 @@ export class Gateway extends EventEmitter {
         // the page to get the persisted (clickable) row.
         const summary = summarizeToolArgs(args);
         const at = Date.now();
-        this.pushLive(thread.id, { kind: "tool", id, name, args, summary, at });
+        this.live.push(thread.id, { kind: "tool", id, name, args, summary, at });
         this.emit("tool-call", { threadId: thread.id, id, name, args, summary, at });
       },
       // Broadcast every producer's panels rather than the one update: a page
@@ -231,10 +202,8 @@ export class Gateway extends EventEmitter {
       // so the client never has to replay updates to know what is on screen.
       onPanels: (update) => {
         incoming.events?.onPanels?.(update);
-        const live = this.liveTurns.get(thread.id);
-        if (!live) return;
-        live.panels.apply(update);
-        this.emit("panels", { threadId: thread.id, panels: live.panels.panels });
+        const panels = this.live.panels(thread.id, update);
+        if (panels) this.emit("panels", { threadId: thread.id, panels });
       },
     };
 
@@ -363,22 +332,9 @@ export class Gateway extends EventEmitter {
     return this.runner.isRunning(id);
   }
 
-  /** Activity of the thread's running turn, if one is in flight, in the shape
-   *  the dashboard consumes (the board is a class, not JSON). */
+  /** Activity of the thread's running turn, if one is in flight. */
   liveTurn(id: string): LiveTurnView | undefined {
-    const live = this.liveTurns.get(id);
-    return live ? { startedAt: live.startedAt, items: live.items, panels: live.panels.panels } : undefined;
-  }
-
-  /** Append to the running turn's live record, oldest entries falling off first
-   *  so a very long turn can't grow it without bound. */
-  private pushLive(threadId: string, item: LiveItem): void {
-    const live = this.liveTurns.get(threadId);
-    if (!live) return;
-    live.items.push(item);
-    // Dropped tool calls still reach a reloading page: they're persisted in the
-    // session file, so they simply render as part of the durable transcript.
-    if (live.items.length > LIVE_ITEMS_MAX) live.items.splice(0, live.items.length - LIVE_ITEMS_MAX);
+    return this.live.get(id);
   }
 
   /**
@@ -390,10 +346,11 @@ export class Gateway extends EventEmitter {
   async deliverOutbound<T>(id: string, text: string, deliver: () => Promise<T>): Promise<{ target: T; recorded: boolean; warning?: string }> {
     const thread = this.threads.get(id);
     if (!thread) throw new Error("thread not found");
-    if (!this.threads.isCurrent(id)) {
-      const current = this.threads.current(thread.sessionKey);
-      throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
-    }
+    const current = () => this.threads.current(thread.sessionKey)?.id.slice(0, 8);
+    const assertCurrent = () => {
+      if (!this.threads.isCurrent(id)) throw new Error(`thread is old${current() ? `; current thread is ${current()}` : ""}`);
+    };
+    assertCurrent();
     const workspace = this.config.resolved.workspaces[thread.workspace];
     if (!workspace) throw new Error(`workspace ${thread.workspace} is not configured`);
     const candidates = this.config.turnModels(thread.model, [workspace]);
@@ -403,14 +360,10 @@ export class Gateway extends EventEmitter {
     return this.runner.runWhenIdle(thread.id, async () => {
       // Re-check after entering the lane: /new may have rotated the conversation
       // between the initial validation and this operation acquiring its slot.
-      if (!this.threads.isCurrent(id)) {
-        const current = this.threads.current(thread.sessionKey);
-        throw new Error(`thread is old${current ? `; current thread is ${current.id.slice(0, 8)}` : ""}`);
-      }
+      assertCurrent();
       const target = await deliver();
       if (!this.threads.isCurrent(id)) {
-        const current = this.threads.current(thread.sessionKey);
-        const warning = `message was delivered after the conversation rotated; transcript was not changed${current ? ` (current thread ${current.id.slice(0, 8)})` : ""}`;
+        const warning = `message was delivered after the conversation rotated; transcript was not changed${current() ? ` (current thread ${current()})` : ""}`;
         log.warn(warning);
         return { target, recorded: false, warning };
       }
@@ -442,14 +395,7 @@ export class Gateway extends EventEmitter {
 
   /** Live subscription quotas for every provider configured in eleven. */
   async providerUsage(): Promise<string> {
-    const logins = usageLogins(this.config.configuredLogins());
-    if (!logins.length) throw new Error("no providers configured");
-    const reports = await collectProviderUsage(logins);
-    return reports
-      .map((report) => report.usage
-        ? formatProviderUsage(report.usage)
-        : `**${report.provider}${report.account ? ` (${report.account})` : ""}**\n- ⚠️ ${report.error ?? `subscription usage is not available for ${report.provider}`}`)
-      .join("\n\n");
+    return providerUsageSummary(this.config.configuredLogins());
   }
 
   /** A Telegram or Discord conversation still attached to its chat: neither

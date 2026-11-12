@@ -1,19 +1,14 @@
 import { createServer, type Server } from "node:http";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ChannelConfig } from "../../config.ts";
 import { logger } from "../../log.ts";
-import { lruTouch } from "../../util.ts";
 import { type InboundMedia, formatInboundBody, mediaNote, sanitizeNoteValue, saveInboundMedia } from "../../media-store.ts";
-import type { BotDeps } from "../bots.ts";
-import { Bursts } from "../burst.ts";
-import { runCommand } from "../commands.ts";
-import { FailoverOffers } from "../failover.ts";
+import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
+import { Conversations, type TurnSurface } from "../conversations.ts";
 import type { ReplyOptions } from "../index.ts";
 import type { PairingRequest } from "../pairing.ts";
-import { createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
-import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
+import { foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { plainStatus, TurnStatus } from "../turn-status.ts";
-import { GoogleChatApi, readServiceAccountKey, type ChatHistoryMessage } from "./api.ts";
+import { GoogleChatApi, GoogleChatApiError, readServiceAccountKey, type ChatHistoryMessage } from "./api.ts";
 import { chatChunks, toChatText } from "./markdown.ts";
 import { googleChatSessionKey, parseGoogleChatSessionKey, resourceId } from "./session-key.ts";
 import { createChatVerifier } from "./verify.ts";
@@ -23,7 +18,6 @@ const STATUS_THROTTLE_MS = 1_500;
 // What one request to the endpoint may carry. An event is a few kilobytes;
 // attachments travel by reference.
 const MAX_BODY_BYTES = 1024 * 1024;
-const MAX_CONVERSATIONS = 128;
 // What a mention in a space reads before answering: the whole thread it is
 // in, and the conversation outside threads in the hours before it.
 const THREAD_CONTEXT_MESSAGES = 50;
@@ -91,16 +85,11 @@ export interface GoogleChatClient {
   verify: (authorization: string | undefined) => Promise<void>;
 }
 
-export interface BotHandle {
+export interface BotHandle extends ChatBot {
   name: string;
   listening(): boolean;
   /** Feed one verified event in. The HTTP endpoint calls it; so do tests. */
   handleEvent(event: ChatEvent): Promise<void>;
-  send(sessionKey: string, text: string, options?: ReplyOptions): Promise<void>;
-  welcome(request: PairingRequest): Promise<void>;
-  wake(sessionKey: string, text?: string, threadId?: string): Promise<void>;
-  discardBurst(sessionKey: string): boolean;
-  stop(): Promise<void>;
 }
 
 /** A configured Google Chat channel: `token` is the path to the app's service
@@ -131,12 +120,17 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
   // A DM is keyed by the person; sending to it needs the space, which every
   // message from them names and the API can look up after a restart.
   const dmSpaces = new Map<string, string>();
-  const alreadyHandled = createSeenMessages();
-  const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
-  // Texts already in each conversation, shared across its turns; bounded like the
-  // other channels' per-conversation state.
-  const sentByConversation = new Map<string, Set<string>>();
-  const bursts = new Bursts<Target>((target, text, images) => void runTurn(target, text, images));
+  const conversations = new Conversations<Target>({
+    type: "googlechat",
+    name,
+    deps,
+    log,
+    sessionKey: (target) => target.sessionKey,
+    targetOf: targetFor,
+    surface,
+    describe: describeConversation,
+    capabilities: ["basic formatting (bold, italic, strikethrough, code, links, lists); headings and tables arrive flattened"],
+  });
   let historyDenied = false;
 
   async function handleEvent(event: ChatEvent): Promise<void> {
@@ -154,14 +148,14 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     if (event.type === "REMOVED_FROM_SPACE") return void log.info(`removed from ${space.name}`);
     if (event.type !== "MESSAGE" && event.type !== "ADDED_TO_SPACE") return;
 
-    const access = senderAccess(config, dm, userId, spaceId);
+    const access = senderAccess(config, userId, dm ? undefined : spaceId);
     if (access === "pair") return offerPairing(dm, userId, spaceId, sender, space);
     if (access === "ignore") return;
-    selfHeal(config, dm, userId, spaceId, sender, space);
+    selfHeal(dm, userId, spaceId, sender, space);
 
     const message = event.message;
     // Being added without a message (the DM opened, the app joined a space) is not a request.
-    if (!message?.name || alreadyHandled(space.name, message.name)) return;
+    if (!message?.name || conversations.seen(space.name, message.name)) return;
     // In a space Chat only delivers what mentions the app; argumentText is that message without the mention.
     const text = (dm ? message.text : message.argumentText ?? message.text)?.trim() ?? "";
     const threadId = resourceId(message.thread?.name);
@@ -171,14 +165,14 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
       : { sessionKey: googleChatSessionKey(name, { spaceId, threadId: threadId! }), space: space.name, thread: message.thread!.name, spaceId, triggerMessageId: message.name };
 
     if (text.startsWith("/") && (await handleCommand(target, text))) return;
-    const release = bursts.prepare(target.sessionKey);
+    const release = conversations.bursts.prepare(target.sessionKey);
     try {
       const media = await collectAttachments(message.attachment ?? []);
       const body = formatInboundBody(text, media);
       if (!body.trim() && !media.images.length) return;
       const context = dm ? "" : await conversationContext(target.sessionKey, space.name, message.thread!.name!, message.createTime);
       const heading = context ? `[Current message, from ${senderLabel(sender)} — respond to this]` : `[${senderLabel(sender)}]`;
-      bursts.enqueue(target.sessionKey, target, dm ? body : `${context}${heading}\n${body}`, media.images);
+      conversations.bursts.enqueue(target.sessionKey, target, dm ? body : `${context}${heading}\n${body}`, media.images);
     } finally {
       release();
     }
@@ -278,24 +272,9 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     return media;
   }
 
-  function senderAccess(config: ChannelConfig, dm: boolean, userId: string, spaceId: string): "ok" | "pair" | "ignore" {
-    if (dm) return config.users?.[userId] ? "ok" : "pair";
-    if (!config.groups?.[spaceId]) return "pair";
-    const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
-    return allowed.includes(userId) ? "ok" : "ignore";
-  }
-
   /** Names and emails heal from traffic, like a Telegram group's title. */
-  function selfHeal(config: ChannelConfig, dm: boolean, userId: string, spaceId: string, sender: ChatUser | undefined, space: ChatSpace) {
-    const displayName = sender?.displayName && foldDisplayName(sender.displayName).name;
-    if (config.users?.[userId]) {
-      deps.updateUser(userId, (user) => {
-        let changed = false;
-        if (displayName && user.name !== displayName) { user.name = displayName; changed = true; }
-        if (sender?.email && user.username !== sender.email) { user.username = sender.email; changed = true; }
-        return changed;
-      });
-    }
+  function selfHeal(dm: boolean, userId: string, spaceId: string, sender: ChatUser | undefined, space: ChatSpace) {
+    healUser(deps, userId, { name: sender?.displayName && foldDisplayName(sender.displayName).name, username: sender?.email });
     if (!dm && space.displayName) {
       deps.updateGroup(spaceId, (group) => {
         if (group.title === space.displayName) return false;
@@ -306,22 +285,16 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
   }
 
   async function offerPairing(dm: boolean, userId: string, spaceId: string, sender: ChatUser | undefined, space: ChatSpace) {
-    const kind = dm ? "dm" : "group";
-    const chatId = dm ? userId : spaceId;
-    if (deps.pairing.find({ bot: name, kind, userId, chatId })) return;
-    const { name: senderName, disguised } = foldDisplayName(sender?.displayName ?? "");
-    const { isNew } = deps.pairing.request({
-      kind,
-      bot: name,
+    const request = await conversations.knock({
+      kind: dm ? "dm" : "group",
       userId,
-      chatId,
+      chatId: dm ? userId : spaceId,
       chatTitle: dm ? undefined : space.displayName,
       username: sender?.email,
-      name: senderName || undefined,
-      disguised: disguised || undefined,
+      displayName: sender?.displayName ?? "",
     });
-    if (!isNew) return;
-    log.info(`pairing request (${kind}) from users/${userId} in ${space.name}`);
+    if (!request) return;
+    log.info(`pairing request (${request.kind}) from users/${userId} in ${space.name}`);
     // A space stays quiet; the request just shows up in the dashboard.
     if (dm) await api.createMessage(space.name!, "This app is private. I've asked the owner to approve you — hang tight.").catch((error) => log.warn(`pairing notice failed: ${error}`));
   }
@@ -329,13 +302,7 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
   async function handleCommand(target: Target, text: string): Promise<boolean> {
     const command = text.split(/\s+/, 1)[0]!.slice(1).toLowerCase();
     log.info(`command /${command} in ${target.sessionKey}`);
-    const answer = await runCommand(command, {
-      gateway: deps.gateway,
-      sessionKey: target.sessionKey,
-      workspace: deps.workspace(),
-      discardBurst: () => bursts.discard(target.sessionKey),
-      log,
-    });
+    const answer = await conversations.command(command, target.sessionKey);
     if (answer === undefined) return false;
     await post(target, answer);
     return true;
@@ -345,7 +312,11 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     if (target.space) return target.space;
     const known = target.userId && dmSpaces.get(target.userId);
     if (known) return known;
-    const found = target.userId && (await api.findDirectMessage(`users/${target.userId}`));
+    // A lookup that fails has posted nothing: a reply waiting on it can be retried.
+    const found = target.userId && (await api.findDirectMessage(`users/${target.userId}`).catch((error) => {
+      if (error instanceof GoogleChatApiError) error.unsent = true;
+      throw error;
+    }));
     if (!found) throw new Error(`no Google Chat DM with users/${target.userId}`);
     dmSpaces.set(target.userId!, found);
     return found;
@@ -386,8 +357,7 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     });
   }
 
-  function describeConversation(target: Target): string {
-    const config = deps.botConfig();
+  function describeConversation(target: Target, config: ChannelConfig | undefined): string {
     if (target.userId) {
       const user = config?.users?.[target.userId];
       return `DM with ${user?.name ?? "user"}${user?.username ? ` (${user.username})` : ""}`;
@@ -397,53 +367,11 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     return `thread in space "${config?.groups?.[target.spaceId!]?.title ?? target.spaceId}", ${link}`;
   }
 
-  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry, expectedThreadId?: string) {
-    const { sessionKey } = target;
-    let space: string;
-    try {
-      space = await spaceOf(target);
-    } catch (error) {
-      return void log.error(`turn in ${sessionKey} has nowhere to answer: ${error}`);
-    }
-    const config = deps.botConfig();
-    const owner = target.userId ? config?.users?.[target.userId] : config?.groups?.[target.spaceId!];
-    let sent = lruTouch(sentByConversation, sessionKey);
-    if (!sent) {
-      sentByConversation.set(sessionKey, (sent = new Set()));
-      if (sentByConversation.size > MAX_CONVERSATIONS) sentByConversation.delete(sentByConversation.keys().next().value!);
-    }
-    const autoRetry = await runChatTurn({
-      gateway: deps.gateway,
-      sessionKey,
-      text,
-      images,
-      retry,
-      replyTo: target.triggerMessageId,
-      incoming: {
-        expectedThreadId,
-        workspaceHint: deps.workspace(),
-        modelScopes: [owner],
-        appends: owner?.appendSystemPrompt ? [owner.appendSystemPrompt] : [],
-        runtime: {
-          channel: "googlechat",
-          conversation: describeConversation(target),
-          capabilities: ["basic formatting (bold, italic, strikethrough, code, links, lists); headings and tables arrive flattened"],
-        },
-      },
-      sent,
-      status: statusFor(target, space),
-      send: (markdown) => post({ ...target, space }, markdown),
-      failovers,
-      replay: { target, text, images },
-      autoFailover: deps.autoFailover,
-      log,
-    });
-    if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
-  }
-
-  async function wake(sessionKey: string, text = WAKE_PROMPT, threadId?: string) {
-    log.info(`waking ${sessionKey}`);
-    await runTurn(targetFor(sessionKey), text, [], undefined, threadId);
+  /** Open the chat for one turn. A DM woken from its key alone has to find its
+   *  space first, and without one there is nowhere to answer. */
+  async function surface(target: Target): Promise<TurnSurface> {
+    const space = await spaceOf(target);
+    return { status: statusFor(target, space), send: (markdown) => post({ ...target, space }, markdown) };
   }
 
   async function welcome(request: PairingRequest) {
@@ -496,13 +424,14 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     name,
     listening: () => listening,
     handleEvent,
+    status: () => ({ connected: listening }),
     send: async (sessionKey, text, options) => post(targetFor(sessionKey), text, options),
     welcome,
-    wake,
-    discardBurst: (sessionKey) => bursts.discard(sessionKey),
+    wake: (sessionKey, text, threadId) => conversations.wake(sessionKey, text, threadId),
+    discardBurst: (sessionKey) => conversations.bursts.discard(sessionKey),
     listen,
     async stop() {
-      bursts.flushAll();
+      conversations.stop();
       listening = false;
       await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     },

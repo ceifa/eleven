@@ -3,7 +3,7 @@ import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { boundRuntimeResults, keepRuntimeInputsInContext, withRuntimeInputs, withToolResults } from "../src/agent/runner.ts";
+import { boundRuntimeResults, keepRuntimeInputsInContext, withRuntimeInputs, withToolResults } from "../src/agent/context.ts";
 import { contentText } from "../src/util.ts";
 
 const model = { id: "opus", provider: "claude-code", api: "claude-code", baseUrl: "local://claude-code" } as unknown as Model;

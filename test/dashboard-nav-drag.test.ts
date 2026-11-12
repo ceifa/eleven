@@ -118,7 +118,7 @@ test("a drawer with no width can't be dragged", () => {
 
 test("the page and the gesture agree on how a swipe back is painted", () => {
   const css = readFileSync(join(PUBLIC_DIR, "style.css"), "utf8");
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+  const phone = readFileSync(join(PUBLIC_DIR, "phone.js"), "utf8");
   const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
 
   // The gesture only moves anything through this variable, and only while the
@@ -126,21 +126,21 @@ test("the page and the gesture agree on how a swipe back is painted", () => {
   // of the screen the finger has travelled, the list coming in under it.
   assert.match(mobile, /body\.swiping-back #thread-pane \{[^}]*transform: translateX\(calc\(var\(--back\) \* 100%\)\);/);
   assert.match(mobile, /body\.swiping-back \.threads-layout\.pane-open \.threads-list-col \{[^}]*display: flex;/);
-  assert.match(app, /setProperty\("--back"/);
-  assert.match(app, /classList\.add\("swiping-back"\)/);
+  assert.match(phone, /setProperty\("--back"/);
+  assert.match(phone, /classList\.add\("swiping-back"\)/);
   // Only a conversation can be swiped out of: on the list there is nowhere back
   // to go, and the gesture must leave the page's own touches alone.
-  assert.match(app, /if \(!isPhone\(\) \|\| !open \|\|/);
+  assert.match(phone, /if \(!isPhone\(\) \|\| !open \|\|/);
 
   // preventDefault is ignored on a passive listener, and without it the
   // transcript scrolls under a pane that is supposed to be following the finger.
-  assert.match(app, /"touchmove",[\s\S]*?\{ passive: false \}\)/);
+  assert.match(phone, /"touchmove",[\s\S]*?\{ passive: false \}\)/);
 });
 
 /** Run the page's touch listeners without booting its API and WebSocket. */
 function pageSwipe() {
-  const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
-  const source = app.slice(app.indexOf("const swipe = navDrag();"), app.indexOf("/* ---------- the phone's viewport"));
+  const phone = readFileSync(join(PUBLIC_DIR, "phone.js"), "utf8");
+  const source = phone.slice(phone.indexOf("const swipe = navDrag();"), phone.indexOf("/* ---------- the phone's viewport"));
   const listeners = new Map<string, (event: any) => void>();
   const timers: (() => void)[] = [];
   const classes = new Set<string>();

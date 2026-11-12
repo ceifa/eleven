@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import type { AuthPrompt } from "@earendil-works/pi-ai";
 import { runOnAccount } from "./accounts.ts";
-import { claudeAccountDir, CLAUDE_CODE_PROVIDER } from "./agent/claude-code.ts";
+import { CLAUDE_CODE_PROVIDER } from "./agent/claude-code.ts";
+import { claudeAccountDir } from "./agent/claude-env.ts";
 import { modelRuntime } from "./agent/pi.ts";
 import { ACCOUNT_NAME, ConfigStore } from "./config.ts";
 

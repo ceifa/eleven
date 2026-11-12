@@ -3,7 +3,7 @@ import test from "node:test";
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { obj, str } from "@earendil-works/pi-schema";
-import { createProseBlocks, followProse } from "../src/agent/runner.ts";
+import { createProseBlocks, followProse } from "../src/agent/prose.ts";
 
 /** Drives the accumulator the way the session's event stream does. */
 function record() {

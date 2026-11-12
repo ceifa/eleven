@@ -1,3 +1,4 @@
+import { failedBeforeConnecting } from "../network.ts";
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -24,11 +25,25 @@ export function readServiceAccountKey(path: string): ServiceAccountKey {
 
 export class GoogleChatApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The failure provably put nothing in a chat: it happened getting a token,
+   *  or looking something up, before any message was handed over. */
+  unsent: boolean;
+  constructor(status: number, message: string, unsent = false) {
     super(message);
     this.status = status;
+    this.unsent = unsent;
   }
 }
+
+/**
+ * Whether a failed send can simply be tried again. Only when nothing can have
+ * landed: the request never left, Google turned it away for its rate (a 429
+ * creates nothing), or it failed before a message was involved. Anything else
+ * may have posted before the answer was lost, and a duplicate is worse than a
+ * gap — it waits for someone to look.
+ */
+export const canRetrySend = (error: unknown) =>
+  failedBeforeConnecting(error) || (error instanceof GoogleChatApiError && (error.unsent || error.status === 429));
 
 /** A message as the history listing returns it. */
 export interface ChatHistoryMessage {
@@ -84,15 +99,19 @@ export class GoogleChatApi {
       body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
     });
     const body = (await response.json()) as { access_token?: string; expires_in?: number; error_description?: string; error?: string };
-    if (!response.ok || !body.access_token) throw new GoogleChatApiError(response.status, `Google token exchange failed: ${body.error_description ?? body.error ?? response.status}`);
+    if (!response.ok || !body.access_token) throw new GoogleChatApiError(response.status, `Google token exchange failed: ${body.error_description ?? body.error ?? response.status}`, true);
     this.cached.set(scope, { token: body.access_token, expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000 });
     return body.access_token;
   }
 
   private async request(method: string, path: string, body?: unknown, scope = BOT_SCOPE): Promise<Response> {
+    // Whatever goes wrong getting a token goes wrong before Chat is asked anything.
+    const token = await this.accessToken(scope).catch((error) => {
+      throw error instanceof GoogleChatApiError ? error : new GoogleChatApiError(0, `Google token exchange failed: ${error instanceof Error ? error.message : error}`, true);
+    });
     const response = await this.fetch(`${CHAT_API}/${path}`, {
       method,
-      headers: { authorization: `Bearer ${await this.accessToken(scope)}`, ...(body !== undefined && { "content-type": "application/json" }) },
+      headers: { authorization: `Bearer ${token}`, ...(body !== undefined && { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) {

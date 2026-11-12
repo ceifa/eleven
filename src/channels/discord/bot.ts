@@ -16,24 +16,21 @@ import {
   type GatewayGuildCreateDispatchData,
   type GatewayMessageCreateDispatchData,
 } from "discord-api-types/v10";
-import type { ImageContent } from "@earendil-works/pi-ai";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ChannelConfig } from "../../config.ts";
 import { formatInboundBody } from "../../media-store.ts";
 import { logger } from "../../log.ts";
 import { STATE_DIR } from "../../paths.ts";
-import { keyedLane, lruTouch } from "../../util.ts";
+import { keyedLane } from "../../util.ts";
 import { capped } from "../avatars.ts";
-import type { BotDeps } from "../bots.ts";
+import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
 import type { ChannelDestination, CreatedConversation, ReplyOptions } from "../index.ts";
-import { BackgroundStatuses, BACKGROUND_STOP_PREFIX } from "../background.ts";
-import { Bursts } from "../burst.ts";
-import { COMMANDS, runCommand } from "../commands.ts";
-import { continuePrompt, FAILOVER_PREFIX, FailoverOffers } from "../failover.ts";
+import { BACKGROUND_STOP_PREFIX } from "../background.ts";
+import { COMMANDS } from "../commands.ts";
+import { Conversations, type TurnSurface } from "../conversations.ts";
+import { FAILOVER_PREFIX } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
 import { topicChain } from "../session-key.ts";
-import { compactReplyQuote, createSeenMessages, foldDisplayName, sanitizeContextLabel } from "../text.ts";
-import { runChatTurn, WAKE_PROMPT, type TurnRetry } from "../turn.ts";
+import { compactReplyQuote, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { BACKFILL_MAX_PER_CHANNEL, BACKFILL_WINDOW_MS, isNewer, missedMessages, snowflakeAt, Watermark } from "./backfill.ts";
 import { DiscordGateway } from "./gateway.ts";
 import { collectInboundMedia } from "./media.ts";
@@ -48,7 +45,6 @@ import { discordTool, type DiscordThreadRequest } from "./tool.ts";
 // Developer Portal, or the gateway refuses the connection (close 4014).
 const INTENTS = GatewayIntentBits.Guilds | GatewayIntentBits.GuildMessages | GatewayIntentBits.DirectMessages | GatewayIntentBits.MessageContent;
 const ACK_REACTION = "👀";
-const MAX_CHAT_TOOLS = 128;
 // The heartbeat runs every ~41 s; two missed acks is a dead connection.
 const HEALTHY_ACK_MS = 100_000;
 const CDN = "https://cdn.discordapp.com";
@@ -80,25 +76,17 @@ interface ChannelInfo {
 
 const THREADS = new Set<ChannelType>([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread]);
 
-export interface BotHandle {
+export interface BotHandle extends ChatBot {
   name: string;
   username?: string;
   connected(): boolean;
-  /** Re-prompt a conversation (by session key) that a restart interrupted. */
-  wake(sessionKey: string, text?: string, threadId?: string): Promise<void>;
-  /** Drop a conversation's buffered input before it becomes a turn. */
-  discardBurst(sessionKey: string): boolean;
-  /** Deliver literal text to a conversation, by session key. */
-  send(sessionKey: string, markdown: string, options?: ReplyOptions): Promise<void>;
   openThread(sessionKey: string, name: string, text: string, persistent?: boolean): Promise<CreatedConversation>;
   prompt(sessionKey: string, text: string): Promise<void>;
   archive(sessionKey: string): Promise<void>;
   destinations(): Promise<ChannelDestination[]>;
   describe(sessionKey: string): Promise<ChannelDestination>;
-  welcome(request: PairingRequest): Promise<void>;
   /** The picture of a person (DM) or a server, as stored bytes. */
   picture(kind: "user" | "guild", id: string): Promise<Buffer | undefined>;
-  stop(): Promise<void>;
 }
 
 export function startDiscordBot(name: string, token: string, deps: BotDeps, io?: { rest: DiscordRest; gateway: DiscordGateway }): BotHandle {
@@ -124,8 +112,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       return self?.username;
     },
     connected: () => gateway.ready && Date.now() - gateway.lastAckAt < HEALTHY_ACK_MS,
-    wake,
-    discardBurst,
+    status: () => ({ username: self?.username, connected: handle.connected() }),
+    wake: (sessionKey, text, threadId) => conversations.wake(sessionKey, text, threadId),
+    discardBurst: (sessionKey) => conversations.bursts.discard(sessionKey),
     send,
     openThread,
     prompt,
@@ -140,33 +129,37 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   const sessionKeyFor = (target: Target) =>
     target.guildId ? discordSessionKey(name, { guildId: target.guildId, channelId: target.channelId }) : discordSessionKey(name, { userId: target.userId! });
 
-  // One tool instance per conversation — the runner only reuses a warm agent
-  // session when the tools are the same objects across turns. `sent` collects
-  // tool-sent texts; the owning turn clears it when it ends.
-  const chatTools = new Map<string, { tool: ToolDefinition; sent: Set<string> }>();
-  const toolFor = (key: string, channelId: string) => {
-    let entry = lruTouch(chatTools, key);
-    if (!entry) {
-      const sent = new Set<string>();
-      entry = { tool: discordTool(rest, channelId, (text) => sent.add(text), async (request) => {
-        const created = await createThread(channelId, request);
-        if (created.warning) return `Thread created: ${created.url}. NOT started: ${created.warning}. Do not create it again.`;
-        return `Thread created: ${created.url}\nsession_key: ${created.sessionKey}\n${request.start ? "Agent started independently; answers will arrive in that thread and will not come back to this conversation." : "Opening context recorded; waiting for a user message."}`;
-      }), sent };
-      chatTools.set(key, entry);
-      if (chatTools.size > MAX_CHAT_TOOLS) chatTools.delete(chatTools.keys().next().value!);
-    }
-    return entry;
-  };
-
-  const bursts = new Bursts<Target>((target, text, images) => void runTurn(target, text, images));
+  const conversations = new Conversations<Target>({
+    type: "discord",
+    name,
+    deps,
+    log,
+    sessionKey: sessionKeyFor,
+    targetOf,
+    surface,
+    describe: describeConversation,
+    capabilities: [
+      "Discord markdown (headings up to ###, lists, code blocks, ||spoilers||; tables arrive as monospace blocks)",
+      "buttons",
+      "files",
+      "reactions — via the discord tool",
+    ],
+    tools: ({ channelId }, onSent) => [discordTool(rest, channelId, onSent, async (request) => {
+      const created = await createThread(channelId, request);
+      if (created.warning) return `Thread created: ${created.url}. NOT started: ${created.warning}. Do not create it again.`;
+      return `Thread created: ${created.url}\nsession_key: ${created.sessionKey}\n${request.start ? "Agent started independently; answers will arrive in that thread and will not come back to this conversation." : "Opening context recorded; waiting for a user message."}`;
+    })],
+    // An archive asked for mid-turn waits for the turn to be over.
+    afterTurn: async (_target, sessionKey) => {
+      if (deps.gateway.threads.current(sessionKey)?.archiveRequested) {
+        await archive(sessionKey).catch((error) => log.warn(`archive remains pending in ${sessionKey}: ${error}`));
+      }
+    },
+  });
   // Per-conversation ordering of message *preparation* (downloads,
   // transcription); turns run outside it, so a message landing mid-turn still
   // reaches the runner and steers.
   const lanes = new Map<string, Promise<unknown>>();
-  const background = new BackgroundStatuses();
-  const failovers = new FailoverOffers<{ target: Target; text: string; images: ImageContent[] }>();
-  const alreadyHandled = createSeenMessages();
   const archiveTimer = setInterval(() => void flushArchives(), 60_000);
   archiveTimer.unref();
   const watermark = new Watermark(join(STATE_DIR, "discord", `${name}.json`));
@@ -184,10 +177,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   // was sent since the watermark is fetched instead, guild by guild as each
   // one arrives.
   let backfill: { since: string; guilds: Set<string> } | undefined;
-
-  function discardBurst(sessionKey: string): boolean {
-    return bursts.discard(sessionKey);
-  }
 
   gateway.on("ready", (ready) => {
     self = ready.user;
@@ -333,7 +322,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       created.warning = delivery.warning;
       if (!delivery.recorded) return created;
       if (request.start) {
-        void runTurn(target, "[Task delegated from another conversation]\nCarry out the task in the opening message above. Work only on this subject; ask any necessary questions here.", [])
+        void conversations.runTurn(target, "[Task delegated from another conversation]\nCarry out the task in the opening message above. Work only on this subject; ask any necessary questions here.", [])
           .catch((error) => log.error(`delegated turn in ${sessionKey} failed: ${error}`));
       }
       return created;
@@ -373,7 +362,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     // Bots (this one included) and webhooks never start turns: two agents
     // answering each other in a channel is a loop nobody stops.
     if (!config || !self || message.author.bot || message.webhook_id) return;
-    if (alreadyHandled(message.channel_id, message.id)) return;
+    if (conversations.seen(message.channel_id, message.id)) return;
     const author = message.author;
     const guildId = message.guild_id;
     const target: Target = guildId
@@ -390,28 +379,14 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     if (access === "ignore") return;
 
     // Names self-heal from traffic, like server and channel names.
-    if (config.users?.[author.id]) {
-      const display = displayName(author);
-      deps.updateUser(author.id, (user) => {
-        let changed = false;
-        if (display && user.name !== display) {
-          user.name = display;
-          changed = true;
-        }
-        if (user.username !== author.username) {
-          user.username = author.username;
-          changed = true;
-        }
-        return changed;
-      });
-    }
+    healUser(deps, author.id, { name: displayName(author), username: author.username });
 
     const key = sessionKeyFor(target);
     const text = readableContent(message);
     // The slash commands are interactions; these are the same typed as text.
     const command = text.match(/^\/(\w+)\s*$/)?.[1];
     const answerCommand = async () => {
-      const answer = command && (await runCommand(command, commandContext(key)));
+      const answer = command && (await conversations.command(command, key));
       if (!answer) return false;
       await sendMessage(rest, message.channel_id, answer, { replyTo: message.id }).catch((error) => log.warn(`command reply failed: ${error}`));
       return true;
@@ -420,7 +395,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     // waiting behind a slow transcription.
     if (command === "stop") return void (await answerCommand());
 
-    const release = bursts.prepare(key);
+    const release = conversations.bursts.prepare(key);
     try {
       await keyedLane(lanes, key, async () => {
         if (await answerCommand()) return;
@@ -429,15 +404,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         if (!body.trim() && !media.images.length) return;
         // Ack now — the burst window delays the turn, not the receipt.
         void rest.request("PUT", `/channels/${message.channel_id}/messages/${message.id}/reactions/${encodeURIComponent(ACK_REACTION)}/@me`).catch(() => {});
-        bursts.enqueue(key, target, formatDiscordInboundPrompt(message, body, self!.id), media.images);
+        conversations.bursts.enqueue(key, target, formatDiscordInboundPrompt(message, body, self!.id), media.images);
       });
     } finally {
       release();
     }
-  }
-
-  function commandContext(sessionKey: string) {
-    return { gateway: deps.gateway, sessionKey, workspace: deps.workspace(), discardBurst: () => discardBurst(sessionKey), log };
   }
 
   /** The text with mentions spelled the way the person saw them: `<@123>` means
@@ -459,17 +430,8 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     return text.trim();
   }
 
-  /** Sender-level access: is this person allowed here at all? (mention gating is separate) */
-  function senderAccess(userId: string, guildId: string | undefined, config: ChannelConfig): "ok" | "pair" | "ignore" {
-    if (!guildId) return config.users?.[userId] ? "ok" : "pair";
-    // Unregistered server → surface a pairing request instead of silence.
-    if (!config.groups?.[guildId]) return "pair";
-    const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
-    return allowed.includes(userId) ? "ok" : "ignore";
-  }
-
   function checkAccess(message: GatewayMessageCreateDispatchData, config: ChannelConfig): "ok" | "pair" | "ignore" {
-    const access = senderAccess(message.author.id, message.guild_id, config);
+    const access = senderAccess(config, message.author.id, message.guild_id);
     if (access !== "ok" || !message.guild_id) return access;
     if (config.groups![message.guild_id]!.requireMention === false) return "ok";
     // A reply to the bot counts: answering it is talking to it.
@@ -519,26 +481,20 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   async function offerPairing(message: GatewayMessageCreateDispatchData) {
     const author = message.author;
     const guildId = message.guild_id;
-    const kind = guildId ? "group" : "dm";
-    const chatId = guildId ?? author.id;
-    // Checking for a pending request first keeps a persistent knocker from
-    // costing a picture download per message.
-    if (deps.pairing.find({ bot: name, kind, userId: author.id, chatId })) return;
-    const { name: senderName, disguised } = foldDisplayName(author.global_name ?? author.username);
-    const photo = guildId ? await picture("guild", guildId) : await picture("user", author.id, author.avatar);
-    const { request, isNew } = deps.pairing.request({
-      kind,
-      bot: name,
+    const request = await conversations.knock({
+      kind: guildId ? "group" : "dm",
       userId: author.id,
-      chatId,
+      chatId: guildId ?? author.id,
       chatTitle: guildId ? guilds.get(guildId)?.name : undefined,
       origin: guildId ? message.channel_id : undefined,
       username: author.username,
-      name: senderName,
-      disguised: disguised || undefined,
-      photo: photo && `data:image/png;base64,${photo.toString("base64")}`,
+      displayName: author.global_name ?? author.username,
+      photo: async () => {
+        const photo = guildId ? await picture("guild", guildId) : await picture("user", author.id, author.avatar);
+        return photo && `data:image/png;base64,${photo.toString("base64")}`;
+      },
     });
-    if (!isNew) return; // already pending; stay quiet instead of spamming
+    if (!request) return; // already pending; stay quiet instead of spamming
     log.info(`pairing request (${request.kind}) from ${author.id} (@${author.username})${guildId ? ` in server ${guildId}` : ""}`);
     // A server stays silent — the request just shows up in the dashboard.
     if (!guildId) {
@@ -567,7 +523,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
 
     // Same access policy as messages, minus the mention gate (a command or a
     // press is explicit).
-    if (senderAccess(user.id, guildId, config) !== "ok") {
+    if (senderAccess(config, user.id, guildId) !== "ok") {
       await respond({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: "This bot is private.", flags: MessageFlags.Ephemeral } });
       return;
     }
@@ -578,7 +534,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       // Answer within Discord's three seconds, then take the time the command
       // needs (/usage asks every provider).
       const acknowledged = await respond({ type: InteractionResponseType.DeferredChannelMessageWithSource });
-      const answer = (await runCommand(interaction.data.name, commandContext(sessionKey))) ?? "Unknown command.";
+      const answer = (await conversations.command(interaction.data.name, sessionKey)) ?? "Unknown command.";
       await answerCommand(rest, channelId, interaction, acknowledged, answer);
       return;
     }
@@ -587,7 +543,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       const data = interaction.data.custom_id;
       if (data.startsWith(BACKGROUND_STOP_PREFIX)) {
         await respond({ type: InteractionResponseType.DeferredMessageUpdate });
-        background.stop(sessionKeyFor(target), data);
+        conversations.stopBackground(sessionKeyFor(target), data);
         return;
       }
       if (data === STOP_BUTTON_ID) {
@@ -596,7 +552,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         await respond({ type: InteractionResponseType.DeferredMessageUpdate });
         const sessionKey = sessionKeyFor(target);
         log.info(`stop pressed in ${sessionKey}`);
-        discardBurst(sessionKey);
+        conversations.bursts.discard(sessionKey);
         await deps.gateway.interrupt(sessionKey);
         return;
       }
@@ -608,96 +564,32 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         await rest.request("PATCH", `/channels/${channelId}/messages/${interaction.message.id}`, { body: { components } })
           .catch((error) => log.warn(`could not disable pressed buttons: ${error}`));
       }
-      if (data.startsWith(FAILOVER_PREFIX)) return retryOnFallback(data, target);
+      if (data.startsWith(FAILOVER_PREFIX)) {
+        if (!conversations.retryOnFallback(data, target)) {
+          void sendMessage(rest, target.channelId, "⚠️ That retry is no longer on the table — send the message again.").catch(() => {});
+        }
+        return;
+      }
       // The marker on a line of its own is the dashboard's press prompt too, and
       // what lets the transcript draw it as a caption instead of as prose.
-      void runTurn(target, `[inline button pressed]\n${data}`, []);
+      void conversations.runTurn(target, `[inline button pressed]\n${data}`, []);
     }
   }
 
-  /** The person took one of the two ways out a failed turn offered: pick the
-   * dead turn up where it stopped, or run the original request from nothing —
-   * both on the models its plan never reached. */
-  function retryOnFallback(data: string, target: Target) {
-    const sessionKey = sessionKeyFor(target);
-    const offer = failovers.take(data, sessionKey);
-    if (!offer) {
-      void sendMessage(rest, target.channelId, "⚠️ That retry is no longer on the table — send the message again.").catch(() => {});
-      return;
-    }
-    const { replay, models, mode } = offer;
-    log.info(`manual failover in ${sessionKey}: ${mode} on ${models[0]!.model}`);
-    const restart = mode === "restart";
-    void runTurn(replay.target, restart ? replay.text : continuePrompt(offer.hiddenToolCalls), restart ? replay.images : [], {
-      models,
-      // A continue keeps the failed attempt: its tool calls are what the next
-      // model resumes from. Only a restart branches them away.
-      rewind: restart ? offer.rewind : undefined,
-    });
-  }
-
-  /** `retry` is set by a manual failover: its own model plan for this turn
-   * alone, and the failed attempt a restart branches away first. */
-  async function runTurn(target: Target, text: string, images: ImageContent[], retry?: TurnRetry, expectedThreadId?: string) {
-    const sessionKey = sessionKeyFor(target);
+  /** Open the chat for one turn: a status card under the message that
+   * triggered it, and replies threaded onto that message. */
+  function surface(target: Target): TurnSurface {
     const { channelId } = target;
-    const { tool, sent } = toolFor(sessionKey, channelId);
     const status = new DiscordTurnStatus(rest, channelId, target.triggerMessageId);
-
-    // Whatever owns this conversation: the person in a DM, the server in a
-    // server — where each channel and thread is a topic of its own.
-    const config = deps.botConfig();
-    const owner = target.guildId ? config?.groups?.[target.guildId] : config?.users?.[target.userId!];
-    // A thread sits in a channel, a channel in a category: innermost first.
-    const topics = target.guildId ? topicChain(owner, channelId) : [];
-    // Appends accumulate outermost→innermost: the owner's, then each topic's.
-    const appends = [owner, ...[...topics].reverse()].map((scope) => scope?.appendSystemPrompt).filter((a): a is string => !!a);
-    const autoRetry = await runChatTurn({
-      gateway: deps.gateway,
-      sessionKey,
-      text,
-      images,
-      retry,
-      replyTo: target.triggerMessageId,
-      incoming: {
-        expectedThreadId,
-        createBackground: (options) => background.create(sessionKey, options, (stopId) => status.attach(options.title, stopId)),
-        workspaceHint: deps.workspace(),
-        // Most specific first: a thread's model settings beat its channel's,
-        // which beat its category's and its server's.
-        modelScopes: [...topics, owner],
-        appends,
-        customTools: [tool],
-        runtime: {
-          channel: "discord",
-          conversation: describeConversation(target, config),
-          capabilities: [
-            "Discord markdown (headings up to ###, lists, code blocks, ||spoilers||; tables arrive as monospace blocks)",
-            "buttons",
-            "files",
-            "reactions — via the discord tool",
-          ],
-        },
-      },
-      sent,
+    return {
       status,
+      attach: (title, stopId) => status.attach(title, stopId),
       send: (markdown, options) => sendMessage(rest, channelId, markdown, {
         replyTo: options.reply ? target.triggerMessageId : undefined,
         buttons: options.buttons,
         silent: options.silent,
       }),
-      failovers,
-      replay: { target, text, images },
-      autoFailover: deps.autoFailover,
-      log,
-    });
-    // A turn of its own, with its own status message and its own failure
-    // handling (including, if it comes to it, the next failover — the plan it
-    // carries is strictly shorter, so the chain ends).
-    if (autoRetry) await runTurn(target, autoRetry.text, [], { models: autoRetry.models });
-    else if (deps.gateway.threads.current(sessionKey)?.archiveRequested) {
-      await archive(sessionKey).catch((error) => log.warn(`archive remains pending in ${sessionKey}: ${error}`));
-    }
+    };
   }
 
   function describeConversation(target: Target, config: ChannelConfig | undefined): string {
@@ -769,7 +661,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     const current = deps.gateway.threads.current(sessionKey);
     if (current?.archiveRequested) deps.gateway.threads.update(current.id, { archiveRequested: false });
     await maintainGroupRegistry(target.guildId!, target.channelId);
-    void runTurn(target, text, []).catch((error) => log.error(`remote turn in ${sessionKey} failed: ${error}`));
+    void conversations.runTurn(target, text, []).catch((error) => log.error(`remote turn in ${sessionKey} failed: ${error}`));
   }
 
   async function archive(sessionKey: string) {
@@ -795,15 +687,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     const channel = await rest.request<APIChannel>("POST", "/users/@me/channels", { body: { recipient_id: userId } });
     dmChannels.set(userId, channel.id);
     return channel.id;
-  }
-
-  /** Start a turn nobody typed. By default it resumes a conversation a restart
-   * cut off. */
-  async function wake(sessionKey: string, text = WAKE_PROMPT, threadId?: string) {
-    const target = await targetOf(sessionKey);
-    if (!target) throw new Error(`cannot wake ${sessionKey}: unrecognized session key`);
-    log.info(`waking ${sessionKey}`);
-    await runTurn(target, text, [], undefined, threadId);
   }
 
   async function send(sessionKey: string, markdown: string, options?: ReplyOptions) {
@@ -841,7 +724,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
 
   async function stop() {
     listening();
-    bursts.flushAll();
+    conversations.stop();
     clearInterval(archiveTimer);
     clearInterval(watermarkTimer);
     gateway.stop();

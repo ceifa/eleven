@@ -9,25 +9,34 @@ import test from "node:test";
    be holding the launcher (the screen a session lands on), which answered "open
    this conversation" with an empty composer titled NEW THREAD.
 
-   The app is one script that boots itself against a live daemon, so what can be
-   checked here is its source: that the pane is painted on the way *into* the
-   read rather than only on the way out. */
+   The app is a set of modules that boot themselves against a live daemon, so
+   what can be checked here is their source: that the pane is painted on the way
+   *into* the read rather than only on the way out. */
 
 const PUBLIC_DIR = join(import.meta.dirname, "..", "src", "dashboard", "public");
-const app = readFileSync(join(PUBLIC_DIR, "app.js"), "utf8");
+/** Each check reads the module that holds the code it is about. */
+const source = (name: string) => readFileSync(join(PUBLIC_DIR, name), "utf8");
+const app = source("app.js"); // the boot
+const pane = source("thread-pane.js"); // reading a thread, painting its pane
+const head = source("thread-head.js"); // the thread's head and its menu
+const threads = source("threads.js"); // the threads view and its list
+const phone = source("phone.js");
+const router = source("router.js");
+const socket = source("socket.js");
+const modals = source("modals.js");
 
 /** The body of a top-level function, from its signature to the closing brace in
  *  column one — the file's own formatting is what says where a function ends. */
 function functionBody(source: string, signature: string) {
   const start = source.indexOf(signature);
-  assert.ok(start >= 0, `${signature} should still exist in app.js`);
+  assert.ok(start >= 0, `${signature} should still exist in the module that held it`);
   const end = source.indexOf("\n}\n", start);
   assert.ok(end > start, `${signature} should be a top-level function`);
   return source.slice(start, end);
 }
 
 test("the pane stops showing the last screen before the read, not after it", () => {
-  const open = functionBody(app, "async function openThread(id)");
+  const open = functionBody(pane, "async function openThread(id)");
   const painted = open.indexOf("paneLoading(id)");
   const read = open.indexOf("withLoading(read)");
   assert.ok(painted >= 0, "openThread should hand the pane over to a placeholder");
@@ -41,7 +50,7 @@ test("the pane stops showing the last screen before the read, not after it", () 
 });
 
 test("a read that comes back empty puts the pane back", () => {
-  const open = functionBody(app, "async function openThread(id)");
+  const open = functionBody(pane, "async function openThread(id)");
   const failure = open.slice(open.indexOf("withLoading(read)"));
   // Without this the placeholder is the last thing painted and stays up for
   // good: a thread that was deleted, or a phone that lost the tunnel mid-tap,
@@ -50,7 +59,7 @@ test("a read that comes back empty puts the pane back", () => {
 });
 
 test("the placeholder cannot be the launcher wearing a spinner", () => {
-  const loading = functionBody(app, "function paneLoading(id)");
+  const loading = functionBody(pane, "function paneLoading(id)");
   // is-composing is what the launcher paints itself with; leaving it on would
   // keep its mobile padding and its "not a thread" state over the placeholder.
   assert.match(loading, /classList\.remove\("is-composing", "is-running"\)/);
@@ -70,7 +79,7 @@ test("the placeholder cannot be the launcher wearing a spinner", () => {
 });
 
 test("a conversation read before opens as it was, not as a spinner", () => {
-  const loading = functionBody(app, "function paneLoading(id)");
+  const loading = functionBody(pane, "function paneLoading(id)");
   // The last read is painted first, and whole — the placeholder is only for a
   // thread this page has never read.
   const seen = loading.indexOf("seenThreads.get(id)");
@@ -82,7 +91,7 @@ test("a conversation read before opens as it was, not as a spinner", () => {
 
   // What is remembered is a read that is still current: taken after the check
   // that throws away an answer a newer open has overtaken.
-  const open = functionBody(app, "async function openThread(id)");
+  const open = functionBody(pane, "async function openThread(id)");
   const stale = open.indexOf("if (!data || seq !== openSeq)");
   assert.ok(stale >= 0 && stale < open.indexOf("rememberThread(data)"));
 });
@@ -101,13 +110,13 @@ test("a cold start paints what the page knew before anything is read", () => {
   // Only the unfiltered list is a first frame: opening on an old search's
   // answer would be wrong.
   assert.match(boot, /restored\.threads && !threadsQuery\(\)/);
-  assert.match(functionBody(app, "async function refreshThreads()"), /if \(!threadsQuery\(\)\) keep\("threads", threads\);/);
+  assert.match(functionBody(threads, "async function refreshThreads()"), /if \(!threadsQuery\(\)\) keep\("threads", threads\);/);
 
   // And the list view only waits for the network when it has nothing to show.
-  const view = functionBody(app, "async function viewThreads()");
+  const view = functionBody(threads, "async function viewThreads()");
   assert.match(view, /const reading = refreshThreads\(\);\s*if \(!state\.threads\.length\) await reading;/);
   // A deleted thread leaves the device too.
-  assert.match(functionBody(app, "async function deleteThread(id)"), /forgetThread\(id\)/);
+  assert.match(functionBody(head, "async function deleteThread(id)"), /forgetThread\(id\)/);
 });
 
 test("a thread painted before its pane is on screen still opens at the newest message", () => {
@@ -115,13 +124,13 @@ test("a thread painted before its pane is on screen still opens at the newest me
   // a thread read before is painted on the tap — before that. A hidden scroller
   // has no height, so scrollTop = scrollHeight lands on 0; the read after it
   // then saw a reader "scrolled up" at the first message and kept them there.
-  const render = functionBody(app, "function renderThreadPane()");
+  const render = functionBody(pane, "function renderThreadPane()");
   assert.match(render, /bottomOnShow = keepScroll === null && !messages\.clientHeight;/);
   // The wish survives the read that lands before the pane shows…
   assert.match(render, /const keepScroll = !opened && prev && !bottomOnShow && !atBottom\(prev\)/);
   // …and is granted the moment the transcript has a size.
   assert.match(render, /transcriptShown\.observe\(messages\)/);
-  const observer = app.slice(app.indexOf("const transcriptShown = new ResizeObserver("));
+  const observer = pane.slice(pane.indexOf("const transcriptShown = new ResizeObserver("));
   assert.match(observer.slice(0, observer.indexOf("\n});\n")), /if \(!bottomOnShow \|\| !el\?\.clientHeight\) return;[\s\S]*el\.scrollTop = el\.scrollHeight;/);
 });
 
@@ -129,7 +138,7 @@ test("the document is put back when a phone leaves it scrolled under the tab bar
   // iOS scrolls the window to show a focused field and can leave it there once
   // the keyboard is gone: the fixed tab bar then floats over an empty strip
   // until the reader drags the page home by hand.
-  const home = functionBody(app, "function homeDocument()");
+  const home = functionBody(phone, "function homeDocument()");
   assert.match(home, /if \(typing\(\)\) return;/);
   assert.match(home, /window\.scrollTo\(0, 0\)/);
   for (const hook of [
@@ -137,18 +146,18 @@ test("the document is put back when a phone leaves it scrolled under the tab bar
     /window\.addEventListener\("scroll", homeDocument/,
     /viewport\?\.addEventListener\("resize", homeDocument\)/,
     /window\.addEventListener\("pageshow", homeDocument\)/,
-  ]) assert.match(app, hook);
+  ]) assert.match(phone, hook);
 });
 
 test("a phone opened cold lands on the launcher, and the Threads tab still lands on the list", () => {
   // The phone shows the list or the pane, never both, and it used to open on
   // the list: the box a session lands on was a tap away from every launch.
-  const view = functionBody(app, "async function viewThreads()");
+  const view = functionBody(threads, "async function viewThreads()");
   const idle = view.slice(view.lastIndexOf("} else {"));
   assert.match(idle, /newThreadDialog\(\);\s*[\s\S]*if \(firstScreen\) showPane\(\);/);
   // Only the screen the page was opened on: coming back to Threads from another
   // tab is looking for a thread.
-  const render = functionBody(app, "async function render()");
+  const render = functionBody(router, "async function render()");
   assert.match(render, /await route\(\);\s*firstScreen = false;/);
 });
 
@@ -157,7 +166,7 @@ test("a turn starting does not take away the message that opened it", () => {
   // live record is the only place the first message exists until the turn
   // ends. When the session was slow to load, turn-start landed after the read
   // and emptied the live region — the message vanished as soon as it was sent.
-  const ws = app.slice(app.indexOf('if (message.type === "turn-start" || message.type === "turn-rewound")'));
+  const ws = socket.slice(socket.indexOf('if (message.type === "turn-start" || message.type === "turn-rewound")'));
   const handler = ws.slice(0, ws.indexOf("\n    }\n"));
   assert.doesNotMatch(handler, /state\.live = \[\];/);
   assert.match(handler, /state\.live = \(message\.items \?\? \[\]\)/);
@@ -168,7 +177,7 @@ test("a turn starting does not take away the message that opened it", () => {
 });
 
 test("the request inspector identifies logical SDK invocations instead of calling them wire requests", () => {
-  const open = functionBody(app, "async function openRequestModal(request)");
+  const open = functionBody(modals, "async function openRequestModal(request)");
   assert.match(open, /entry\.payload\?\.runtime === "claude-code"/);
   assert.match(open, /"SDK invocation"/);
   assert.match(open, /not an individual provider request/);
@@ -179,14 +188,14 @@ test("the open thread's head is called what its card in the list is called", () 
   // first message for its second line. The head used to lead with that first
   // message, so the thread you clicked was not the name you then read.
   const heads = [
-    functionBody(app, "function buildThreadCard(thread, older)"),
-    functionBody(app, "function threadHeader(thread)"),
-    functionBody(app, "function paneLoading(id)"),
-    functionBody(app, "function sheetInfo(thread)"),
+    functionBody(threads, "function buildThreadCard(thread, older)"),
+    functionBody(head, "function threadHeader(thread)"),
+    functionBody(pane, "function paneLoading(id)"),
+    functionBody(head, "function sheetInfo(thread)"),
   ];
   for (const body of heads) {
     assert.match(body, /threadName\((thread|card)\)/);
     assert.doesNotMatch(body, /class: "(thread-head-title|sheet-info-title)[^"]*" \}, (thread|card\?)\.title/);
   }
-  assert.match(app, /const headSignature = \(thread\) =>\s*`\$\{threadName\(thread\)\}/);
+  assert.match(pane, /const headSignature = \(thread\) =>\s*`\$\{threadName\(thread\)\}/);
 });

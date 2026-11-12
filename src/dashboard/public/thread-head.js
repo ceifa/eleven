@@ -41,7 +41,7 @@ function threadHeader(thread) {
         // The conversation in words; the raw session key stays one hover away.
         h("span", { class: "truncate", title: thread.sessionKey }, withoutChannelPrefix(thread.conversation, thread.sessionKey)),
         h("span", { class: "meta-sep" }, "·"),
-        h("span", { class: "text-warning shrink-0" }, thread.workspace),
+        h("span", { class: "shrink-0" }, thread.workspace),
         // A phone's head has room for where the thread lives and whether it is
         // working, and nothing else: the model and the meter go to the desktop.
         h("span", { class: "head-working" }, "working"),

@@ -389,6 +389,17 @@ test("token usage is read off the transcript, per day, per model and per thread"
     assert.equal(report.waste.idleResponses, 1);
     assert.equal(report.waste.modelSwitchResponses, 1);
     assert.ok(report.byDay.length >= 1 && report.byDay.length <= 2);
+    // The page draws its axis from the daemon's calendar, not the browser's:
+    // the days are named here, in the same form the buckets are filed under.
+    assert.match(report.today, /^\d{4}-\d{2}-\d{2}$/);
+    assert.match(report.sinceDay, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(report.sinceDay <= report.byDay[0].day && report.byDay.at(-1).day <= report.today);
+    assert.equal(report.oldestDay, report.byDay[0].day);
+
+    // Ranked by price on request, and nothing else is a ranking.
+    const byCost = JSON.parse((await get(`${base}/api/usage/tokens?days=7&by=cost`)).body.toString());
+    assert.equal(byCost.byThread[0].id, thread.id);
+    assert.equal((await get(`${base}/api/usage/tokens?days=7&by=weight`)).status, 400);
 
     // The same numbers ride along with the thread the transcript belongs to.
     const detail = JSON.parse((await get(`${base}/api/threads/${thread.id}`)).body.toString());

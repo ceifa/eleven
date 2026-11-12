@@ -1,6 +1,6 @@
 import { runtimeTools } from "../../config.ts";
 import { collectProviderUsage, usageLogins } from "../../provider-usage.ts";
-import { buildUsageReport, startOfLocalDay } from "../../threads/usage.ts";
+import { buildUsageReport, localDay, startOfLocalDay } from "../../threads/usage.ts";
 import { displayTitle } from "../../threads/title.ts";
 import { modelRuntime } from "../../agent/pi.ts";
 import { CLAUDE_CODE_PROVIDER } from "../../agent/claude-code.ts";
@@ -72,6 +72,12 @@ export function modelRoutes({ config, gateway, identityOf }: DashboardContext): 
         const raw = url.searchParams.get("days");
         const days = raw === null ? DEFAULT_USAGE_DAYS : Number(raw);
         if (!Number.isInteger(days) || days <= 0 || days > MAX_USAGE_DAYS) throw new ApiError(400, "days must be an integer between 1 and 3650");
+        // Which threads make the list depends on what "heaviest" means to the
+        // page asking: a thread that is all cache reads tops the token count
+        // and barely registers on price, and the cut below would drop the
+        // dearest threads from a list ranked by tokens.
+        const by = url.searchParams.get("by") ?? "tokens";
+        if (by !== "tokens" && by !== "cost") throw new ApiError(400, "by must be tokens or cost");
         const report = await buildUsageReport(
           gateway.threads.list().map((thread) => ({
             id: thread.id,
@@ -84,7 +90,18 @@ export function modelRoutes({ config, gateway, identityOf }: DashboardContext): 
         );
         // The long tail of threads is dozens of rows nobody reads; the total
         // above already counts them.
-        return send(200, { ...report, days, byThread: report.byThread.slice(0, USAGE_THREAD_LIMIT) });
+        const ranked = by === "cost" ? [...report.byThread].sort((a, b) => b.cost - a.cost) : report.byThread;
+        // The days are named here, on the daemon's calendar: the page draws
+        // an axis the buckets have to line up with, and a browser in another
+        // timezone would name the same instants a day off.
+        return send(200, {
+          ...report,
+          days,
+          sinceDay: localDay(report.since),
+          oldestDay: report.oldestAt === undefined ? undefined : localDay(report.oldestAt),
+          today: localDay(Date.now()),
+          byThread: ranked.slice(0, USAGE_THREAD_LIMIT),
+        });
       },
     },
     {

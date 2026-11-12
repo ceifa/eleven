@@ -35,7 +35,10 @@ function fmtTokens(n) {
   return String(Math.round(n));
 }
 
-const fmtMoney = (n) => `$${n.toLocaleString("en-US", { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
+/** Cents under a hundred dollars, none above — and always the same number of
+ *  decimals at a given size, so a column of prices lines up: "$24.00" over
+ *  "$24.34", not "$24" over "$24.34". */
+const fmtMoney = (n) => `$${n.toLocaleString("en-US", n < 100 ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 0 })}`;
 const fmtPercent = (ratio) => `${Math.round(ratio * 100)}%`;
 
 export { timeAgo, dayLabel, clock, fmtBytes, fmtTime, fmtTokens, fmtMoney, fmtPercent };

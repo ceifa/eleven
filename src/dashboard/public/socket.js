@@ -5,7 +5,7 @@
 import { MATCH_CHARS } from "./live-turn.js";
 import { keep } from "./snapshot.js";
 import { sameMessage } from "./message-display.js";
-import { state } from "./state.js";
+import { state, view } from "./state.js";
 import { cachedGet, invalidate } from "./api.js";
 import { toast } from "./ui.js";
 import { applyPairingBadge, pulse, stripError, stripFlash } from "./chrome.js";
@@ -207,7 +207,17 @@ async function onConfigChanged() {
   // Every view but the threads one renders from config.
   if (onThreadsView()) return;
   const fresh = await cachedGet("/config").catch(() => null);
-  if (fresh && JSON.stringify(fresh) !== JSON.stringify(state.config)) render();
+  if (!fresh || JSON.stringify(fresh) === JSON.stringify(state.config)) return;
+  // Fields save when they are left, so one being typed in holds text nothing
+  // else has yet — and the config changes on its own whenever a new topic
+  // speaks. Rebuilding now would throw that text away; wait for the field to
+  // be left, and for its own save to land, then look again.
+  const field = document.activeElement;
+  if (view.contains(field) && field.matches("input:not([type=checkbox]), textarea, select")) {
+    field.addEventListener("blur", () => setTimeout(onConfigChanged, 800), { once: true });
+    return;
+  }
+  render();
 }
 
 export { connectWs, refreshOverview };

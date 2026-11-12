@@ -17,8 +17,8 @@ async function viewSettings() {
 
   view.replaceChildren(
     pageTitle("Settings"),
-    h("div", { class: "card bg-base-200 border max-w-3xl mb-4" },
-      h("div", { class: "card-body gap-3" },
+    h("section", { class: "section max-w-3xl" },
+      h("div", { class: "flex flex-col gap-3" },
         sectionLabel("Dashboard"),
         h("div", { class: "grid-2 gap-4" },
           labeled("Host", h("input", { class: "input input-sm w-full font-mono", value: c.dashboard.host,
@@ -30,8 +30,8 @@ async function viewSettings() {
         h("p", { class: "text-xs opacity-50" }, "Applies on the next daemon restart."),
       ),
     ),
-    h("div", { class: "card bg-base-200 border max-w-3xl mb-4" },
-      h("div", { class: "card-body gap-3" },
+    h("section", { class: "section max-w-3xl" },
+      h("div", { class: "flex flex-col gap-3" },
         sectionLabel("Sessions"),
         h("div", { class: "grid-2 gap-4" },
           labeled("Days idle before a new thread",
@@ -46,8 +46,8 @@ async function viewSettings() {
       ),
     ),
     installCard(),
-    h("div", { class: "card bg-base-200 border max-w-3xl" },
-      h("div", { class: "card-body gap-3" },
+    h("section", { class: "section max-w-3xl" },
+      h("div", { class: "flex flex-col gap-3" },
         sectionLabel("Voice transcription"),
         labeled("Command",
           h("textarea", { class: "textarea w-full font-mono text-xs", rows: "4", placeholder: "whisper-cli --model … {{file}}",
@@ -78,8 +78,8 @@ function installCard() {
       await prompt.prompt().catch(() => {});
     },
   }, "Install");
-  return h("div", { class: "card bg-base-200 border max-w-3xl mb-4" },
-    h("div", { class: "card-body gap-3" },
+  return h("section", { class: "section max-w-3xl" },
+    h("div", { class: "flex flex-col gap-3" },
       sectionLabel("App"),
       !installed && installPrompt ? button : null,
       h("p", { class: "text-xs opacity-50" },

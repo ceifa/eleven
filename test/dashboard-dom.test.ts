@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { syncChildren } from "../src/dashboard/public/dom.js";
+import { replaceTail, syncChildren } from "../src/dashboard/public/dom.js";
 
 /** The four operations syncChildren performs, counted. Enough of a DOM to run
  *  the algorithm and to see what it costs — which is the whole point: a wrong
@@ -12,6 +12,11 @@ class Node {
 
   constructor(name: string) {
     this.name = name;
+  }
+
+  /** Two nodes read the same when they are called the same. */
+  isEqualNode(other: Node) {
+    return this.name === other.name;
   }
 
   get nextSibling(): Node | undefined {
@@ -128,4 +133,61 @@ test("a list emptied and refilled ends up with exactly what was asked for", () =
   for (const name of ["x", "y"]) rows.set(name, new Node(name));
   syncChildren(container as never, pick("x", "r3", "y"));
   assert.deepEqual(container.names, ["x", "r3", "y"]);
+});
+
+/* replaceTail: a reply being streamed is parsed again from the top on every
+   delta, and all but its last block comes out reading exactly as it did. */
+
+/** A container holding blocks that read as `names`. */
+function streamedSoFar(...names: string[]) {
+  const container = new Container();
+  for (const name of names) container.insertBefore(new Node(name), undefined);
+  container.inserts = 0;
+  return container;
+}
+const parsed = (...names: string[]) => names.map((name) => new Node(name));
+
+test("a delta that grows the last paragraph replaces the last paragraph", () => {
+  const container = streamedSoFar("p:one", "ul:list", "p:thr");
+  const before = container.children.slice(0, 2);
+  replaceTail(container, parsed("p:one", "ul:list", "p:three"));
+  assert.deepEqual(container.names, ["p:one", "ul:list", "p:three"]);
+  // The blocks that did not change are the very nodes that were there.
+  assert.deepEqual(container.children.slice(0, 2), before);
+  assert.equal(container.removals, 1);
+  assert.equal(container.inserts, 1);
+});
+
+test("a delta that changes nothing on the page touches nothing", () => {
+  const container = streamedSoFar("p:one", "p:two");
+  replaceTail(container, parsed("p:one", "p:two"));
+  assert.equal(container.touched, 0);
+});
+
+test("a delta that starts a new block only adds it", () => {
+  const container = streamedSoFar("p:one");
+  replaceTail(container, parsed("p:one", "pre:code"));
+  assert.deepEqual(container.names, ["p:one", "pre:code"]);
+  assert.equal(container.removals, 0);
+  assert.equal(container.inserts, 1);
+});
+
+test("a delta that rewrites an earlier block replaces from that block on", () => {
+  // A blank line arriving turns a tight list loose: the list is not the node
+  // it was, and neither is anything after it.
+  const container = streamedSoFar("p:one", "ul:tight", "p:tail");
+  const first = container.children[0];
+  replaceTail(container, parsed("p:one", "ul:loose", "p:tail"));
+  assert.deepEqual(container.names, ["p:one", "ul:loose", "p:tail"]);
+  assert.equal(container.children[0], first);
+  assert.equal(container.removals, 2);
+  assert.equal(container.inserts, 2);
+});
+
+test("a reply that got shorter loses the blocks it no longer has", () => {
+  const container = streamedSoFar("p:one", "p:two", "p:three");
+  replaceTail(container, parsed("p:one"));
+  assert.deepEqual(container.names, ["p:one"]);
+  assert.equal(container.removals, 2);
+  assert.equal(container.inserts, 0);
 });

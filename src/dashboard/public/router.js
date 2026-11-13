@@ -6,7 +6,7 @@ import { keep } from "./snapshot.js";
 import { state, view } from "./state.js";
 import { cachedGet, signIn, SignInExpired } from "./api.js";
 import { h, withLoading } from "./ui.js";
-import { applyPairingBadge } from "./chrome.js";
+import { applyPairingBadge, syncPaneChrome } from "./chrome.js";
 
 /* ---------- router ---------- */
 
@@ -45,6 +45,8 @@ async function render() {
   } catch (error) {
     view.replaceChildren(loadFailure(error));
   }
+  // Whatever is on the page now, the threads view's panes may not be.
+  syncPaneChrome();
   for (const id of openCollapses) {
     const input = view.querySelector(`.collapse[data-collapse="${CSS.escape(id)}"] > input`);
     if (input) input.checked = true;

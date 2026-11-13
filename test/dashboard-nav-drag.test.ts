@@ -168,7 +168,9 @@ function pageSwipe() {
       getElementById: () => ({ addEventListener() {} }),
       addEventListener: (name: string, listener: (event: any) => void) => listeners.set(name, listener),
     },
-    threadsLayout: () => ({ classList: { contains: () => open, remove: () => { open = false; } } }),
+    threadsLayout: () => ({ classList: { contains: () => open } }),
+    // The one place the pane's class is written (and the chrome told of it).
+    markPane: (next: boolean) => { open = next; },
     history: { state: { pane: true }, back: () => { backs++; } },
     setTimeout: (callback: () => void) => timers.push(callback),
   });

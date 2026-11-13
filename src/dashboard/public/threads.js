@@ -7,9 +7,10 @@ import { syncChildren } from "./dom.js";
 import { keep } from "./snapshot.js";
 import { state, view } from "./state.js";
 import { api } from "./api.js";
-import { FILTER_ICON, h, PLUS_ICON, SEARCH_ICON, toast } from "./ui.js";
+import { FILTER_ICON, h, PLUS_ICON, SEARCH_ICON, toast, whenIdle } from "./ui.js";
 import { timeAgo } from "./format.js";
 import { channelSource, threadName } from "./channels.js";
+import { syncPaneChrome } from "./chrome.js";
 import { firstScreen, onThreadsView } from "./router.js";
 import { isThreadLive, seedRunning } from "./running.js";
 import { scrollToBottom } from "./transcript.js";
@@ -220,6 +221,28 @@ function olderToggle(sessionKey, count, open) {
   return node;
 }
 
+/* The column is built a screenful at a time. The first time a card is drawn it
+   is styled and laid out whole, on screen or not, and five hundred of them at
+   once are most of what a cold start spends before it can be touched — for a
+   list of which a dozen rows are in view, or, on a phone that opens on the
+   launcher, none. So the first rows are drawn now and the rest follow in
+   pieces while the page is idle; a moment later the whole list is there to
+   scroll. The count only grows: a card already drawn is kept (cardCache), and
+   putting it back costs nothing like drawing it did. */
+const FIRST_LIST_ROWS = 30;
+const MORE_LIST_ROWS = 40;
+let listRows = FIRST_LIST_ROWS;
+let listGrowing = false;
+function growThreadList() {
+  if (listGrowing) return;
+  listGrowing = true;
+  whenIdle(() => {
+    listGrowing = false;
+    listRows += MORE_LIST_ROWS;
+    renderThreadList();
+  });
+}
+
 function renderThreadList() {
   const list = document.getElementById("thread-list");
   if (!list) return;
@@ -227,7 +250,12 @@ function renderThreadList() {
   const rows = [];
   const shown = new Set();
   const groups = new Set();
+  let more = false;
   for (const group of groupThreads(state.threads)) {
+    if (rows.length >= listRows) {
+      more = true;
+      break;
+    }
     const [head, ...older] = group;
     // The generation you are reading is why its conversation is on screen —
     // never leave it folded away behind a click.
@@ -254,6 +282,7 @@ function renderThreadList() {
       state.query || state.filterSource || state.workspaceFilter ? "Nothing matches." : "No threads yet."));
   }
   syncChildren(list, rows);
+  if (more) growThreadList();
 }
 
 /**
@@ -371,6 +400,8 @@ async function viewThreads() {
       h("div", { class: "flex-1 min-w-0 flex flex-col", id: "thread-pane" }),
     ),
   );
+  // A layout just built is showing its list, whatever the one before it showed.
+  syncPaneChrome();
   renderThreadList();
   readAheadThreads();
   // #/threads/<id> names a thread directly — a reload, a bookmark, a link from

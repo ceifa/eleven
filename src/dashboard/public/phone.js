@@ -1,6 +1,7 @@
 /* The phone, where the thread list and a conversation are two screens: moving
    between them, the swipe back, and a viewport the keyboard slides over. */
 
+import { syncPaneChrome } from "./chrome.js";
 import { navDrag } from "./nav-drag.js";
 import { h, isPhone } from "./ui.js";
 import { scrollToBottom } from "./transcript.js";
@@ -8,7 +9,12 @@ import { scrollToBottom } from "./transcript.js";
 // On mobile the list and the conversation share one screen; these swap between
 // them (a no-op on desktop, where both panes are always visible side by side).
 const threadsLayout = () => document.getElementById("threads-layout");
-const showPane = () => threadsLayout()?.classList.add("pane-open");
+/** The one place the pane's class changes, so the chrome hears of it at once. */
+function markPane(open) {
+  threadsLayout()?.classList.toggle("pane-open", open);
+  syncPaneChrome();
+}
+const showPane = () => markPane(true);
 
 /**
  * Open the conversation pane over the list — and, on a phone, record that as a
@@ -85,7 +91,7 @@ function setPane(open, { animate = true } = {}) {
   paneHeading = open;
   const apply = () => {
     paneHeading = undefined;
-    layout.classList.toggle("pane-open", open);
+    markPane(open);
   };
   if (animate) slide(open ? "forward" : "back", apply);
   else apply();
@@ -128,7 +134,7 @@ function settleSwipe(back) {
     if (back) {
       // Closed here, directly, rather than through setPane: the finger already
       // did the sliding. popstate and hashchange then find nothing left to do.
-      threadsLayout()?.classList.remove("pane-open");
+      markPane(false);
       if (history.state?.pane) history.back();
     }
     dropSwipe();

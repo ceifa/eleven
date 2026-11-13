@@ -1,6 +1,5 @@
 import { open, stat } from "node:fs/promises";
-import { StringDecoder } from "node:string_decoder";
-import { lruTouch } from "../util.ts";
+import { keyedLane, lruTouch } from "../util.ts";
 
 /**
  * Token accounting, read straight off pi's session transcripts.
@@ -13,10 +12,11 @@ import { lruTouch } from "../util.ts";
  * job of this file is to walk them cheaply.
  *
  * Cheaply matters, because a session file can be tens of megabytes of tool
- * results. Like search.ts, this reads a block at a time and only parses a line
- * that has the substring worth parsing for — a whole history scans in about a
- * second. Results are memoized per file *and size*, so an appended session
- * simply misses and gets rescanned.
+ * results, and a history is hundreds of them. So the bytes are searched as
+ * bytes, and only a line that has the substring worth parsing for is ever
+ * turned into text. And a session file only grows: what a scan found is kept
+ * per file with the offset it reached, so the next read walks what was
+ * appended since and nothing else.
  */
 
 /** Read size — the same tradeoff search.ts makes: a few syscalls per file. */
@@ -25,8 +25,11 @@ const CHUNK = 256 * 1024;
  *  result, and holding it whole would cost more than the sample is worth. */
 const MAX_LINE = 4 << 20;
 /** Only a line carrying this is worth JSON.parse. */
-const USAGE_MARK = '"usage"';
-const MAX_CACHED_FILES = 512;
+const USAGE_MARK = Buffer.from('"usage"');
+const NEWLINE = 0x0a;
+/** Well past any thread count the store reaches: a cap under it makes every
+ *  report evict the files it is about to ask for again, and none of them hit. */
+const MAX_CACHED_FILES = 4096;
 
 /**
  * Anthropic's prompt cache expires five minutes after the last write, and
@@ -175,72 +178,120 @@ export function mergeWaste(into: CacheWaste, from: CacheWaste): CacheWaste {
   return into;
 }
 
-const cache = new Map<string, UsageSample[]>();
+/** What a scan of one file has found so far, and how far into it that is. */
+interface ScannedFile {
+  /** Bytes read through the last complete line. */
+  offset: number;
+  samples: UsageSample[];
+}
+const cache = new Map<string, ScannedFile>();
+// A report and a thread read can want the same file at once; one scan answers both.
+const lanes = new Map<string, Promise<unknown>>();
 
 /**
  * Every usage-bearing entry in a session file, oldest first. A missing or
  * unreadable file yields nothing: a thread whose transcript has been collected
  * still exists, it just has no numbers left to report.
+ *
+ * The array is shared with the cache: read it, don't change it.
  */
-export async function readSessionUsage(sessionFile: string): Promise<UsageSample[]> {
-  let size: number;
-  try {
-    size = (await stat(sessionFile)).size;
-  } catch {
-    return [];
-  }
-  const key = `${sessionFile}\0${size}`;
-  const cached = lruTouch(cache, key);
-  if (cached) return cached;
+export function readSessionUsage(sessionFile: string): Promise<UsageSample[]> {
+  return keyedLane(lanes, sessionFile, async () => {
+    let size: number;
+    try {
+      size = (await stat(sessionFile)).size;
+    } catch {
+      return [];
+    }
+    let known = lruTouch(cache, sessionFile);
+    if (known && known.offset > size) known = undefined; // truncated or replaced — start over
+    if (known?.offset === size) return known.samples;
 
-  const samples = await scan(sessionFile);
-  cache.set(key, samples);
-  if (cache.size > MAX_CACHED_FILES) cache.delete(cache.keys().next().value!);
-  return samples;
+    const scanned = await scan(sessionFile, known?.offset ?? 0);
+    if (!scanned) return known?.samples ?? [];
+    // A new array rather than a push: the old one may still be in a caller's hands.
+    const samples = scanned.samples.length || !known ? [...(known?.samples ?? []), ...scanned.samples] : known.samples;
+    cache.set(sessionFile, { offset: scanned.offset, samples });
+    if (cache.size > MAX_CACHED_FILES) cache.delete(cache.keys().next().value!);
+    // A last line the writer has not ended yet counts now and is read again
+    // next time, when it is whole — so it is answered, never remembered.
+    return scanned.tail.length ? [...samples, ...scanned.tail] : samples;
+  });
 }
 
-async function scan(sessionFile: string): Promise<UsageSample[]> {
-  const samples: UsageSample[] = [];
+/**
+ * Walk a file from `from` (the start of a line) to its end. `samples` are the
+ * ones on complete lines and `offset` is where the last of those lines ends;
+ * `tail` is whatever an unterminated last line already held.
+ */
+async function scan(sessionFile: string, from: number): Promise<{ samples: UsageSample[]; tail: UsageSample[]; offset: number } | undefined> {
   let handle;
   try {
     handle = await open(sessionFile, "r");
   } catch {
-    return samples;
+    return undefined;
   }
+  const samples: UsageSample[] = [];
+  let offset = from;
+  // The line the last block ended in the middle of, in the pieces it came in.
+  let carry: Buffer[] = [];
+  let carried = 0;
+  // A line no message would ever be: its pieces are dropped, and so is the
+  // rest of it when the newline finally comes.
+  let oversized = false;
   try {
     const buffer = Buffer.allocUnsafe(CHUNK);
-    const decoder = new StringDecoder("utf8");
-    let carry = "";
-    for (;;) {
-      const { bytesRead } = await handle.read(buffer, 0, CHUNK);
+    for (let position = from; ; ) {
+      const { bytesRead } = await handle.read(buffer, 0, CHUNK, position);
       if (!bytesRead) break;
-      const text = decoder.write(buffer.subarray(0, bytesRead));
-      const cut = text.lastIndexOf("\n");
-      if (cut === -1) {
-        carry += text;
-        // A line no message would ever be. Stop accumulating it and let the
-        // next newline resynchronize; its tail parses as nothing.
-        if (carry.length > MAX_LINE) carry = "";
+      const block = buffer.subarray(0, bytesRead);
+      const lastNewline = block.lastIndexOf(NEWLINE);
+      if (lastNewline === -1) {
+        if (!oversized) {
+          carry.push(Buffer.from(block));
+          carried += bytesRead;
+          if (carried > MAX_LINE) {
+            oversized = true;
+            carry = [];
+          }
+        }
+        position += bytesRead;
         continue;
       }
-      const block = carry + text.slice(0, cut);
-      carry = text.slice(cut + 1);
-      // One substring pass over the whole block: splitting it into lines only
-      // happens where a sample could actually be.
-      if (block.includes(USAGE_MARK)) {
-        for (const line of block.split("\n")) collect(line, samples);
+      let start = 0;
+      if (carried || oversized) {
+        start = block.indexOf(NEWLINE) + 1;
+        if (!oversized) collect(Buffer.concat([...carry, block.subarray(0, start - 1)]), samples);
+        carry = [];
+        carried = 0;
+        oversized = false;
       }
+      // The complete lines of this block, searched as bytes: a line is only
+      // found — and only decoded — where a sample could actually be.
+      const lines = block.subarray(start, lastNewline + 1);
+      for (let hit = lines.indexOf(USAGE_MARK); hit !== -1; ) {
+        const end = lines.indexOf(NEWLINE, hit);
+        collect(lines.subarray(lines.lastIndexOf(NEWLINE, hit) + 1, end), samples);
+        hit = lines.indexOf(USAGE_MARK, end + 1);
+      }
+      offset = position + lastNewline + 1;
+      if (lastNewline + 1 < bytesRead) {
+        carry = [Buffer.from(block.subarray(lastNewline + 1))];
+        carried = bytesRead - lastNewline - 1;
+      }
+      position += bytesRead;
     }
-    if (carry) collect(carry, samples);
   } finally {
     await handle.close();
   }
-  return samples;
+  const tail: UsageSample[] = [];
+  if (carried && !oversized) collect(Buffer.concat(carry), tail);
+  return { samples, tail, offset };
 }
 
-function collect(line: string, samples: UsageSample[]): void {
+function collect(line: Buffer, samples: UsageSample[]): void {
   if (!line.includes(USAGE_MARK)) return;
-  const sample = sampleOf(line);
+  const sample = sampleOf(line.toString("utf8"));
   if (sample) samples.push(sample);
 }
 

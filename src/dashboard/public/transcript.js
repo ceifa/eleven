@@ -2,13 +2,14 @@
    panels), the three regions they are painted into, the optimistic bubbles of
    messages still in flight, and the "↓ Latest" pill. */
 
+import { replaceTail, syncChildren } from "./dom.js";
 import { isButtonsCall, MATCH_CHARS, pressedData, pressPrompt, stateIcon, transcriptRows } from "./live-turn.js";
 import { md } from "./markdown.js";
 import { openLightbox } from "./lightbox.js";
 import { presentMessage, sameMessage, splitEnvelope } from "./message-display.js";
 import { state } from "./state.js";
 import { api } from "./api.js";
-import { atBottom, FILE_ICON, h, isPhone, toast } from "./ui.js";
+import { atBottom, FILE_ICON, h, isPhone, toast, whenIdle } from "./ui.js";
 import { clock, dayLabel, fmtBytes, fmtTime } from "./format.js";
 import { openModal, openRequestModal, openToolCallModal } from "./modals.js";
 import { mediaName, mediaUrl } from "./attachments.js";
@@ -236,17 +237,117 @@ function sticky(mutate) {
   else markUnreadBelow();
 }
 
+/* The transcript is drawn again by every read of its thread — a turn ending,
+   the reconcile after a message, the read that corrects a pane painted from
+   memory — and nearly every one of those reads changes a row or two at the end
+   of it, or nothing at all. Building four hundred rows again for that is every
+   message through the markdown parser, every picture fetched and decoded a
+   second time, and the whole column laid out from nothing: the long pause on
+   opening a conversation, twice over on one read before.
+
+   So a row's node is kept under everything it was drawn from, and a row whose
+   reading has not changed is the node it already was — still holding its
+   pictures, its selection and whichever tool blocks the reader opened. The
+   last few conversations keep theirs, so going back to one is moving nodes
+   rather than making them. */
+const ROW_CACHE_THREADS = 4;
+const rowCaches = new Map(); // thread id → Map(signature → the nodes drawn from it, in order)
+
+/** Everything a row's node is drawn from, as one string. */
+function rowSignature(row) {
+  if (row.kind === "day") return `day|${dayLabel(row.at)}`;
+  if (row.kind === "tool-calls") return `calls|${row.calls.map((call) => `${call.id}\u0001${call.name}\u0001${call.summary}`).join("\u0002")}`;
+  // A press is part of what the block shows, and it happens outside the data.
+  if (row.kind === "buttons") return `buttons|${row.call.id}|${JSON.stringify([row.call.args, row.reply ?? null, pressedButtons.get(row.call.id) ?? null])}`;
+  if (row.kind === "error") return `error|${row.text}`;
+  if (row.kind === "request") return `request|${row.request.id}|${row.request.model}|${row.request.bytes}|${row.request.at}|${row.retry ? 1 : 0}`;
+  return `message|${row.message.role}|${row.at}|${row.grouped ? 1 : 0}|${state.showRequests ? 1 : 0}|${row.message.text}`;
+}
+
+/* And a conversation opens on its end. The rows a reader lands on are the last
+   screenful; the four hundred above them cost the same to build and lay out
+   and are not what the tap was for. So opening draws the tail, and the rest is
+   filled in above it a piece at a time while the page is idle — a second later
+   the whole transcript is there to scroll and to search, and the open itself
+   never waited for it. */
+const FIRST_ROWS = 40;
+const FILL_ROWS = 80;
+/** How many rows at the head of the open transcript are not drawn yet. */
+let held = 0;
+
 /** The durable transcript, as nodes. Ordering, day breaks, message grouping and
  *  which rows the running turn has already drawn are decided in live-turn.js —
- *  this only turns each row into markup. */
-const durableRows = () =>
-  transcriptRows({
+ *  this only turns each row into markup, and only the rows it has not already
+ *  turned into markup. `opening` starts the transcript over from its tail. */
+function durableRows({ opening = false } = {}) {
+  const id = state.activeThread?.id;
+  const drawn = rowCaches.get(id) ?? new Map();
+  const kept = new Map();
+  const rows = transcriptRows({
     timeline: state.timeline,
     requests: state.requests,
     live: state.live,
     liveStartedAt: state.liveStartedAt,
     showRequests: state.showRequests,
-  }).map(transcriptNode);
+  });
+  held = opening ? Math.max(0, rows.length - FIRST_ROWS) : Math.min(held, rows.length);
+  const keepNode = (signature, node) => {
+    // Two rows can read alike (the same word sent twice in one second); each
+    // still gets a node of its own.
+    const alike = kept.get(signature);
+    if (alike) alike.push(node);
+    else kept.set(signature, [node]);
+  };
+  // The rows still to come keep whatever node they had: a conversation gone
+  // back to is filled in from those rather than built a second time.
+  for (let index = 0; index < held; index++) {
+    const signature = rowSignature(rows[index]);
+    const node = drawn.get(signature)?.shift();
+    if (node) keepNode(signature, node);
+  }
+  const shown = held ? rows.slice(held) : rows;
+  // The day the first row drawn belongs to is said above it, though the
+  // separator that says so is one of the rows still to come.
+  if (held && shown[0].kind !== "day" && shown[0].at) shown.unshift({ kind: "day", at: shown[0].at });
+  const nodes = shown.map((row) => {
+    const signature = rowSignature(row);
+    const node = drawn.get(signature)?.shift() ?? transcriptNode(row);
+    keepNode(signature, node);
+    return node;
+  });
+  rowCaches.delete(id); // re-inserted as the newest
+  rowCaches.set(id, kept);
+  while (rowCaches.size > ROW_CACHE_THREADS) rowCaches.delete(rowCaches.keys().next().value);
+  fillOlderRows();
+  return nodes;
+}
+
+let filling = false;
+function fillOlderRows() {
+  if (!held || filling) return;
+  filling = true;
+  whenIdle(() => {
+    filling = false;
+    const transcript = document.getElementById("transcript");
+    const el = scroller();
+    if (!transcript || !el || !held) return;
+    held = Math.max(0, held - FILL_ROWS);
+    // Rows arriving above the reader must not move what they are reading: at
+    // the bottom they stay at the bottom, anywhere else the same row stays
+    // under their eyes. Where the browser anchors the scroll itself it has
+    // already done that by the time the height is read; where it does not
+    // (Safari, or any scroller sitting at its very top), this does.
+    const pinned = atBottom(el);
+    const height = el.scrollHeight;
+    const top = el.scrollTop;
+    const messages = messageCount();
+    syncChildren(transcript, durableRows());
+    if (pinned) el.scrollTop = el.scrollHeight;
+    else if (el.scrollTop === top) el.scrollTop = top + (el.scrollHeight - height);
+    // Old rows drawn late are not new messages to whoever is reading above them.
+    if (messagesWhenAway !== undefined) messagesWhenAway += messageCount() - messages;
+  });
+}
 
 function transcriptNode(row) {
   if (row.kind === "day") return daySeparator(row.at);
@@ -270,6 +371,8 @@ function renderPending() {
 // many of state.live already have a node; a shrink (or an explicit rebuild)
 // starts the region over.
 let liveRendered = 0;
+/** Where a streamed reply is parsed before it is compared with the page. */
+const streamed = document.createElement("template");
 function renderLive(rebuild = false) {
   const region = document.getElementById("live");
   if (!region) return;
@@ -292,9 +395,16 @@ function renderLive(rebuild = false) {
     // The trailing prose bubble grows delta by delta — patch it in place.
     const last = state.live.at(-1);
     const body = last?.kind === "text" ? region.lastElementChild?.querySelector(".msg-body") : undefined;
-    if (body) body.innerHTML = md(last.text);
+    if (body) {
+      // The prose so far is parsed whole on every delta, and only what the
+      // delta changed is put on the page (replaceTail, dom.js).
+      streamed.innerHTML = md(last.text);
+      replaceTail(body, [...streamed.content.childNodes]);
+    }
+    // Inside the same change as the rows it describes: said after it, the
+    // status line is a second layout of the transcript for every delta.
+    updateLiveStatus();
   });
-  updateLiveStatus();
 }
 
 function liveNode(item) {

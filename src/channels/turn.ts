@@ -191,16 +191,16 @@ export async function runChatTurn<R>(turn: ChatTurn<R>): Promise<{ models: Model
       deliver: async (result, threadId) => {
         await delivery.settled();
         const final = delivery.remaining(blocks, result.text);
-        const duplicate = !!final && sent.has(final);
-        turn.gateway.queueReply(threadId, sessionKey, final && !duplicate ? final : "", turn.replyTo);
+        const answer = final && !sent.has(final) ? final : "";
+        turn.gateway.queueReply(threadId, sessionKey, answer, turn.replyTo);
         sent.clear();
-        try { await status.finish(result.status === "stopped" ? "stopped" : "completed"); }
+        try { await status.finish(result.status === "stopped" ? "stopped" : "completed", !!answer); }
         catch (error) { log.warn(`status completion failed: ${error}`); }
       },
     });
   } catch (error) {
     sent.clear();
-    await status.finish("failed");
+    await status.finish("failed", true);
     log.error(`turn failed: ${error}`);
     // The runner stops instead of failing over once an attempt ran tools (a
     // spent quota mid-turn is the common way there) — so when its plan still

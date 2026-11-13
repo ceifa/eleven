@@ -132,6 +132,12 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     capabilities: ["basic formatting (bold, italic, strikethrough, code, links, lists); headings and tables arrive flattened"],
   });
   let historyDenied = false;
+  // The status message a turn's answer takes over, by the message that asked.
+  // Deleting it instead leaves "Message deleted by its author" in the thread.
+  const handoffs = new Map<string, Promise<string | undefined>>();
+  // Each thread's (or DM's) status message while nothing came after it: an
+  // answer edited into an older one would land above what did.
+  const lastStatus = new Map<string, string>();
 
   async function handleEvent(event: ChatEvent): Promise<void> {
     const config = deps.botConfig();
@@ -164,6 +170,7 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
       ? { sessionKey: googleChatSessionKey(name, { userId }), space: space.name, userId, triggerMessageId: message.name }
       : { sessionKey: googleChatSessionKey(name, { spaceId, threadId: threadId! }), space: space.name, thread: message.thread!.name, spaceId, triggerMessageId: message.name };
 
+    lastStatus.delete(target.thread ?? space.name);
     if (text.startsWith("/") && (await handleCommand(target, text))) return;
     const release = conversations.bursts.prepare(target.sessionKey);
     try {
@@ -343,10 +350,32 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
   async function post(target: Target, markdown: string, options: ReplyOptions = {}) {
     const space = await spaceOf(target);
     const chunks = chatChunks(markdown);
+    const asked = options.replyTo ?? target.triggerMessageId;
     for (let i = options.sentChunks ?? 0; i < chunks.length; i++) {
-      await api.createMessage(space, chunks[i]!, target.thread);
+      const status = i === 0 && asked ? await handoffs.get(asked) : undefined;
+      if (status) await takeOver(status, space, chunks[i]!, target.thread);
+      else await create(space, chunks[i]!, target.thread);
+      if (i === 0 && asked) handoffs.delete(asked);
       options.onChunk?.(i + 1);
     }
+  }
+
+  /** The answer edited into the status message: no notification, no deleted
+   *  message left behind. One someone already deleted is posted anew. */
+  async function takeOver(status: string, space: string, text: string, thread?: string) {
+    try {
+      await api.updateMessage(status, text);
+    } catch (error) {
+      if (error instanceof GoogleChatApiError && error.status === 404) return void (await create(space, text, thread));
+      // An edit lands once however often it is tried.
+      throw new GoogleChatApiError(error instanceof GoogleChatApiError ? error.status : 0, `editing the answer in failed: ${error instanceof Error ? error.message : error}`, true);
+    }
+  }
+
+  async function create(space: string, text: string, thread?: string) {
+    const message = await api.createMessage(space, text, thread);
+    lastStatus.delete(thread ?? space);
+    return message;
   }
 
   function targetFor(sessionKey: string): Target {
@@ -359,10 +388,30 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
 
   function statusFor(target: Target, space: string): TurnStatus<string> {
     let messageName: string | undefined;
+    const asked = target.triggerMessageId;
     return new TurnStatus<string>({
-      post: async (text) => { messageName = (await api.createMessage(space, text, target.thread)).name; },
+      post: async (text) => {
+        messageName = (await create(space, text, target.thread)).name;
+        if (messageName) lastStatus.set(target.thread ?? space, messageName);
+      },
       edit: async (text) => { if (messageName) await api.updateMessage(messageName, text); },
       remove: async () => { if (messageName) await api.deleteMessage(messageName); },
+      // A turn nobody asked for (a wake-up) has no reply to find it by. A
+      // status something was posted under since goes instead.
+      handOff: asked ? (settled) => void handoffs.set(asked, (async () => {
+        await settled;
+        const key = target.thread ?? space;
+        if (!messageName) return;
+        if (lastStatus.get(key) === messageName) {
+          lastStatus.delete(key);
+          return messageName;
+        }
+        try {
+          await api.deleteMessage(messageName);
+        } catch (error) {
+          log.warn(`status cleanup failed: ${error}`);
+        }
+      })()) : undefined,
     }, {
       render: (view) => {
         const text = plainStatus(view);
@@ -448,6 +497,11 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     listen,
     async stop() {
       conversations.stop();
+      // An answer that never took its status over leaves it saying the turn still works.
+      await Promise.allSettled([...handoffs.values()].map(async (status) => {
+        const name = await status;
+        if (name) await api.deleteMessage(name);
+      }));
       listening = false;
       await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     },

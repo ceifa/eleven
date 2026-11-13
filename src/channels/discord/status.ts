@@ -143,9 +143,9 @@ export class DiscordTurnStatus extends TurnStatus<DiscordCard> {
 
   // The answer follows finish(): typing must be off before it lands, or the
   // indicator outlives the turn by up to ten seconds.
-  override finish(outcome: TurnOutcome): Promise<void> {
+  override finish(outcome: TurnOutcome, answered?: boolean): Promise<void> {
     this.stopTyping();
-    return super.finish(outcome);
+    return super.finish(outcome, answered);
   }
 
   override cancel(): void {

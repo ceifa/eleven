@@ -71,6 +71,10 @@ export interface StatusSurface<R> {
   post(card: R): Promise<void>;
   edit(card: R): Promise<void>;
   remove(): Promise<void>;
+  /** Give the message to the turn's answer instead of removing it, once
+   *  `settled` says the card has stopped writing. For a chat where a deletion
+   *  leaves a mark of its own. */
+  handOff?(settled: Promise<void>): void;
 }
 
 export interface TurnStatusOptions<R> {
@@ -101,6 +105,7 @@ interface Run {
  * currently running, and provider retries. Panels and retries are a durable
  * record of the turn; a message that only ever showed tool status is deleted
  * when the turn ends — the reply (or failure notice) that follows supersedes it.
+ * A surface that can hand the message off lets that reply take its place.
  *
  * Background runs the turn started draw here too, under the turn's own panels:
  * the card keeps updating after the turn is done, until every run settles. */
@@ -200,14 +205,20 @@ export class TurnStatus<R = string> {
     };
   }
 
-  async finish(outcome: TurnOutcome): Promise<void> {
+  /** `answered`: a message follows in the chat, the answer or the failure notice. */
+  async finish(outcome: TurnOutcome, answered = false): Promise<void> {
     if (this.dead || this.outcome) return;
     if (!this.worthKeeping) {
       // Tool-status-only message: the reply (or failure notice) that follows
       // supersedes it. Clean up off the reply's critical path — the delete's
       // outcome affects nothing downstream.
       this.cancel();
-      void Promise.resolve(this.draining).then(() => {
+      const settled = this.draining ?? Promise.resolve();
+      if (answered && this.surface.handOff) {
+        this.surface.handOff(settled);
+        return;
+      }
+      void settled.then(() => {
         if (this.posted) return this.surface.remove();
       }).catch((error) => log.warn(`status cleanup failed: ${error}`));
       return;

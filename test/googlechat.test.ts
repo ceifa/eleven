@@ -122,7 +122,10 @@ const SHARED_DM = { name: "spaces/SHARED", type: "DM", spaceType: "DIRECT_MESSAG
 const ROOM = { name: "spaces/ROOM", type: "ROOM", spaceType: "SPACE", displayName: "Produto" };
 
 type History = { thread?: string; before: string; pageSize: number };
+type Incoming = { sessionKey: string; text: string; images: unknown[]; runtime?: { conversation?: string }; events?: { onToolCall?: (name: string, args: unknown) => void; onProse?: (text: string) => void; onDelta?: (text: string) => void; onAssistantText?: () => void }; deliver: (result: unknown, thread: string) => Promise<void> };
 function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, options: History) => Promise<unknown[]> = async () => [], sessionSince?: number, transcribeCommand?: string) {
+  // What a turn does before it answers; tests set it after building the harness.
+  const turn: { work?: (incoming: Incoming) => Promise<void> } = {};
   const config: ChannelConfig = { type: "googlechat", name: "oracle", token: "key.json", users: { "111": { name: "Old name" } }, groups: { ROOM: {} }, ...channel };
   const posted: { space: string; text: string; thread?: string }[] = [];
   const turns: { sessionKey: string; text: string; images: unknown[] }[] = [];
@@ -130,13 +133,16 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
   const requests: { kind: string; userId: string; chatId: string; name?: string; username?: string }[] = [];
   const downloads: string[] = [];
   const lookups: string[] = [];
+  const edits: { name: string; text: string }[] = [];
+  const deleted: string[] = [];
   let saved = 0;
   const gateway = {
     hasPendingReply: () => false,
-    queueReply: (_thread: string, sessionKey: string, text: string) => { if (text) void bot.send(sessionKey, text); },
-    handle: async (incoming: { sessionKey: string; text: string; images: unknown[]; runtime?: { conversation?: string }; deliver: (result: unknown, thread: string) => Promise<void> }) => {
+    queueReply: (_thread: string, sessionKey: string, text: string, replyTo?: string) => { if (text) void bot.send(sessionKey, text, { replyTo }); },
+    handle: async (incoming: Incoming) => {
       turns.push({ sessionKey: incoming.sessionKey, text: incoming.text, images: incoming.images });
       conversations.push(incoming.runtime?.conversation);
+      await turn.work?.(incoming);
       await incoming.deliver({ text: `answer to ${incoming.text.split("\n").at(-1)}`, status: "completed" }, "thread-1");
     },
     interrupt: async () => false,
@@ -158,15 +164,15 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
   }, {
     api: {
       createMessage: async (space, text, thread) => (posted.push({ space, text, thread }), { name: `${space}/messages/${posted.length}` }),
-      updateMessage: async () => {},
-      deleteMessage: async () => {},
+      updateMessage: async (name, text) => void edits.push({ name, text }),
+      deleteMessage: async (name) => void deleted.push(name),
       findDirectMessage: async (user) => (lookups.push(user), "spaces/FOUND"),
       download: async (resource) => (downloads.push(resource), Buffer.from(resource === "img" ? "png-bytes" : "%PDF-1.7")),
       listMessages: history as never,
     },
     verify: async (authorization) => { if (authorization !== "Bearer good") throw new Error("not Chat"); },
   });
-  return { bot, config, posted, turns, conversations, requests, downloads, lookups, saved: () => saved };
+  return { bot, turn, config, posted, edits, deleted, turns, conversations, requests, downloads, lookups, saved: () => saved };
 }
 
 async function until(condition: () => boolean, ms = 4_000) {
@@ -244,6 +250,61 @@ test("a mention in a space runs in its thread, says who asked, and answers there
   await bot.handleEvent(message(STRANGER, ROOM, { argumentText: " me too" }));
   await new Promise((resolve) => setTimeout(resolve, 1_700));
   assert.equal(turns.length, 1);
+});
+
+test("the answer takes over the status message, so no deleted message is left in the thread", async () => {
+  // Long enough for a tool-only status to appear.
+  const working = (incoming: Incoming) => {
+    incoming.events!.onToolCall!("Bash", { command: "ls" });
+    return new Promise<void>((resolve) => setTimeout(resolve, 4_300));
+  };
+  const { bot, turn, posted, edits, deleted } = harness();
+  turn.work = working;
+  await bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " check it" }));
+  await until(() => edits.some((edit) => edit.text.startsWith("answer")), 8_000);
+  assert.equal(posted.length, 1);
+  assert.match(posted[0]!.text, /Agent working/);
+  assert.deepEqual(edits.at(-1), { name: "spaces/ROOM/messages/1", text: "answer to check it" });
+  assert.deepEqual(deleted, []);
+});
+
+test("a status someone wrote under while the turn ran goes, and the answer is posted anew", async () => {
+  let gabrielReplies: (() => Promise<void>) | undefined;
+  const working = async (incoming: Incoming) => {
+    // The follow-up is a turn of its own, answered at once.
+    const reply = gabrielReplies;
+    if (!reply) return;
+    gabrielReplies = undefined;
+    incoming.events!.onToolCall!("Bash", { command: "ls" });
+    await new Promise((resolve) => setTimeout(resolve, 4_300));
+    void reply();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+  const { bot, turn, posted, edits, deleted } = harness();
+  turn.work = working;
+  gabrielReplies = () => bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " also this" }));
+  await bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " check it" }));
+  await until(() => posted.some((post) => post.text === "answer to check it") && posted.some((post) => post.text === "answer to also this"), 8_000);
+  assert.deepEqual(deleted, ["spaces/ROOM/messages/1"]);
+  assert.ok(!edits.some((edit) => edit.text.startsWith("answer")));
+});
+
+test("a status the app posted under goes, so the answer doesn't land above its own prose", async () => {
+  const working = async (incoming: Incoming) => {
+    incoming.events!.onToolCall!("Bash", { command: "ls" });
+    await new Promise((resolve) => setTimeout(resolve, 4_300));
+    incoming.events!.onProse!("checking the logs");
+    // Prose went out early: the answer is what the model wrote after it.
+    incoming.events!.onDelta!("answer to check it");
+    incoming.events!.onAssistantText!();
+  };
+  const { bot, turn, posted, edits, deleted } = harness();
+  turn.work = working;
+  await bot.handleEvent(message(GABRIEL, ROOM, { argumentText: " check it" }));
+  await until(() => posted.some((post) => post.text.startsWith("answer")), 8_000);
+  assert.deepEqual(posted.map((post) => post.text.split("\n")[0]), ["⚙️ Agent working", "checking the logs", "answer to check it"]);
+  assert.deepEqual(deleted, ["spaces/ROOM/messages/1"]);
+  assert.ok(!edits.some((edit) => edit.text.startsWith("answer")));
 });
 
 test("attachments are downloaded as the app; images also go to the model, Drive files are named", async () => {

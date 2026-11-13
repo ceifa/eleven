@@ -125,8 +125,10 @@ test("a streamed reply puts on the page what the delta changed", () => {
 
 test("the rows of a list are skipped while they are off screen, and built a screenful at a time", () => {
   // Hundreds of cards, a dozen in view. The rest are not laid out or painted
-  // until they scroll near…
-  assert.match(css, /#thread-list > \.card \{ content-visibility: auto; contain-intrinsic-size: auto [\d.]+rem; \}/);
+  // until they scroll near. A skipped card has nothing inside to hold it open,
+  // and in a flex column that overflows it would be squeezed to no height at
+  // all — so it must not shrink…
+  assert.match(css, /#thread-list > \.card \{ content-visibility: auto; contain-intrinsic-size: auto [\d.]+rem; flex-shrink: 0; \}/);
   // …except a live one, whose halo sits outside the box that containment clips to.
   assert.match(css, /#thread-list > button\.card\.is-live \{ content-visibility: visible; \}/);
   // A call is always one line, so the height a skipped row is assumed to have

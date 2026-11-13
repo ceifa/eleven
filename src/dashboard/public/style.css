@@ -429,8 +429,13 @@ button.card.is-live::after, .card.is-live .thread-avatar::before {
    ones off screen are skipped until they scroll near; `auto` remembers the size
    a card had once it has been seen, so the scrollbar only guesses at rows it
    has never drawn. Not the live ones: skipping comes with paint containment,
-   and that would shear the halo off at the card's edge. */
-#thread-list > .card { content-visibility: auto; contain-intrinsic-size: auto 3.95rem; }
+   and that would shear the halo off at the card's edge.
+
+   A skipped card has no content to hold it open, and the list is a flex column
+   that overflows: left free to shrink, every card off screen is squeezed to
+   nothing, and the scrollbar describes a list of a few dozen. They don't
+   shrink. */
+#thread-list > .card { content-visibility: auto; contain-intrinsic-size: auto 3.95rem; flex-shrink: 0; }
 #thread-list > button.card.is-live { content-visibility: visible; }
 /* ...and the same containment would clip a focus ring drawn outside the card. */
 #thread-list > .card:focus-visible { outline-offset: -2px; }
@@ -2840,7 +2845,7 @@ video.msg-media { max-width: 22rem; }
 
   /* A row here is a face and three lines: taller than the desktop's card, and
      the size a row never drawn is assumed to have has to say so. */
-  #thread-list > .card { contain-intrinsic-size: auto 5.6rem; }
+  #thread-list > .card { contain-intrinsic-size: auto 6.635rem; }
   /* Read-only: the sentence on top, its button and the stop underneath. */
   .composer-readonly .composer-box { padding: 0.6rem 0.5rem 0.5rem; }
   .composer-readonly-text { flex: 1 0 100%; padding: 0 0.5rem; }

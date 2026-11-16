@@ -16,7 +16,7 @@ import {
   type GatewayGuildCreateDispatchData,
   type GatewayMessageCreateDispatchData,
 } from "discord-api-types/v10";
-import type { ChannelConfig, GroupConfig } from "../../config.ts";
+import type { ChannelConfig } from "../../config.ts";
 import { formatInboundBody } from "../../media-store.ts";
 import { logger } from "../../log.ts";
 import { STATE_DIR } from "../../paths.ts";
@@ -458,12 +458,11 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         changed = true;
       }
       const topics = (group.topics ??= {});
-      if (unfileThreadTopics(group, (id) => channels.get(id)?.type)) changed = true;
       for (const { id, info } of chain) {
-        if (info?.parentId && THREADS.has(info.type) && !topics[id]) {
+        if (info?.parentId && THREADS.has(info.type)) {
           const placed = group.threads?.[id];
           if (placed?.title !== info.title || placed?.parent !== info.parentId) {
-            placeThread(group, id, info.title, info.parentId);
+            (group.threads ??= {})[id] = { ...(info.title && { title: info.title }), parent: info.parentId };
             changed = true;
           }
           continue;
@@ -740,27 +739,6 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   return handle;
-}
-
-function placeThread(group: GroupConfig, id: string, title: string | undefined, parent: string) {
-  (group.threads ??= {})[id] = { ...(title && { title }), parent };
-}
-
-/** Turn unconfigured thread topics into placements. A thread the gateway
- *  hasn't seen (archived) is told by its parent: only a thread hangs off a
- *  channel (`#name`). */
-export function unfileThreadTopics(group: GroupConfig, typeOf: (id: string) => ChannelType | undefined): boolean {
-  const topics = group.topics ?? {};
-  let moved = false;
-  for (const [id, topic] of Object.entries(topics)) {
-    if (!topic.parent || topic.models?.length || topic.appendSystemPrompt) continue;
-    const type = typeOf(id);
-    if (type === undefined ? !topics[topic.parent]?.title?.startsWith("#") : !THREADS.has(type)) continue;
-    placeThread(group, id, topic.title, topic.parent);
-    delete topics[id];
-    moved = true;
-  }
-  return moved;
 }
 
 /** Whether a server message is talking to the bot: a mention of it or of the

@@ -50,16 +50,13 @@ export function parseSessionKey(sessionKey: string): ConversationTarget | undefi
   return undefined;
 }
 
-// Discord nests a thread in a channel in a category; nothing goes deeper.
-const MAX_TOPIC_DEPTH = 4;
+// Discord nests a channel in a category; nothing goes deeper.
+const MAX_TOPIC_DEPTH = 2;
 
 type TopicOwner = { topics?: Record<string, TopicConfig>; threads?: Record<string, ThreadPlacement> };
 
-/** The thread placement for this id, unless it is configured as a topic of its own. */
-function threadOf(owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined {
-  if (topicId === undefined || owner?.topics?.[topicId]) return undefined;
-  return owner?.threads?.[topicId];
-}
+const threadOf = (owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined =>
+  topicId === undefined ? undefined : owner?.threads?.[topicId];
 
 /** A topic and the ones it sits in, innermost first; a thread starts at its
  *  channel, whose settings it runs on. A registry edited into a loop stops at

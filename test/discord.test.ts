@@ -62,7 +62,7 @@ test("a Discord conversation is named by its channel, then its server, then the 
 test("a thread sits in its channel and a channel in its category, and each layer's settings reach in", () => {
   const category = { title: "Gabriel", models: [{ model: "claude-code/opus" }] };
   const channel = { title: "#saude", parent: "10" };
-  // Filed as a topic before threads stopped being topics, with settings of its own.
+  // A thread still configured as a topic of its own keeps its settings.
   const configured = { title: "consulta", parent: "20", appendSystemPrompt: "kept" };
   const channels = [{
     type: "discord" as const,

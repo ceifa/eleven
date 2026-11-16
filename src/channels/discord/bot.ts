@@ -29,7 +29,7 @@ import { COMMANDS } from "../commands.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import { FAILOVER_PREFIX } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
-import { threadOf, topicChain } from "../session-key.ts";
+import { conversationPath } from "../session-key.ts";
 import { compactReplyQuote, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { BACKFILL_MAX_PER_CHANNEL, BACKFILL_WINDOW_MS, isNewer, missedMessages, snowflakeAt, Watermark } from "./backfill.ts";
 import { DiscordGateway } from "./gateway.ts";
@@ -439,12 +439,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   /** Keep the registry in sync with live traffic: the server's name heals on
-   *  any message; a channel registers itself as a topic the first time it
-   *  speaks, along with the category it sits in, so instructions set on that
-   *  reach it. A thread is only placed under its channel: it runs on the
-   *  channel's settings, and a forum registering every post as a topic buried
-   *  the channels under them. Names and nesting heal the same way. Saves only
-   *  when something changed. */
+   *  any message; a channel registers itself the first time it speaks, along
+   *  with its category, so instructions set on that reach it. A thread is only
+   *  placed under its channel, never a topic: a forum would otherwise bury the
+   *  channels under its posts. Saves only when something changed. */
   async function maintainGroupRegistry(guildId: string, channelId: string) {
     const guildName = guilds.get(guildId)?.name;
     const chain: { id: string; info?: ChannelInfo }[] = [];
@@ -465,7 +463,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         if (info?.parentId && THREADS.has(info.type) && !topics[id]) {
           const placed = group.threads?.[id];
           if (placed?.title !== info.title || placed?.parent !== info.parentId) {
-            group.threads = { ...group.threads, [id]: { ...(info.title && { title: info.title }), parent: info.parentId } };
+            placeThread(group, id, info.title, info.parentId);
             changed = true;
           }
           continue;
@@ -610,8 +608,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     }
     const group = config?.groups?.[target.guildId];
     const server = group?.title ?? guilds.get(target.guildId)?.name ?? target.guildId;
-    const thread = threadOf(group, target.channelId);
-    const path = [...topicChain(group, target.channelId).reverse(), ...(thread ? [thread] : [])].map((topic) => topic.title).filter(Boolean);
+    const path = conversationPath(group, target.channelId).reverse().map((topic) => topic.title).filter(Boolean);
     return `server "${server}", ${path.length ? path.join(" › ") : `channel ${target.channelId}`}`;
   }
 
@@ -745,13 +742,13 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   return handle;
 }
 
-/**
- * Move threads registered as topics — every one that ever spoke, before
- * threads stopped being topics — to where threads are placed now. A thread
- * someone configured stays a topic, settings and all. `typeOf` knows the
- * channels the gateway has seen; an archived thread it hasn't is told by its
- * parent, the one thing only a thread hangs off: a channel (`#name`).
- */
+function placeThread(group: GroupConfig, id: string, title: string | undefined, parent: string) {
+  (group.threads ??= {})[id] = { ...(title && { title }), parent };
+}
+
+/** Turn unconfigured thread topics into placements. A thread the gateway
+ *  hasn't seen (archived) is told by its parent: only a thread hangs off a
+ *  channel (`#name`). */
 export function unfileThreadTopics(group: GroupConfig, typeOf: (id: string) => ChannelType | undefined): boolean {
   const topics = group.topics ?? {};
   let moved = false;
@@ -759,7 +756,7 @@ export function unfileThreadTopics(group: GroupConfig, typeOf: (id: string) => C
     if (!topic.parent || topic.models?.length || topic.appendSystemPrompt) continue;
     const type = typeOf(id);
     if (type === undefined ? !topics[topic.parent]?.title?.startsWith("#") : !THREADS.has(type)) continue;
-    group.threads = { ...group.threads, [id]: { ...(topic.title && { title: topic.title }), parent: topic.parent } };
+    placeThread(group, id, topic.title, topic.parent);
     delete topics[id];
     moved = true;
   }

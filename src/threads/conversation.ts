@@ -1,5 +1,5 @@
-import type { ChannelConfig, ChannelType, TopicConfig } from "../config.ts";
-import { parseSessionKey, threadOf, topicChain } from "../channels/session-key.ts";
+import type { ChannelConfig, ChannelType } from "../config.ts";
+import { conversationPath, parseSessionKey } from "../channels/session-key.ts";
 
 /**
  * How a conversation is named for a human. A session key is precise and
@@ -44,10 +44,7 @@ export function conversationIdentity(sessionKey: string, channels: ChannelConfig
   const group = inDm ? undefined : channel?.groups?.[target.owner.id];
   // Whoever holds the topics: the person in a DM, the group in a group.
   const owner = user ?? group;
-  // A Discord thread is named for itself and sits in its channel's chain.
-  const thread = threadOf(owner, target.topic);
-  const chain = topicChain(owner, target.topic);
-  const [topic, ...around]: TopicConfig[] = thread ? [thread, ...chain] : chain;
+  const [topic, ...around] = conversationPath(owner, target.topic);
   const ownerName = (inDm ? user?.name || (user?.username && `@${user.username}`) : group?.title) || target.owner.id;
   const channelContext = `${PLATFORM[target.type]}${inDm ? " DM" : ""}`;
   if (target.topic === undefined) {

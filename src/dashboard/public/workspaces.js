@@ -402,7 +402,9 @@ function topicTree(owner, ownerKey) {
   const children = new Map();
   for (const [id, topic] of ordered) {
     const parent = topic.parent !== id && topics[topic.parent] ? topic.parent : undefined;
-    children.set(parent, [...(children.get(parent) ?? []), id]);
+    const siblings = children.get(parent);
+    if (siblings) siblings.push(id);
+    else children.set(parent, [id]);
   }
   const nodes = [];
   const placed = new Set();
@@ -410,7 +412,6 @@ function topicTree(owner, ownerKey) {
     let ids = children.get(parentId) ?? [];
     if (!ancestors.length) ids = [...ids.filter((id) => !children.has(id)), ...ids.filter((id) => children.has(id))];
     for (const id of ids) {
-      if (placed.has(id)) continue;
       placed.add(id);
       nodes.push({ id, topic: topics[id], ancestors, holds: children.has(id) });
       walk(id, [...ancestors, id]);
@@ -516,22 +517,17 @@ function topicsSection(workspaceName, owner, inherited, select, words, ownerKey)
     const query = (topicQueries.get(ownerKey) ?? "").trim().toLowerCase();
     const all = !folds || topicListsOpen.has(ownerKey);
     let shown = 0;
-    let matches = 0;
     // A match shows what it sits in, or an indented row would float loose.
-    const context = new Set();
+    const matched = new Set(query ? rows.filter((row) => row.text.includes(query)) : rows);
+    const context = new Set([...matched].flatMap((row) => row.ancestors));
     for (const row of rows) {
-      if (query && !row.text.includes(query)) continue;
-      matches++;
-      for (const id of row.ancestors) context.add(id);
-    }
-    for (const row of rows) {
-      const match = !query || row.text.includes(query) || context.has(row.id);
+      const match = matched.has(row) || context.has(row.id);
       row.node.hidden = !(match && (query || all || shown < TOPIC_CAP));
       if (!row.node.hidden) shown++;
     }
     more.hidden = Boolean(query) || !folds;
     more.textContent = all ? `Show the first ${TOPIC_CAP}` : `Show all ${rows.length} ${many}`;
-    nothing.hidden = matches > 0 || !rows.length;
+    nothing.hidden = matched.size > 0 || !rows.length;
     nothing.textContent = `No ${words.topic} matches “${query}”.`;
   }
   apply();

@@ -55,10 +55,8 @@ const MAX_TOPIC_DEPTH = 4;
 
 type TopicOwner = { topics?: Record<string, TopicConfig>; threads?: Record<string, ThreadPlacement> };
 
-/** The Discord thread a conversation happens in, when it is filed as one. A
- *  thread still configured as a topic of its own (from before threads stopped
- *  being topics) is that topic instead. */
-export function threadOf(owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined {
+/** The thread placement for this id, unless it is configured as a topic of its own. */
+function threadOf(owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined {
   if (topicId === undefined || owner?.topics?.[topicId]) return undefined;
   return owner?.threads?.[topicId];
 }
@@ -75,6 +73,14 @@ export function topicChain(owner: TopicOwner | undefined, topicId: string | unde
     id = topic.parent;
   }
   return chain;
+}
+
+/** What a conversation sits in, innermost first, for naming it: its thread,
+ *  if it is one, then the topic chain whose settings it runs on. */
+export function conversationPath(owner: TopicOwner | undefined, topicId: string | undefined): TopicConfig[] {
+  const thread = threadOf(owner, topicId);
+  const chain = topicChain(owner, topicId);
+  return thread ? [thread, ...chain] : chain;
 }
 
 /** The registry entries a conversation sits under, if it has them: its owner,

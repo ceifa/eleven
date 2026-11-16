@@ -1754,11 +1754,10 @@ video.msg-media { max-width: 22rem; }
 .topic-filter { margin-left: auto; width: 13rem; max-width: 55%; }
 .topic-filter::-webkit-search-cancel-button { filter: grayscale(1) opacity(0.5); }
 .topic-list { display: flex; flex-direction: column; border-top: 1px solid var(--color-line); border-bottom: 1px solid var(--color-line); }
-.topic-row { border-radius: 0; }
-.topic-row + .topic-row { border-top: 1px solid var(--color-line); }
 /* Nested as the platform's sidebar nests them: a channel a step in from its
    category, its settings with it. */
-.topic-row { --indent: calc(0.6rem + var(--depth, 0) * 1.1rem); }
+.topic-row { border-radius: 0; --indent: calc(0.6rem + var(--depth, 0) * 1.1rem); }
+.topic-row + .topic-row { border-top: 1px solid var(--color-line); }
 .topic-row > .collapse-title { padding: 0.4rem 2rem 0.4rem var(--indent); }
 .topic-id { padding-right: 0.25rem; }
 .topic-row > .collapse-content { padding: 0.3rem 0.6rem 0.9rem var(--indent); }

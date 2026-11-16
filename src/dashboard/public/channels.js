@@ -34,7 +34,7 @@ const CHANNEL_WORDS = {
     // "Server channels", not "Channels": the bots on this page are called
     // channels too, and "add a channel" has to mean one thing.
     topics: "Server channels",
-    topicsInfo: "Every channel and thread is its own thread here and can append its own instructions. They register themselves when someone first speaks in them, along with the category or channel they sit in — whatever is set on a category reaches every channel in it, and a channel's reaches its threads.",
+    topicsInfo: "Every channel is its own thread here and can append its own instructions. Channels register themselves when someone first speaks in them, along with their category — whatever is set on a category reaches every channel in it. Threads and forum posts are not listed: each runs on its channel's settings.",
     topic: "server channel",
     dmTopics: false,
     tokenHint: "bot token from the Developer Portal (Message Content intent on)",

@@ -392,6 +392,43 @@ function orderedTopics(owner, ownerKey) {
   return order.map((id) => [id, topics[id]]);
 }
 
+/** The topics as the platform's sidebar nests them: each under the one it
+ *  sits in, a level deeper — on Discord, channels under their category, and
+ *  the ones outside any category above the categories. Within a level, the
+ *  order `orderedTopics` gives. */
+function topicTree(owner, ownerKey) {
+  const topics = owner.topics ?? {};
+  const ordered = orderedTopics(owner, ownerKey);
+  const children = new Map();
+  for (const [id, topic] of ordered) {
+    const parent = topic.parent !== id && topics[topic.parent] ? topic.parent : undefined;
+    children.set(parent, [...(children.get(parent) ?? []), id]);
+  }
+  const nodes = [];
+  const placed = new Set();
+  const walk = (parentId, ancestors) => {
+    let ids = children.get(parentId) ?? [];
+    if (!ancestors.length) ids = [...ids.filter((id) => !children.has(id)), ...ids.filter((id) => children.has(id))];
+    for (const id of ids) {
+      if (placed.has(id)) continue;
+      placed.add(id);
+      nodes.push({ id, topic: topics[id], ancestors, holds: children.has(id) });
+      walk(id, [...ancestors, id]);
+    }
+  };
+  walk(undefined, []);
+  // A registry edited into a loop never reaches the top; what is left lists flat.
+  for (const [id, topic] of ordered) if (!placed.has(id)) nodes.push({ id, topic, ancestors: [], holds: false });
+  return nodes;
+}
+
+/** The sequence a topic inherits: its nearest enclosing topic's, if one
+ *  carries its own, else whatever its owner runs on. */
+function inheritedByTopic(owner, ancestors, fallback) {
+  const from = [...ancestors].reverse().find((id) => owner.topics?.[id]?.models?.length);
+  return from ? { entries: owner.topics[from].models, source: owner.topics[from].title ?? from } : fallback;
+}
+
 /**
  * The topics of whatever owns them — a group, or a person, since a bot with
  * topic mode enabled has topics in its DMs too. `select` picks the owner out of
@@ -413,23 +450,32 @@ function topicsSection(workspaceName, owner, inherited, select, words, ownerKey)
       target.topics = Object.keys(topics).length ? topics : undefined;
     }, { structural });
   const many = words.topics.toLowerCase();
-  const rows = orderedTopics(owner, ownerKey).map(([topicId, topic]) => {
+  // Discord threads are not topics: each is counted on the channel it runs under.
+  const threads = new Map();
+  for (const thread of Object.values(owner.threads ?? {})) threads.set(thread.parent, (threads.get(thread.parent) ?? 0) + 1);
+  const rows = topicTree(owner, ownerKey).map(({ id: topicId, topic, ancestors, holds }) => {
     const fallback = `${words.topic} ${topicId}`;
-    // A Discord thread sits in a channel, a channel in a category.
-    const parent = topic.parent ? owner.topics?.[topic.parent]?.title : undefined;
-    const row = { node: null, text: "" };
-    const index = (title) => { row.text = `${title ?? fallback} ${parent ?? ""} ${topicId}`.toLowerCase(); };
+    // What it sits in is searched too: typing a category's name finds its channels.
+    const around = ancestors.map((id) => owner.topics?.[id]?.title ?? "").join(" ");
+    const row = { id: topicId, ancestors, node: null, text: "" };
+    const index = (title) => { row.text = `${title ?? fallback} ${around} ${topicId}`.toLowerCase(); };
     index(topic.title);
     const name = h("span", { class: "truncate min-w-0" }, topic.title ?? fallback);
     const toggle = h("input", { type: "checkbox", "aria-label": `${topic.title ?? fallback} — settings` });
     const prompt = promptBadge(topic.appendSystemPrompt);
-    row.node = h("div", { class: "collapse collapse-arrow topic-row", "data-collapse": `topic:${ownerKey}:${topicId}` },
+    const threadCount = threads.get(topicId);
+    row.node = h("div", {
+      // A top-level topic with others inside is a Discord category: drawn as one.
+      class: `collapse collapse-arrow topic-row${holds && !ancestors.length ? " topic-group" : ""}`,
+      style: `--depth: ${ancestors.length}`,
+      "data-collapse": `topic:${ownerKey}:${topicId}`,
+    },
       toggle,
       h("div", { class: "collapse-title flex items-center gap-2 min-h-0 text-sm" },
         name,
-        parent ? h("span", { class: "text-xs opacity-50 truncate min-w-0 hide-mobile" }, `in ${parent}`) : null,
         prompt,
         modelsBadge(topic),
+        threadCount ? h("span", { class: "text-xs opacity-50 shrink-0 hide-mobile", title: "threads here run on this channel's settings" }, plural(threadCount, "thread")) : null,
         // Two topics can carry one name; the id is what tells them apart.
         h("span", { class: "topic-id font-mono text-xs opacity-50 ml-auto shrink-0 hide-mobile" }, topicId),
       ),
@@ -447,7 +493,7 @@ function topicsSection(workspaceName, owner, inherited, select, words, ownerKey)
           h("span", { class: "font-mono text-xs opacity-50" }, fallback),
           confirmButton("Remove", () => patchTopic(topicId, null, true), { class: "ml-auto", noun: `${words.topic} ${topic.title ?? topicId}` }),
         ),
-        scopeSequenceField(topic, inherited,
+        scopeSequenceField(topic, inheritedByTopic(owner, ancestors, inherited),
           (fn, structural) => updateWorkspace(workspaceName, (ws) => fn(select(ws).topics[topicId]), { structural })),
         appendField(topic.appendSystemPrompt, (v) => { prompt.hidden = !v; patchTopic(topicId, { appendSystemPrompt: v }); }),
       ),
@@ -471,9 +517,15 @@ function topicsSection(workspaceName, owner, inherited, select, words, ownerKey)
     const all = !folds || topicListsOpen.has(ownerKey);
     let shown = 0;
     let matches = 0;
+    // A match shows what it sits in, or an indented row would float loose.
+    const context = new Set();
     for (const row of rows) {
-      const match = !query || row.text.includes(query);
-      if (match) matches++;
+      if (query && !row.text.includes(query)) continue;
+      matches++;
+      for (const id of row.ancestors) context.add(id);
+    }
+    for (const row of rows) {
+      const match = !query || row.text.includes(query) || context.has(row.id);
       row.node.hidden = !(match && (query || all || shown < TOPIC_CAP));
       if (!row.node.hidden) shown++;
     }

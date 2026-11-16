@@ -5,11 +5,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ButtonStyle, ComponentType, GatewayOpcodes } from "discord-api-types/v10";
+import { ButtonStyle, ChannelType, ComponentType, GatewayOpcodes } from "discord-api-types/v10";
 import { Agent, Request } from "undici";
 import { Bursts } from "../src/channels/burst.ts";
 import { Channels, type Channel } from "../src/channels/index.ts";
-import { addressesBot, answerCommand, formatDiscordInboundPrompt } from "../src/channels/discord/bot.ts";
+import { addressesBot, answerCommand, formatDiscordInboundPrompt, unfileThreadTopics } from "../src/channels/discord/bot.ts";
 import { DiscordGateway } from "../src/channels/discord/gateway.ts";
 import { discordChunks, toDiscordMarkdown } from "../src/channels/discord/markdown.ts";
 import { DiscordApiError, DiscordRest } from "../src/channels/discord/rest.ts";
@@ -19,6 +19,7 @@ import { discordSessionKey, parseDiscordSessionKey } from "../src/channels/disco
 import { conversationModelScopes, parseSessionKey, topicChain } from "../src/channels/session-key.ts";
 import { conversationIdentity } from "../src/threads/conversation.ts";
 import { logger } from "../src/log.ts";
+import type { GroupConfig } from "../src/config.ts";
 
 const log = logger("test");
 
@@ -61,21 +62,51 @@ test("a Discord conversation is named by its channel, then its server, then the 
 test("a thread sits in its channel and a channel in its category, and each layer's settings reach in", () => {
   const category = { title: "Gabriel", models: [{ model: "claude-code/opus" }] };
   const channel = { title: "#saude", parent: "10" };
-  const thread = { title: "exame de sangue", parent: "20" };
+  // Filed as a topic before threads stopped being topics, with settings of its own.
+  const configured = { title: "consulta", parent: "20", appendSystemPrompt: "kept" };
   const channels = [{
     type: "discord" as const,
     name: "home",
     token: "t",
-    groups: { "1": { title: "cosa nostra", topics: { "10": category, "20": channel, "30": thread, "40": { title: "#saude", parent: "50" }, "50": { title: "Samara" } } } },
+    groups: { "1": {
+      title: "cosa nostra",
+      topics: { "10": category, "20": channel, "40": { title: "#saude", parent: "50" }, "50": { title: "Samara" }, "60": configured },
+      threads: { "30": { title: "exame de sangue", parent: "20" } },
+    } },
   }];
   // Two channels share a name in different categories; the context tells them apart.
   assert.equal(conversationIdentity("discord:home:1:20", channels).label, "Discord · cosa nostra › Gabriel · #saude");
   assert.equal(conversationIdentity("discord:home:1:40", channels).label, "Discord · cosa nostra › Samara · #saude");
-  assert.equal(conversationIdentity("discord:home:1:30", channels).context, "cosa nostra › Gabriel › #saude");
-  // Nothing set on the thread or the channel: the category's models run it.
-  assert.deepEqual(conversationModelScopes("discord:home:1:30", channels), [thread, channel, category, channels[0]!.groups["1"]]);
+  assert.deepEqual(conversationIdentity("discord:home:1:30", channels), {
+    name: "exame de sangue",
+    context: "cosa nostra › Gabriel › #saude",
+    label: "Discord · cosa nostra › Gabriel › #saude · exame de sangue",
+  });
+  // A thread is no scope of its own: its channel's settings run it, and the
+  // category's models with them.
+  assert.deepEqual(conversationModelScopes("discord:home:1:30", channels), [channel, category, channels[0]!.groups["1"]]);
+  assert.deepEqual(conversationModelScopes("discord:home:1:60", channels), [configured, channel, category, channels[0]!.groups["1"]]);
   // A registry edited into a loop still resolves.
   assert.equal(topicChain({ topics: { a: { parent: "b" }, b: { parent: "a" } } }, "a").length, 4);
+});
+
+test("threads registered as topics move under their channel, unless someone configured them", () => {
+  const group: GroupConfig = {
+    topics: {
+      "10": { title: "Repos" },
+      "20": { title: "#eleven", parent: "10" },
+      "21": { title: "#inbox", parent: "10", appendSystemPrompt: "channel" },
+      "30": { title: "forum post", parent: "21" },
+      "31": { title: "archived post", parent: "21" },
+      "32": { title: "tuned post", parent: "21", models: [{ model: "claude-code/opus" }] },
+    },
+  };
+  // The gateway knows the live ones; an archived thread is told by its parent.
+  const known: Record<string, ChannelType> = { "10": ChannelType.GuildCategory, "20": ChannelType.GuildText, "21": ChannelType.GuildForum, "30": ChannelType.PublicThread };
+  assert.equal(unfileThreadTopics(group, (id) => known[id]), true);
+  assert.deepEqual(Object.keys(group.topics!), ["10", "20", "21", "32"]);
+  assert.deepEqual(group.threads, { "30": { title: "forum post", parent: "21" }, "31": { title: "archived post", parent: "21" } });
+  assert.equal(unfileThreadTopics(group, (id) => known[id]), false, "nothing left to move");
 });
 
 test("a table becomes a monospace block with its columns lined up", () => {

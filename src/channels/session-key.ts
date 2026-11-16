@@ -1,4 +1,4 @@
-import type { ChannelConfig, ChannelType, ModelScope, TopicConfig, UserConfig, GroupConfig } from "../config.ts";
+import type { ChannelConfig, ChannelType, ModelScope, ThreadPlacement, TopicConfig, UserConfig, GroupConfig } from "../config.ts";
 import { parseDiscordSessionKey } from "./discord/session-key.ts";
 import { parseGoogleChatSessionKey } from "./googlechat/session-key.ts";
 import { parseTelegramSessionKey } from "./telegram/session-key.ts";
@@ -53,11 +53,22 @@ export function parseSessionKey(sessionKey: string): ConversationTarget | undefi
 // Discord nests a thread in a channel in a category; nothing goes deeper.
 const MAX_TOPIC_DEPTH = 4;
 
-/** A topic and the ones it sits in, innermost first. A registry edited into a
- *  loop stops at the depth nothing real reaches. */
-export function topicChain(owner: { topics?: Record<string, TopicConfig> } | undefined, topicId: string | undefined): TopicConfig[] {
+type TopicOwner = { topics?: Record<string, TopicConfig>; threads?: Record<string, ThreadPlacement> };
+
+/** The Discord thread a conversation happens in, when it is filed as one. A
+ *  thread still configured as a topic of its own (from before threads stopped
+ *  being topics) is that topic instead. */
+export function threadOf(owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined {
+  if (topicId === undefined || owner?.topics?.[topicId]) return undefined;
+  return owner?.threads?.[topicId];
+}
+
+/** A topic and the ones it sits in, innermost first; a thread starts at its
+ *  channel, whose settings it runs on. A registry edited into a loop stops at
+ *  the depth nothing real reaches. */
+export function topicChain(owner: TopicOwner | undefined, topicId: string | undefined): TopicConfig[] {
   const chain: TopicConfig[] = [];
-  for (let id = topicId; id !== undefined && chain.length < MAX_TOPIC_DEPTH; ) {
+  for (let id = threadOf(owner, topicId)?.parent ?? topicId; id !== undefined && chain.length < MAX_TOPIC_DEPTH; ) {
     const topic = owner?.topics?.[id];
     if (!topic) break;
     chain.push(topic);

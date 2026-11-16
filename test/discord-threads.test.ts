@@ -119,7 +119,8 @@ test("three delegated threads start independently, with inherited settings and d
   for (const [index, name] of ["First", "Second", "Third"].entries()) {
     const id = String(30 + index);
     const child = gateway.threads.current(`discord:home:1:${id}`)!;
-    assert.equal(group.topics![id]!.parent, "20", "registered before resolving settings");
+    assert.equal(group.threads![id]!.parent, "20", "placed before resolving settings");
+    assert.equal(group.topics![id], undefined, "a thread is not a topic of its own");
     assert.deepEqual(turns[index + 1]!.request.prompt.appends, ["server instructions", "category instructions", "channel instructions"]);
     assert.deepEqual(turns[index + 1]!.request.models, [{ model: "claude-code/opus" }], "category model beats the workspace default");
     const entries = SessionManager.open(child.sessionFile!).getBranch();

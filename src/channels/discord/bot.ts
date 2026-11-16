@@ -16,7 +16,7 @@ import {
   type GatewayGuildCreateDispatchData,
   type GatewayMessageCreateDispatchData,
 } from "discord-api-types/v10";
-import type { ChannelConfig } from "../../config.ts";
+import type { ChannelConfig, GroupConfig } from "../../config.ts";
 import { formatInboundBody } from "../../media-store.ts";
 import { logger } from "../../log.ts";
 import { STATE_DIR } from "../../paths.ts";
@@ -29,7 +29,7 @@ import { COMMANDS } from "../commands.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import { FAILOVER_PREFIX } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
-import { topicChain } from "../session-key.ts";
+import { threadOf, topicChain } from "../session-key.ts";
 import { compactReplyQuote, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { BACKFILL_MAX_PER_CHANNEL, BACKFILL_WINDOW_MS, isNewer, missedMessages, snowflakeAt, Watermark } from "./backfill.ts";
 import { DiscordGateway } from "./gateway.ts";
@@ -439,10 +439,12 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   /** Keep the registry in sync with live traffic: the server's name heals on
-   *  any message; a channel or thread registers itself the first time it
-   *  speaks, along with what it sits in — a thread's channel, a channel's
-   *  category — so instructions set on those reach it. Names and nesting heal
-   *  the same way. Saves only when something changed. */
+   *  any message; a channel registers itself as a topic the first time it
+   *  speaks, along with the category it sits in, so instructions set on that
+   *  reach it. A thread is only placed under its channel: it runs on the
+   *  channel's settings, and a forum registering every post as a topic buried
+   *  the channels under them. Names and nesting heal the same way. Saves only
+   *  when something changed. */
   async function maintainGroupRegistry(guildId: string, channelId: string) {
     const guildName = guilds.get(guildId)?.name;
     const chain: { id: string; info?: ChannelInfo }[] = [];
@@ -458,7 +460,16 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
         changed = true;
       }
       const topics = (group.topics ??= {});
+      if (unfileThreadTopics(group, (id) => channels.get(id)?.type)) changed = true;
       for (const { id, info } of chain) {
+        if (info?.parentId && THREADS.has(info.type) && !topics[id]) {
+          const placed = group.threads?.[id];
+          if (placed?.title !== info.title || placed?.parent !== info.parentId) {
+            group.threads = { ...group.threads, [id]: { ...(info.title && { title: info.title }), parent: info.parentId } };
+            changed = true;
+          }
+          continue;
+        }
         if (!topics[id]) {
           topics[id] = {};
           changed = true;
@@ -599,7 +610,8 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     }
     const group = config?.groups?.[target.guildId];
     const server = group?.title ?? guilds.get(target.guildId)?.name ?? target.guildId;
-    const path = topicChain(group, target.channelId).reverse().map((topic) => topic.title).filter(Boolean);
+    const thread = threadOf(group, target.channelId);
+    const path = [...topicChain(group, target.channelId).reverse(), ...(thread ? [thread] : [])].map((topic) => topic.title).filter(Boolean);
     return `server "${server}", ${path.length ? path.join(" › ") : `channel ${target.channelId}`}`;
   }
 
@@ -731,6 +743,27 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   return handle;
+}
+
+/**
+ * Move threads registered as topics — every one that ever spoke, before
+ * threads stopped being topics — to where threads are placed now. A thread
+ * someone configured stays a topic, settings and all. `typeOf` knows the
+ * channels the gateway has seen; an archived thread it hasn't is told by its
+ * parent, the one thing only a thread hangs off: a channel (`#name`).
+ */
+export function unfileThreadTopics(group: GroupConfig, typeOf: (id: string) => ChannelType | undefined): boolean {
+  const topics = group.topics ?? {};
+  let moved = false;
+  for (const [id, topic] of Object.entries(topics)) {
+    if (!topic.parent || topic.models?.length || topic.appendSystemPrompt) continue;
+    const type = typeOf(id);
+    if (type === undefined ? !topics[topic.parent]?.title?.startsWith("#") : !THREADS.has(type)) continue;
+    group.threads = { ...group.threads, [id]: { ...(topic.title && { title: topic.title }), parent: topic.parent } };
+    delete topics[id];
+    moved = true;
+  }
+  return moved;
 }
 
 /** Whether a server message is talking to the bot: a mention of it or of the

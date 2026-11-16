@@ -1,4 +1,4 @@
-import type { ChannelConfig, ChannelType, ModelScope, TopicConfig, UserConfig, GroupConfig } from "../config.ts";
+import type { ChannelConfig, ChannelType, ModelScope, ThreadPlacement, TopicConfig, UserConfig, GroupConfig } from "../config.ts";
 import { parseDiscordSessionKey } from "./discord/session-key.ts";
 import { parseGoogleChatSessionKey } from "./googlechat/session-key.ts";
 import { parseTelegramSessionKey } from "./telegram/session-key.ts";
@@ -50,20 +50,34 @@ export function parseSessionKey(sessionKey: string): ConversationTarget | undefi
   return undefined;
 }
 
-// Discord nests a thread in a channel in a category; nothing goes deeper.
-const MAX_TOPIC_DEPTH = 4;
+// Discord nests a channel in a category; nothing goes deeper.
+const MAX_TOPIC_DEPTH = 2;
 
-/** A topic and the ones it sits in, innermost first. A registry edited into a
- *  loop stops at the depth nothing real reaches. */
-export function topicChain(owner: { topics?: Record<string, TopicConfig> } | undefined, topicId: string | undefined): TopicConfig[] {
+type TopicOwner = { topics?: Record<string, TopicConfig>; threads?: Record<string, ThreadPlacement> };
+
+const threadOf = (owner: TopicOwner | undefined, topicId: string | undefined): ThreadPlacement | undefined =>
+  topicId === undefined ? undefined : owner?.threads?.[topicId];
+
+/** A topic and the ones it sits in, innermost first; a thread starts at its
+ *  channel, whose settings it runs on. A registry edited into a loop stops at
+ *  the depth nothing real reaches. */
+export function topicChain(owner: TopicOwner | undefined, topicId: string | undefined): TopicConfig[] {
   const chain: TopicConfig[] = [];
-  for (let id = topicId; id !== undefined && chain.length < MAX_TOPIC_DEPTH; ) {
+  for (let id = threadOf(owner, topicId)?.parent ?? topicId; id !== undefined && chain.length < MAX_TOPIC_DEPTH; ) {
     const topic = owner?.topics?.[id];
     if (!topic) break;
     chain.push(topic);
     id = topic.parent;
   }
   return chain;
+}
+
+/** What a conversation sits in, innermost first, for naming it: its thread,
+ *  if it is one, then the topic chain whose settings it runs on. */
+export function conversationPath(owner: TopicOwner | undefined, topicId: string | undefined): TopicConfig[] {
+  const thread = threadOf(owner, topicId);
+  const chain = topicChain(owner, topicId);
+  return thread ? [thread, ...chain] : chain;
 }
 
 /** The registry entries a conversation sits under, if it has them: its owner,

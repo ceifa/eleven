@@ -61,21 +61,29 @@ test("a Discord conversation is named by its channel, then its server, then the 
 test("a thread sits in its channel and a channel in its category, and each layer's settings reach in", () => {
   const category = { title: "Gabriel", models: [{ model: "claude-code/opus" }] };
   const channel = { title: "#saude", parent: "10" };
-  const thread = { title: "exame de sangue", parent: "20" };
   const channels = [{
     type: "discord" as const,
     name: "home",
     token: "t",
-    groups: { "1": { title: "cosa nostra", topics: { "10": category, "20": channel, "30": thread, "40": { title: "#saude", parent: "50" }, "50": { title: "Samara" } } } },
+    groups: { "1": {
+      title: "cosa nostra",
+      topics: { "10": category, "20": channel, "40": { title: "#saude", parent: "50" }, "50": { title: "Samara" } },
+      threads: { "30": { title: "exame de sangue", parent: "20" } },
+    } },
   }];
   // Two channels share a name in different categories; the context tells them apart.
   assert.equal(conversationIdentity("discord:home:1:20", channels).label, "Discord · cosa nostra › Gabriel · #saude");
   assert.equal(conversationIdentity("discord:home:1:40", channels).label, "Discord · cosa nostra › Samara · #saude");
-  assert.equal(conversationIdentity("discord:home:1:30", channels).context, "cosa nostra › Gabriel › #saude");
-  // Nothing set on the thread or the channel: the category's models run it.
-  assert.deepEqual(conversationModelScopes("discord:home:1:30", channels), [thread, channel, category, channels[0]!.groups["1"]]);
+  assert.deepEqual(conversationIdentity("discord:home:1:30", channels), {
+    name: "exame de sangue",
+    context: "cosa nostra › Gabriel › #saude",
+    label: "Discord · cosa nostra › Gabriel › #saude · exame de sangue",
+  });
+  // A thread is no scope of its own: its channel's settings run it, and the
+  // category's models with them.
+  assert.deepEqual(conversationModelScopes("discord:home:1:30", channels), [channel, category, channels[0]!.groups["1"]]);
   // A registry edited into a loop still resolves.
-  assert.equal(topicChain({ topics: { a: { parent: "b" }, b: { parent: "a" } } }, "a").length, 4);
+  assert.equal(topicChain({ topics: { a: { parent: "b" }, b: { parent: "a" } } }, "a").length, 2);
 });
 
 test("a table becomes a monospace block with its columns lined up", () => {

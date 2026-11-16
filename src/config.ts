@@ -84,9 +84,9 @@ export interface TopicConfig extends ModelScope {
   iconEmojiId?: string;
   /** Extra instructions appended to this topic's system prompt. */
   appendSystemPrompt?: string;
-  /** The topic this one sits in — a Discord thread's channel, a channel's
-   * category. Its instructions apply here too, and its models unless this
-   * one has its own. Self-heals from live traffic. */
+  /** The topic this one sits in — a Discord channel's category. Its
+   * instructions apply here too, and its models unless this one has its own.
+   * Self-heals from live traffic. */
   parent?: string;
 }
 
@@ -95,9 +95,19 @@ export interface GroupConfig extends ModelScope {
   title?: string;
   /** Extra instructions appended to this group's system prompt. */
   appendSystemPrompt?: string;
-  /** Forum topics — on Discord, the server's channels and threads — keyed by
-   * id. Each topic is its own thread/session. */
+  /** Forum topics — on Discord, the server's categories and channels — keyed
+   * by id. Each topic is its own thread/session. */
   topics?: Record<string, TopicConfig>;
+  /** Discord threads and forum posts, keyed by id: named and placed under
+   * their channel, never configured on their own — a thread runs on its
+   * channel's settings. Self-heals from live traffic. */
+  threads?: Record<string, ThreadPlacement>;
+}
+
+export interface ThreadPlacement {
+  title?: string;
+  /** The channel (or forum) the thread hangs off. */
+  parent: string;
 }
 
 export interface UserConfig extends ModelScope {

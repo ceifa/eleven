@@ -29,7 +29,7 @@ import { COMMANDS } from "../commands.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import { FAILOVER_PREFIX } from "../failover.ts";
 import type { PairingRequest } from "../pairing.ts";
-import { topicChain } from "../session-key.ts";
+import { conversationPath } from "../session-key.ts";
 import { compactReplyQuote, foldDisplayName, sanitizeContextLabel } from "../text.ts";
 import { BACKFILL_MAX_PER_CHANNEL, BACKFILL_WINDOW_MS, isNewer, missedMessages, snowflakeAt, Watermark } from "./backfill.ts";
 import { DiscordGateway } from "./gateway.ts";
@@ -439,10 +439,10 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   /** Keep the registry in sync with live traffic: the server's name heals on
-   *  any message; a channel or thread registers itself the first time it
-   *  speaks, along with what it sits in — a thread's channel, a channel's
-   *  category — so instructions set on those reach it. Names and nesting heal
-   *  the same way. Saves only when something changed. */
+   *  any message; a channel registers itself the first time it speaks, along
+   *  with its category, so instructions set on that reach it. A thread is only
+   *  placed under its channel, never a topic: a forum would otherwise bury the
+   *  channels under its posts. Saves only when something changed. */
   async function maintainGroupRegistry(guildId: string, channelId: string) {
     const guildName = guilds.get(guildId)?.name;
     const chain: { id: string; info?: ChannelInfo }[] = [];
@@ -459,6 +459,14 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       }
       const topics = (group.topics ??= {});
       for (const { id, info } of chain) {
+        if (info?.parentId && THREADS.has(info.type)) {
+          const placed = group.threads?.[id];
+          if (placed?.title !== info.title || placed?.parent !== info.parentId) {
+            (group.threads ??= {})[id] = { ...(info.title && { title: info.title }), parent: info.parentId };
+            changed = true;
+          }
+          continue;
+        }
         if (!topics[id]) {
           topics[id] = {};
           changed = true;
@@ -599,7 +607,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
     }
     const group = config?.groups?.[target.guildId];
     const server = group?.title ?? guilds.get(target.guildId)?.name ?? target.guildId;
-    const path = topicChain(group, target.channelId).reverse().map((topic) => topic.title).filter(Boolean);
+    const path = conversationPath(group, target.channelId).reverse().map((topic) => topic.title).filter(Boolean);
     return `server "${server}", ${path.length ? path.join(" › ") : `channel ${target.channelId}`}`;
   }
 

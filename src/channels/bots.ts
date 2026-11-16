@@ -273,14 +273,16 @@ export class BotChannel<H extends ChatBot> implements Channel {
 }
 
 /** Sender-level access: is this person allowed here at all? A DM needs the
- *  person allowlisted; a group needs registering, and then listens to its
- *  allowed users. Mention gating is each platform's own, and separate. */
+ *  person allowlisted. In a group, its allowed users are heard whether or not
+ *  the group is registered: someone the bot already answers can bring it
+ *  anywhere. Anyone else is ignored in a registered group and, in one nobody
+ *  registered, files it as a pairing request. Mention gating is each
+ *  platform's own, and separate. */
 export function senderAccess(config: ChannelConfig, userId: string, groupId: string | undefined): "ok" | "pair" | "ignore" {
   if (groupId === undefined) return config.users?.[userId] ? "ok" : "pair";
-  // Unregistered group → surface a pairing request instead of silence.
-  if (!config.groups?.[groupId]) return "pair";
   const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
-  return allowed.includes(userId) ? "ok" : "ignore";
+  if (allowed.includes(userId)) return "ok";
+  return config.groups?.[groupId] ? "ignore" : "pair";
 }
 
 /** Names self-heal from traffic, like group titles: an allowed user's entry

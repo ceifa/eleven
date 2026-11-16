@@ -362,8 +362,7 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps, io?
   function checkAccess(ctx: Context, config: ChannelConfig): "ok" | "pair" | "ignore" {
     const access = accessOf(ctx.chat!, ctx.message!.from!.id, config);
     if (access !== "ok" || ctx.chat!.type === "private") return access;
-    const group = config.groups![String(ctx.chat!.id)];
-    if (group.requireMention === false) return "ok";
+    if (config.groups?.[String(ctx.chat!.id)]?.requireMention === false) return "ok";
     return isMention(ctx) ? "ok" : "ignore";
   }
 

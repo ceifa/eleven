@@ -433,7 +433,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   function checkAccess(message: GatewayMessageCreateDispatchData, config: ChannelConfig): "ok" | "pair" | "ignore" {
     const access = senderAccess(config, message.author.id, message.guild_id);
     if (access !== "ok" || !message.guild_id) return access;
-    if (config.groups![message.guild_id]!.requireMention === false) return "ok";
+    if (config.groups?.[message.guild_id]?.requireMention === false) return "ok";
     // A reply to the bot counts: answering it is talking to it.
     return addressesBot(message, self!.id, ownRoles) ? "ok" : "ignore";
   }

@@ -200,10 +200,20 @@ test("a stranger's DM becomes a pairing request and a polite notice, not a turn"
   await bot.handleEvent(message(STRANGER, DM, { text: "again" }));
   assert.equal(posted.length, 1, "asking twice stays quiet");
   assert.equal(turns.length, 0);
-  // A space nobody approved knocks silently.
-  await bot.handleEvent(message(GABRIEL, { ...ROOM, name: "spaces/OTHER" }, { argumentText: " hi" }));
+  // A stranger in a space nobody approved knocks silently.
+  await bot.handleEvent(message(STRANGER, { ...ROOM, name: "spaces/OTHER" }, { argumentText: " hi" }));
   assert.deepEqual(requests.at(-1)!.chatId, "OTHER");
   assert.equal(posted.length, 1);
+});
+
+test("an allowed user is answered in a space nobody registered, which stays unregistered", async () => {
+  const { bot, config, posted, turns, requests } = harness();
+  await bot.handleEvent(message(GABRIEL, { ...ROOM, name: "spaces/OTHER", displayName: "Weekly" }, { argumentText: " is it in prod?" }));
+  await until(() => posted.length > 0);
+  assert.deepEqual(requests, []);
+  assert.equal(config.groups!.OTHER, undefined);
+  assert.equal(turns[0]!.sessionKey, "googlechat:oracle:OTHER:T1");
+  assert.deepEqual(posted, [{ space: "spaces/OTHER", text: "answer to is it in prod?", thread: "spaces/OTHER/threads/T1" }]);
 });
 
 test("an allowed DM runs a turn and answers in the DM, outside any thread", async () => {
@@ -220,20 +230,16 @@ test("an allowed DM runs a turn and answers in the DM, outside any thread", asyn
 });
 
 test("a DM between two people is a space, not the DM of whoever mentioned the app", async () => {
-  const { bot, config, posted, turns, requests } = harness();
+  const { bot, posted, turns } = harness();
   await bot.handleEvent(message(GABRIEL, DM, { text: "hi" }));
   await until(() => posted.length > 0);
-  await bot.handleEvent(message(GABRIEL, SHARED_DM, { text: "@Oracle test", argumentText: " test" }));
-  assert.deepEqual(requests.map((r) => [r.kind, r.chatId]), [["group", "SHARED"]]);
-  assert.equal(turns.length, 1);
-  // Gabriel's own DM still goes to the app's DM, not the conversation with someone else.
-  await bot.send("googlechat:oracle:dm:111", "private");
-  assert.equal(posted.at(-1)!.space, "spaces/DMSPACE");
-  config.groups!.SHARED = {};
   await bot.handleEvent(message(GABRIEL, SHARED_DM, { text: "@Oracle test", argumentText: " test" }));
   await until(() => turns.length > 1);
   assert.equal(turns[1]!.sessionKey, "googlechat:oracle:SHARED:T1");
   assert.equal(turns[1]!.text, "[Gabriel Francisco <gabriel@example.com>]\ntest");
+  // Gabriel's own DM still goes to the app's DM, not the conversation with someone else.
+  await bot.send("googlechat:oracle:dm:111", "private");
+  assert.equal(posted.at(-1)!.space, "spaces/DMSPACE");
 });
 
 test("a mention in a space runs in its thread, says who asked, and answers there", async () => {

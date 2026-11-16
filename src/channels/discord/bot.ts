@@ -22,7 +22,7 @@ import { logger } from "../../log.ts";
 import { STATE_DIR } from "../../paths.ts";
 import { keyedLane } from "../../util.ts";
 import { capped } from "../avatars.ts";
-import { admit, healUser, type BotDeps, type ChatBot } from "../bots.ts";
+import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
 import type { ChannelDestination, CreatedConversation, ReplyOptions } from "../index.ts";
 import { BACKGROUND_STOP_PREFIX } from "../background.ts";
 import { COMMANDS } from "../commands.ts";
@@ -431,10 +431,9 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
   }
 
   function checkAccess(message: GatewayMessageCreateDispatchData, config: ChannelConfig): "ok" | "pair" | "ignore" {
-    const access = admit(deps, config, message.author.id, message.guild_id, message.guild_id && guilds.get(message.guild_id)?.name);
+    const access = senderAccess(config, message.author.id, message.guild_id);
     if (access !== "ok" || !message.guild_id) return access;
-    // Fresh: the server may have just been registered.
-    if (deps.botConfig()?.groups?.[message.guild_id]?.requireMention === false) return "ok";
+    if (config.groups?.[message.guild_id]?.requireMention === false) return "ok";
     // A reply to the bot counts: answering it is talking to it.
     return addressesBot(message, self!.id, ownRoles) ? "ok" : "ignore";
   }
@@ -524,7 +523,7 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
 
     // Same access policy as messages, minus the mention gate (a command or a
     // press is explicit).
-    if (admit(deps, config, user.id, guildId, guildId && guilds.get(guildId)?.name) !== "ok") {
+    if (senderAccess(config, user.id, guildId) !== "ok") {
       await respond({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: "This bot is private.", flags: MessageFlags.Ephemeral } });
       return;
     }

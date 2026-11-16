@@ -161,7 +161,6 @@ function harness(channel: Partial<ChannelConfig> = {}, history: (space: string, 
     autoFailover: () => false,
     updateGroup: (id, mutate) => { if (config.groups?.[id] && mutate(config.groups[id]!)) saved++; },
     updateUser: (id, mutate) => { if (config.users?.[id] && mutate(config.users[id]!)) saved++; },
-    registerGroup: (id, title) => { config.groups = { ...config.groups, [id]: title ? { title } : {} }; saved++; },
   }, {
     api: {
       createMessage: async (space, text, thread) => (posted.push({ space, text, thread }), { name: `${space}/messages/${posted.length}` }),
@@ -207,19 +206,14 @@ test("a stranger's DM becomes a pairing request and a polite notice, not a turn"
   assert.equal(posted.length, 1);
 });
 
-test("an allowed user who mentions the app in a new space registers it and gets the answer there", async () => {
+test("an allowed user is answered in a space nobody registered, which stays unregistered", async () => {
   const { bot, config, posted, turns, requests } = harness();
   await bot.handleEvent(message(GABRIEL, { ...ROOM, name: "spaces/OTHER", displayName: "Weekly" }, { argumentText: " is it in prod?" }));
   await until(() => posted.length > 0);
   assert.deepEqual(requests, []);
-  assert.deepEqual(config.groups!.OTHER, { title: "Weekly" });
+  assert.equal(config.groups!.OTHER, undefined);
   assert.equal(turns[0]!.sessionKey, "googlechat:oracle:OTHER:T1");
   assert.deepEqual(posted, [{ space: "spaces/OTHER", text: "answer to is it in prod?", thread: "spaces/OTHER/threads/T1" }]);
-  // Registering it doesn't open it to everyone there.
-  await bot.handleEvent(message(STRANGER, { ...ROOM, name: "spaces/OTHER" }, { argumentText: " me too" }));
-  await new Promise((resolve) => setTimeout(resolve, 1_700));
-  assert.equal(turns.length, 1);
-  assert.deepEqual(requests, []);
 });
 
 test("an allowed DM runs a turn and answers in the DM, outside any thread", async () => {

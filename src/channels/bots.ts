@@ -22,8 +22,6 @@ export interface BotDeps {
   updateGroup: (id: string, mutate: (group: GroupConfig) => boolean) => void;
   /** Mutate an allowed user's config entry; return true to persist. */
   updateUser: (id: string, mutate: (user: UserConfig) => boolean) => void;
-  /** Add a group to the registry, as approving its pairing request would. */
-  registerGroup: (id: string, title?: string) => void;
 }
 
 /** What every running bot offers the daemon, whatever its platform. The
@@ -121,7 +119,6 @@ export class BotPool<H extends { stop(): Promise<void> }> {
         autoFailover: () => this.config.resolved.autoFailover === true,
         updateGroup: (id, mutate) => this.updateEntry(name, (c) => c.groups?.[id], mutate),
         updateUser: (id, mutate) => this.updateEntry(name, (c) => c.users?.[id], mutate),
-        registerGroup: (id, title) => this.registerGroup(name, id, title),
       });
       this.bots.set(name, { handle, token: channel.token });
     }
@@ -136,14 +133,6 @@ export class BotPool<H extends { stop(): Promise<void> }> {
     const entry = channel && pick(channel);
     if (!entry || !mutate(entry)) return;
     this.config.save(this.config.raw);
-  }
-
-  private registerGroup(channelName: string, id: string, title: string | undefined) {
-    const channel = this.config.channels(this.config.raw).find((c) => c.channel.name === channelName)?.channel;
-    if (!channel || channel.groups?.[id]) return;
-    channel.groups = { ...channel.groups, [id]: title ? { title } : {} };
-    this.config.save(this.config.raw);
-    this.log.info(`${channelName}: group ${id}${title ? ` (${title})` : ""} registered by an allowed user`);
   }
 }
 
@@ -284,24 +273,16 @@ export class BotChannel<H extends ChatBot> implements Channel {
 }
 
 /** Sender-level access: is this person allowed here at all? A DM needs the
- *  person allowlisted; a group listens to its allowed users. A group nobody
- *  registered yet is registered by the first allowed user who speaks there
- *  (someone trusted brings the bot along); anyone else's word in it becomes a
- *  pairing request. Mention gating is each platform's own, and separate. */
-export function senderAccess(config: ChannelConfig, userId: string, groupId: string | undefined): "ok" | "pair" | "ignore" | "register" {
+ *  person allowlisted. In a group, its allowed users are heard whether or not
+ *  the group is registered: someone the bot already answers can bring it
+ *  anywhere. Anyone else is ignored in a registered group and, in one nobody
+ *  registered, files it as a pairing request. Mention gating is each
+ *  platform's own, and separate. */
+export function senderAccess(config: ChannelConfig, userId: string, groupId: string | undefined): "ok" | "pair" | "ignore" {
   if (groupId === undefined) return config.users?.[userId] ? "ok" : "pair";
-  const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String).includes(userId);
-  if (!config.groups?.[groupId]) return allowed ? "register" : "pair";
-  return allowed ? "ok" : "ignore";
-}
-
-/** `senderAccess`, acted on: a group an allowed user speaks in is registered
- *  on the spot. Read the channel's config again afterwards. */
-export function admit(deps: Pick<BotDeps, "registerGroup">, config: ChannelConfig, userId: string, groupId: string | undefined, title?: string): "ok" | "pair" | "ignore" {
-  const access = senderAccess(config, userId, groupId);
-  if (access !== "register") return access;
-  deps.registerGroup(groupId!, title);
-  return "ok";
+  const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
+  if (allowed.includes(userId)) return "ok";
+  return config.groups?.[groupId] ? "ignore" : "pair";
 }
 
 /** Names self-heal from traffic, like group titles: an allowed user's entry

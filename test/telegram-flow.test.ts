@@ -170,6 +170,24 @@ test("a group only hears its allowed users, and only when it is addressed", asyn
   assert.equal(knocks.length, 0);
 });
 
+test("in a group nobody registered, an allowed user is heard when addressed and a stranger knocks", async (t) => {
+  const config: ChannelConfig = { type: "telegram", name: "main", token: "t", users: { "42": {} } };
+  const { turns, queued, knocks, message } = harness(t, config);
+  const chat = { id: -200, type: "supergroup", title: "Elsewhere" };
+
+  await message({ message_id: 1, chat, from: gabriel, text: "talking among ourselves" });
+  await message({ message_id: 2, chat, from: gabriel, text: "@mortar_bot ping" });
+  await until(() => queued.length === 1, "the addressed message's turn");
+  assert.deepEqual(turns.map((turn) => turn.text), ["[Gabriel @c3if4]\n@mortar_bot ping"]);
+  assert.equal(knocks.length, 0);
+  assert.equal(config.groups, undefined);
+
+  await message({ message_id: 3, chat, from: { id: 77, is_bot: false, first_name: "Stranger" }, text: "@mortar_bot hi" });
+  await until(() => knocks.length === 1, "the stranger's knock");
+  assert.deepEqual([knocks[0].kind, knocks[0].chatId], ["group", "-200"]);
+  assert.equal(turns.length, 1);
+});
+
 test("a stranger's DM becomes one pairing request and a notice, never a turn", async (t) => {
   const { turns, knocks, message, sent } = harness(t, { type: "telegram", name: "main", token: "t", users: {} });
   await message({ message_id: 1, chat: { id: 77, type: "private" }, from: { id: 77, is_bot: false, first_name: "T\u{1D68E}\u{1D425}\u{1D68E}gram", username: "who" }, text: "let me in" });

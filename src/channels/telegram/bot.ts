@@ -3,7 +3,7 @@ import { run, sequentialize, type RunnerHandle } from "@grammyjs/runner";
 import { apiThrottler } from "@grammyjs/transformer-throttler";
 import type { InlineKeyboardMarkup } from "@grammyjs/types";
 import type { ChannelConfig, TopicConfig } from "../../config.ts";
-import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
+import { admit, healUser, type BotDeps, type ChatBot } from "../bots.ts";
 import { BACKGROUND_STOP_PREFIX } from "../background.ts";
 import { COMMANDS } from "../commands.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
@@ -355,15 +355,15 @@ export function startTelegramBot(name: string, token: string, deps: BotDeps, io?
   }
 
   /** Chat-level access: is this sender allowed here at all? (mention gating is separate) */
-  function accessOf(chat: { type: string; id: number }, userId: number, config: ChannelConfig): "ok" | "pair" | "ignore" {
-    return senderAccess(config, String(userId), chat.type === "private" ? undefined : String(chat.id));
+  function accessOf(chat: { type: string; id: number; title?: string }, userId: number, config: ChannelConfig): "ok" | "pair" | "ignore" {
+    return admit(deps, config, String(userId), chat.type === "private" ? undefined : String(chat.id), chat.title);
   }
 
   function checkAccess(ctx: Context, config: ChannelConfig): "ok" | "pair" | "ignore" {
     const access = accessOf(ctx.chat!, ctx.message!.from!.id, config);
     if (access !== "ok" || ctx.chat!.type === "private") return access;
-    const group = config.groups![String(ctx.chat!.id)];
-    if (group.requireMention === false) return "ok";
+    // Fresh: the group may have just been registered.
+    if (deps.botConfig()?.groups?.[String(ctx.chat!.id)]?.requireMention === false) return "ok";
     return isMention(ctx) ? "ok" : "ignore";
   }
 

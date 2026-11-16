@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { ChannelConfig } from "../../config.ts";
 import { logger } from "../../log.ts";
 import { type InboundMedia, formatInboundBody, mediaNote, sanitizeNoteValue, saveInboundMedia, transcribeMedia } from "../../media-store.ts";
-import { healUser, senderAccess, type BotDeps, type ChatBot } from "../bots.ts";
+import { admit, healUser, type BotDeps, type ChatBot } from "../bots.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import type { ReplyOptions } from "../index.ts";
 import type { PairingRequest } from "../pairing.ts";
@@ -154,7 +154,7 @@ export function createGoogleChatBot(name: string, deps: BotDeps, client: GoogleC
     if (event.type === "REMOVED_FROM_SPACE") return void log.info(`removed from ${space.name}`);
     if (event.type !== "MESSAGE" && event.type !== "ADDED_TO_SPACE") return;
 
-    const access = senderAccess(config, userId, dm ? undefined : spaceId);
+    const access = admit(deps, config, userId, dm ? undefined : spaceId, space.displayName);
     if (access === "pair") return offerPairing(dm, userId, spaceId, sender, space);
     if (access === "ignore") return;
     selfHeal(dm, userId, spaceId, sender, space);

@@ -111,6 +111,23 @@ test("a table becomes a monospace block with its columns lined up", () => {
   ].join("\n"));
 });
 
+test("a table too wide for a phone becomes one entry per row", () => {
+  const markdown = [
+    "| Step | **Cost** | Cause |",
+    "|---|---|---|",
+    "| **Rebuild** (build.py) | ~9 min per build, 3 to 9 builds per session | Every `bpy.ops` call slows down as the scene grows |",
+    "| Page | | Re-encodes textures that did not change |",
+  ].join("\n");
+  assert.equal(toDiscordMarkdown(markdown), [
+    "**Rebuild (build.py)**",
+    "- Cost: ~9 min per build, 3 to 9 builds per session",
+    "- Cause: Every `bpy.ops` call slows down as the scene grows",
+    "",
+    "**Page**",
+    "- Cause: Re-encodes textures that did not change",
+  ].join("\n"));
+});
+
 test("Discord markdown leaves code alone and flattens headings it cannot draw", () => {
   const code = "```\n| a | b |\n|---|---|\n#### not a heading\n```";
   assert.equal(toDiscordMarkdown(code), code);

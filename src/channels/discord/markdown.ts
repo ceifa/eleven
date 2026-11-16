@@ -6,12 +6,15 @@ const MESSAGE_LIMIT = 1_900;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const TABLE_DELIMITER = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+// Wider than this, a monospace row wraps in a phone's code block and the
+// columns fall apart.
+const TABLE_WIDTH = 60;
 
 /**
  * Agent markdown as Discord renders it. Discord draws headings up to `###`,
  * lists, quotes, code and spoilers like any chat, but not tables — a table
- * arrives as rows of pipes. Those become a monospace block with the columns
- * lined up, which reads as the table it was.
+ * arrives as rows of pipes. A narrow one becomes a monospace block with the
+ * columns lined up; a wide one, one entry per row, which wraps cleanly.
  */
 export function toDiscordMarkdown(markdown: string): string {
   const lines = markdown.split("\n");
@@ -53,13 +56,24 @@ export function escapeMarkdown(text: string): string {
 function cells(row: string): string[] {
   const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
   // An escaped pipe is part of the cell, not a border.
-  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|").replaceAll(/\*\*|__|`/g, ""));
+  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|"));
 }
 
-function renderTable(rows: string[][]): string[] {
+function renderTable(markdown: string[][]): string[] {
+  const rows = markdown.map((row) => row.map((cell) => cell.replaceAll(/\*\*|__|`/g, "")));
   const columns = Math.max(...rows.map((row) => row.length));
   const widths = Array.from({ length: columns }, (_, c) => Math.max(...rows.map((row) => [...(row[c] ?? "")].length)));
+  if (widths.reduce((sum, width) => sum + width + 2, -2) > TABLE_WIDTH) return renderEntries(markdown);
   const render = (row: string[]) => widths.map((width, c) => (row[c] ?? "").padEnd(width + (row[c] ?? "").length - [...(row[c] ?? "")].length)).join("  ").trimEnd();
   const [header, ...body] = rows;
   return ["```", render(header!), widths.map((width) => "─".repeat(width)).join("  "), ...body.map(render), "```"];
+}
+
+function renderEntries([header, ...body]: string[][]): string[] {
+  const plain = (cell = "") => cell.replaceAll(/\*\*|__/g, "");
+  return body.flatMap((row, r) => [
+    ...(r ? [""] : []),
+    `**${plain(row[0])}**`,
+    ...row.slice(1).flatMap((cell, c) => (cell ? [`- ${header![c + 1] ? `${plain(header![c + 1])}: ` : ""}${cell}`] : [])),
+  ]);
 }

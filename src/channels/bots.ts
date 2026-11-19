@@ -280,9 +280,13 @@ export class BotChannel<H extends ChatBot> implements Channel {
  *  platform's own, and separate. */
 export function senderAccess(config: ChannelConfig, userId: string, groupId: string | undefined): "ok" | "pair" | "ignore" {
   if (groupId === undefined) return config.users?.[userId] ? "ok" : "pair";
-  const allowed = (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
-  if (allowed.includes(userId)) return "ok";
+  if (groupAllowedUsers(config).includes(userId)) return "ok";
   return config.groups?.[groupId] ? "ignore" : "pair";
+}
+
+/** Who is heard in a group, registered or not. */
+export function groupAllowedUsers(config: ChannelConfig): string[] {
+  return (config.groupAllowedUsers ?? Object.keys(config.users ?? {})).map(String);
 }
 
 /** Names self-heal from traffic, like group titles: an allowed user's entry

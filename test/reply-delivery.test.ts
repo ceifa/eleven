@@ -108,6 +108,20 @@ test("revoked destinations are blocked durably and never reach the transport", a
   assert.ok(DeliveryRevoked.prototype instanceof Error);
 });
 
+test("an answer in an unregistered group reaches its allowed users, and stops when nobody is allowed", async () => {
+  const sent: string[] = [];
+  let users: Record<string, object> = { "users/1": {} };
+  const channels = new Channels({ channels: () => [{ channel: { type: "googlechat", name: "main", users } }] } as never, {} as never, [{
+    type: "googlechat", sendToSession: async (key: string) => { sent.push(key); return {}; },
+  }] as never);
+  const key = "googlechat:main:space1:thread1";
+  await channels.sendReply(key, "answer", {});
+  assert.deepEqual(sent, [key]);
+  users = {};
+  await assert.rejects(channels.sendReply(key, "answer", {}), DeliveryRevoked);
+  assert.equal(sent.length, 1);
+});
+
 test("a final is committed before status cleanup and retried without a second model call", async (t) => {
   const pending = ledger();
   let generated = 0;

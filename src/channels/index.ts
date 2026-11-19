@@ -1,5 +1,6 @@
 import { parseSessionKey, scopesOf } from "./session-key.ts";
 import { DeliveryRevoked } from "./replies.ts";
+import { groupAllowedUsers } from "./bots.ts";
 import type { ConfigStore, ChannelType } from "../config.ts";
 import type { Avatar } from "./avatars.ts";
 import type { PairingRequest, PairingStore } from "./pairing.ts";
@@ -100,7 +101,9 @@ export class Channels {
   async sendReply(sessionKey: string, text: string, options: ReplyOptions) {
     const target = parseSessionKey(sessionKey);
     const configured = target && this.config.channels().find(({ channel }) => channel.type === target.type && channel.name === target.channel)?.channel;
-    if (!target || !configured || !scopesOf(target, configured).owner) throw new DeliveryRevoked("delivery destination is no longer allowed");
+    // An unregistered group still answers its allowed users, as senderAccess lets them in.
+    const allowed = target && configured && (scopesOf(target, configured).owner || (target.owner.kind === "group" && groupAllowedUsers(configured).length > 0));
+    if (!allowed) throw new DeliveryRevoked("delivery destination is no longer allowed");
     return this.sendToSession(sessionKey, text, options);
   }
 

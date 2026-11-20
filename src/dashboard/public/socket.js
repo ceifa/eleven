@@ -6,7 +6,7 @@ import { MATCH_CHARS } from "./live-turn.js";
 import { keep } from "./snapshot.js";
 import { sameMessage } from "./message-display.js";
 import { state, view } from "./state.js";
-import { cachedGet, invalidate } from "./api.js";
+import { cachedGet, invalidate, signingIn } from "./api.js";
 import { toast } from "./ui.js";
 import { applyPairingBadge, pulse, stripError, stripFlash } from "./chrome.js";
 import { onThreadsView, render, routes } from "./router.js";
@@ -27,6 +27,7 @@ import { refreshThreads, scheduleThreadRefresh } from "./threads.js";
 // Reload rather than limp along.
 let shellVersion;
 function connectWs() {
+  if (signingIn) return;
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${scheme}//${location.host}/ws`);
   const dot = document.getElementById("ws-dot");

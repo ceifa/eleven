@@ -29,10 +29,21 @@ async function ok(response) {
  *  unless asked: a proxy still redirecting after a sign-in would otherwise
  *  reload the page forever. */
 const SIGNIN_RETRY_MS = 60_000;
-function signIn({ force = false } = {}) {
+/** Whether this page has left to sign in. It stays alive until the proxy's
+ *  redirects end, and every request it sends the proxy meanwhile comes back
+ *  with a fresh CF_AppSession cookie that voids the sign-in in flight: Access
+ *  then sends the browser round the login again, until Safari gives up. */
+let signingIn = false;
+async function signIn({ force = false } = {}) {
   const last = Number(sessionStorage.getItem("eleven.signin-at"));
   if (!force && Date.now() - last < SIGNIN_RETRY_MS) return;
   sessionStorage.setItem("eleven.signin-at", String(Date.now()));
+  signingIn = true;
+  // The browser checks a worker for updates on every navigation in its scope,
+  // and every hop of the sign-in is one. The next load registers it again.
+  try {
+    await (await navigator.serviceWorker?.getRegistration())?.unregister();
+  } catch {}
   location.assign(`/api/signin${location.hash}`);
 }
 
@@ -80,4 +91,4 @@ function cachedGet(path, { force = false } = {}) {
 const seedCache = (path, value) => reads.set(path, { at: Date.now(), value });
 const invalidate = (...paths) => { for (const path of paths) reads.delete(path); };
 
-export { call, api, SignInExpired, ok, signIn, started, prefetch, cachedGet, seedCache, invalidate };
+export { call, api, SignInExpired, ok, signIn, signingIn, started, prefetch, cachedGet, seedCache, invalidate };

@@ -254,6 +254,7 @@ function apiHelpers(answer: { type: string; status?: number }) {
   ].join("\n");
   const requests: { url: string; init: RequestInit }[] = [];
   const assigned: string[] = [];
+  const trail: string[] = [];
   const session = new Map<string, string>();
   const context = vm.createContext({
     fetch: async (url: string, init: RequestInit) => {
@@ -261,12 +262,22 @@ function apiHelpers(answer: { type: string; status?: number }) {
       return { ok: false, statusText: "", json: async () => ({}), ...answer };
     },
     sessionStorage: { getItem: (key: string) => session.get(key) ?? null, setItem: (key: string, value: string) => session.set(key, value) },
-    location: { assign: (url: string) => assigned.push(url), hash: "" },
+    location: { assign: (url: string) => (assigned.push(url), trail.push(`assign ${url}`)), hash: "" },
+    navigator: { serviceWorker: { getRegistration: async () => ({ unregister: async () => (trail.push("unregister"), true) }) } },
     Date,
   });
-  vm.runInContext(`${source}\nthis.read = (path) => call(path).then(ok); this.signIn = signIn;`, context);
-  return { read: context.read as (path: string) => Promise<unknown>, signIn: context.signIn as (options?: object) => void, requests, assigned };
+  vm.runInContext(`${source}\nthis.read = (path) => call(path).then(ok); this.signIn = signIn; this.signingIn = () => signingIn;`, context);
+  return {
+    read: context.read as (path: string) => Promise<unknown>,
+    signIn: context.signIn as (options?: object) => Promise<void>,
+    signingIn: context.signingIn as () => boolean,
+    requests,
+    assigned,
+    trail,
+  };
 }
+
+const settled = () => new Promise((resolve) => setImmediate(resolve));
 
 test("an auth proxy's expired session sends the page to sign in, not to 'can't reach the daemon'", async () => {
   // The service worker answers the shell from its cache, so an expired
@@ -275,6 +286,7 @@ test("an auth proxy's expired session sends the page to sign in, not to 'can't r
   // a followed redirect fails on CORS as a TypeError: the daemon looked down.
   const gated = apiHelpers({ type: "opaqueredirect", status: 0 });
   await assert.rejects(gated.read("/overview"), /sign-in expired/);
+  await settled();
   assert.equal(gated.requests[0].url, "/api/overview");
   assert.equal(gated.requests[0].init.redirect, "manual");
   assert.deepEqual(gated.assigned, ["/api/signin"]);
@@ -283,8 +295,9 @@ test("an auth proxy's expired session sends the page to sign in, not to 'can't r
   // proxy that redirects again right after a sign-in would loop the page
   // forever, so only the button on the error goes again inside the minute.
   await assert.rejects(gated.read("/threads"));
+  await settled();
   assert.deepEqual(gated.assigned, ["/api/signin"]);
-  gated.signIn({ force: true });
+  await gated.signIn({ force: true });
   assert.deepEqual(gated.assigned, ["/api/signin", "/api/signin"]);
 
   // A daemon error is still a daemon error.
@@ -299,6 +312,25 @@ test("an auth proxy's expired session sends the page to sign in, not to 'can't r
   assert.deepEqual(page.match(/fetch\(`\/api/g), ["fetch(`/api"], "only call() should fetch the API");
   assert.match(read("api.js"), /const call = \(path, init\) => fetch\(`\/api/);
   assert.match(read("router.js"), /error instanceof SignInExpired[\s\S]{0,300}signIn\(\{ force: true \}\)/);
+});
+
+test("a page that left to sign in sends the proxy nothing more until it is gone", async () => {
+  // The page outlives the navigation until the proxy's redirects end, and each
+  // request it, or the browser on its behalf, sends the proxy meanwhile gets a
+  // fresh CF_AppSession cookie back that voids the sign-in in flight. Access
+  // then sends the browser round its login again: ten silent logins in ten
+  // seconds on an iPhone, and the page still saying the sign-in expired.
+  const gated = apiHelpers({ type: "opaqueredirect", status: 0 });
+  assert.equal(gated.signingIn(), false);
+  await assert.rejects(gated.read("/overview"), /sign-in expired/);
+  await settled();
+  assert.equal(gated.signingIn(), true);
+  // The browser checks the worker for updates on every navigation in its
+  // scope; with no worker there is nothing to check.
+  assert.deepEqual(gated.trail, ["unregister", "assign /api/signin"]);
+  // The socket stops reconnecting, including a reconnect already scheduled.
+  assert.match(read("socket.js"), /function connectWs\(\) \{\n\s*if \(signingIn\) return;/);
+  assert.match(read("socket.js"), /import \{[^}]*\bsigningIn\b[^}]*\} from "\.\/api\.js";/);
 });
 
 test("the first screen's reads leave together", () => {

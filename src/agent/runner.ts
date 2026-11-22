@@ -162,6 +162,9 @@ export class Runner {
   private warm = new Map<string, WarmSession>();
   /** Threads whose warm session background work still runs on (see hold). */
   private holds = new Map<string, number>();
+  /** Claude registrations a held thread's dropped session left behind, kept
+   * until the last hold is released. */
+  private heldRegistrations = new Map<string, string>();
   private hooks: RunnerHooks;
 
   constructor(hooks: RunnerHooks = {}) {
@@ -774,14 +777,19 @@ export class Runner {
     const warm = this.warm.get(threadId);
     if (!warm) return;
     clearTimeout(warm.idleCompaction);
-    unregisterClaudeSession(warm.session.sessionId);
+    // A turn that took a message mid-run, or failed, rebuilds its session —
+    // but background work it started still runs nested model calls on this
+    // registration, so a held one outlives the session.
+    if (this.holds.has(threadId)) this.heldRegistrations.set(threadId, warm.session.sessionId);
+    else unregisterClaudeSession(warm.session.sessionId);
     warm.session.dispose();
     this.warm.delete(threadId);
   }
 
-  /** Keep a thread's warm session through idle eviction until released: work
-   * a turn left running in the background (a nested model session on the
-   * claude-code runtime) needs the conversation's runtime registration alive. */
+  /** Keep a thread's runtime alive until released — its warm session through
+   * idle eviction, its claude-code registration through any rebuild: work a
+   * turn left running in the background (a nested model session on the
+   * claude-code runtime) needs that registration. */
   private hold(threadId: string): () => void {
     this.holds.set(threadId, (this.holds.get(threadId) ?? 0) + 1);
     let released = false;
@@ -789,8 +797,12 @@ export class Runner {
       if (released) return;
       released = true;
       const left = (this.holds.get(threadId) ?? 1) - 1;
-      if (left > 0) this.holds.set(threadId, left);
-      else this.holds.delete(threadId);
+      if (left > 0) return void this.holds.set(threadId, left);
+      this.holds.delete(threadId);
+      const sessionId = this.heldRegistrations.get(threadId);
+      this.heldRegistrations.delete(threadId);
+      // A rebuilt session reopening the same transcript registered this id again.
+      if (sessionId && this.warm.get(threadId)?.session.sessionId !== sessionId) unregisterClaudeSession(sessionId);
     };
   }
 

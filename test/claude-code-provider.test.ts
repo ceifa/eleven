@@ -1241,3 +1241,54 @@ test("each native request keeps its own usage, so the turn's last row is the rea
     unregisterClaudeSession(sessionId);
   }
 });
+
+test("background work keeps the conversation's registration through a session rebuild until it lets go", async () => {
+  // Regression: a message steered into a turn made the turn rebuild its session
+  // on the way out, which unregistered it, and every subagent a background
+  // workflow started after that failed with "no active eleven session context".
+  const { Runner } = await import("../src/agent/runner.ts");
+  const ownerId = "abababab-abab-4bab-8bab-abababababab";
+  const subagentId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+  const runner = new Runner() as unknown as {
+    warm: Map<string, unknown>;
+    hold(threadId: string): () => void;
+    dropSession(threadId: string): void;
+  };
+  const provider = createClaudeCodeProvider({
+    query: scriptedQuery(successfulMessages.slice(1), () => {}),
+    deleteSession: (async () => {}) as never,
+    state: fakeState(),
+  });
+  const nested = () => runWithClaudeSession(ownerId, async () => {
+    const context: Context = { systemPrompt: "workflow subagent", messages: [user("research")], tools: [] };
+    let error: string | undefined;
+    for await (const event of provider.streamSimple(model, normalizeContext(context), { sessionId: subagentId })) {
+      if (event.type === "error") error = event.error.errorMessage;
+    }
+    return error;
+  });
+  const warmSession = () => ({ session: { sessionId: ownerId, dispose() {} } });
+
+  registerClaudeSession(ownerId, { cwd: "/tmp", customTools: [], workspaceTools: ["read"] });
+  try {
+    runner.warm.set("thread", warmSession());
+    const release = runner.hold("thread");
+    runner.dropSession("thread");
+    assert.equal(await nested(), undefined, "the held registration outlives the dropped session");
+    release();
+    assert.match((await nested()) ?? "", /no active eleven session context/);
+
+    // A rebuilt session reopening the same transcript owns the id again: a
+    // later release must not take it away.
+    registerClaudeSession(ownerId, { cwd: "/tmp", customTools: [], workspaceTools: ["read"] });
+    runner.warm.set("thread", warmSession());
+    const again = runner.hold("thread");
+    runner.dropSession("thread");
+    registerClaudeSession(ownerId, { cwd: "/tmp", customTools: [], workspaceTools: ["read"] });
+    runner.warm.set("thread", warmSession());
+    again();
+    assert.equal(await nested(), undefined);
+  } finally {
+    unregisterClaudeSession(ownerId);
+  }
+});

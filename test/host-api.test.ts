@@ -1,6 +1,7 @@
 import { deepStrictEqual, strictEqual } from "node:assert/strict";
 import { describe, test } from "node:test";
 import { nestedDirectory, runInTurn } from "../src/agent/host-api.ts";
+import { currentAccount } from "../src/accounts.ts";
 import type { PanelUpdate } from "../src/agent/panels.ts";
 
 /* The gap this closes: a pi extension can only speak from inside a tool's
@@ -20,7 +21,7 @@ const collect = (run: () => void) => {
 describe("the eleven host handshake", () => {
   test("is on globalThis, versioned so an extension can feature-detect", () => {
     strictEqual(typeof host().panels, "function");
-    strictEqual(host().version, 4);
+    strictEqual(host().version, 5);
   });
 
   test("publishes into the turn that owns the call stack", () => {
@@ -94,6 +95,25 @@ describe("the eleven host handshake", () => {
   test("a failed wake resolves false instead of throwing into the extension", async () => {
     const conversation = runInTurn({ panels: () => {}, wake: async () => { throw new Error("thread moved on"); } }, () => host().conversation());
     strictEqual(await conversation!.wake("done"), false);
+  });
+
+  test("shows nested work the turn's model plan and runs it on the plan's logins only", async () => {
+    // Background workflow agents failed on a spent subscription while the turn
+    // itself had already failed over to another login of the same model.
+    const models = [{ model: "claude-code/opus" }, { model: "claude-code/opus", account: "work" }];
+    deepStrictEqual(host().models(), [], "no turn, no plan");
+    await runInTurn({ panels: () => {}, models }, async () => {
+      deepStrictEqual(host().models(), models);
+      strictEqual(await host().onAccount("work", async () => currentAccount()), "work");
+      strictEqual(host().onAccount(undefined, () => currentAccount()), undefined);
+      let refused = false;
+      try {
+        host().onAccount("someone-else", () => {});
+      } catch {
+        refused = true;
+      }
+      strictEqual(refused, true, "a login the plan does not name is not the extension's to pick");
+    });
   });
 
   test("carries a directory to the sessions spawned under it, across awaits", async () => {

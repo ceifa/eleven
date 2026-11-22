@@ -192,6 +192,7 @@ export class Runner {
             panels: (update) => events.onPanels?.(update), wake: request.wake,
             sessionSignal: request.sessionSignal, createBackground: request.createBackground,
             hold: () => this.hold(threadId),
+            models: request.models,
           },
           () => this.runTurn(threadId, request, events),
         );

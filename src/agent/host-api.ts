@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolve } from "node:path";
 import { readPanels, type PanelUpdate } from "./panels.ts";
+import { runOnAccount } from "../accounts.ts";
 import { logger } from "../log.ts";
 
 const log = logger("host-api");
@@ -27,7 +28,7 @@ const log = logger("host-api");
  */
 export interface ElevenHost {
   /** Bumped when the shape grows or changes. */
-  readonly version: 4;
+  readonly version: 5;
   /**
    * Replace this producer's panels in the turn currently running on this call
    * stack (see panels.ts). `scope` identifies the producer: its panels replace
@@ -54,6 +55,22 @@ export interface ElevenHost {
    * tools already take a cwd; this carries it to runtimes eleven bridges.
    */
   inDirectory<T>(cwd: string, operation: () => T): T;
+  /**
+   * The model plan of the turn on this call stack: the entries it fails over
+   * through, in order, each with the login it runs on. Nested work can then
+   * fail over the way the conversation does. Empty when no turn owns the stack.
+   */
+  models(): ModelPlanEntry[];
+  /**
+   * Run `operation` so that credentials resolve for `account` — one the turn's
+   * plan names, or undefined for the machine's own login. Throws for any other.
+   */
+  onAccount<T>(account: string | undefined, operation: () => T): T;
+}
+
+export interface ModelPlanEntry {
+  model: string;
+  account?: string;
 }
 
 export type BackgroundOutcome = "completed" | "failed" | "stopped";
@@ -83,6 +100,8 @@ export interface TurnContext {
   createBackground?: BackgroundStatusFactory;
   /** Keep the conversation's runtime alive until the returned release runs. */
   hold?: () => () => void;
+  /** The turn's model plan, in failover order. */
+  models?: ModelPlanEntry[];
 }
 
 const turnContext = new AsyncLocalStorage<TurnContext>();
@@ -100,7 +119,7 @@ export function nestedDirectory(): string | undefined {
 }
 
 const host: ElevenHost = {
-  version: 4,
+  version: 5,
   panels(panels, options = {}) {
     const sink = turnContext.getStore()?.panels;
     if (!sink) return false;
@@ -177,6 +196,15 @@ const host: ElevenHost = {
   },
   inDirectory(cwd, operation) {
     return directory.run(resolve(cwd), operation);
+  },
+  models() {
+    return (turnContext.getStore()?.models ?? []).map(({ model, account }) => (account ? { model, account } : { model }));
+  },
+  onAccount(account, operation) {
+    if (account !== undefined && !turnContext.getStore()?.models?.some((entry) => entry.account === account)) {
+      throw new Error(`account "${account}" is not in this turn's model plan`);
+    }
+    return runOnAccount(account, operation);
   },
 };
 

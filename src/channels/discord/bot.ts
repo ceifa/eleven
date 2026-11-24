@@ -28,6 +28,8 @@ import { BACKGROUND_STOP_PREFIX } from "../background.ts";
 import { COMMANDS } from "../commands.ts";
 import { Conversations, type TurnSurface } from "../conversations.ts";
 import { FAILOVER_PREFIX } from "../failover.ts";
+import { secrets } from "../../secrets.ts";
+import { parseSecretId, secretModal, submittedValue } from "./secret.ts";
 import type { PairingRequest } from "../pairing.ts";
 import { conversationPath } from "../session-key.ts";
 import { compactReplyQuote, foldDisplayName, sanitizeContextLabel } from "../text.ts";
@@ -547,8 +549,40 @@ export function startDiscordBot(name: string, token: string, deps: BotDeps, io?:
       return;
     }
 
+    if (interaction.type === InteractionType.ModalSubmit) {
+      const ask = parseSecretId(interaction.data.custom_id);
+      if (!ask) return;
+      const value = submittedValue(interaction.data);
+      if (!value) {
+        await respond({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: "Nothing was typed.", flags: MessageFlags.Ephemeral } });
+        return;
+      }
+      const { expiresAt } = secrets.put(ask.name, value, ask.minutes);
+      log.info(`secret ${ask.name} received in ${sessionKeyFor(target)}, held ${ask.minutes} min`);
+      const message = interaction.message;
+      const update = message && {
+        content: `${message.content}\n-# 🔒 \`${ask.name}\` received, kept in memory until <t:${Math.floor(expiresAt / 1000)}:t>`.slice(0, 2000),
+        components: disableComponents(message.components, interaction.data.custom_id),
+      };
+      const answered = await respond(update
+        ? { type: InteractionResponseType.UpdateMessage, data: update }
+        : { type: InteractionResponseType.DeferredMessageUpdate });
+      if (!answered && update) {
+        await rest.request("PATCH", `/channels/${channelId}/messages/${message.id}`, { body: update })
+          .catch((error) => log.warn(`could not mark the secret as received: ${error}`));
+      }
+      void conversations.runTurn(target, `[secret received]\n${ask.name} is held in memory until ${new Date(expiresAt).toISOString()}. ` +
+        `Use it with \`eleven secrets run ${ask.name} -- <command>\`, which hands it to the command as $${ask.name}; never print or store its value.`, []);
+      return;
+    }
+
     if (interaction.type === InteractionType.MessageComponent) {
       const data = interaction.data.custom_id;
+      const ask = parseSecretId(data);
+      if (ask) {
+        await respond(secretModal(data, ask));
+        return;
+      }
       if (data.startsWith(BACKGROUND_STOP_PREFIX)) {
         await respond({ type: InteractionResponseType.DeferredMessageUpdate });
         conversations.stopBackground(sessionKeyFor(target), data);

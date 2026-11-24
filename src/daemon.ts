@@ -14,6 +14,7 @@ import { refreshModelCatalogs, trustWorkspaces } from "./agent/pi.ts";
 import { PID_FILE } from "./paths.ts";
 import { readJsonFile, writeJsonFile } from "./util.ts";
 import { logger } from "./log.ts";
+import { secrets, serveSecrets } from "./secrets.ts";
 
 const log = logger("daemon");
 
@@ -104,6 +105,7 @@ export async function startDaemon() {
   gateway.on("reply-queued", () => replies.kick());
   replies.kick();
   const dashboard = startDashboard(config, gateway, channels);
+  const secretsServer = serveSecrets(secrets);
   // Off the startup path on purpose: pi resolves models from the bundled
   // catalog immediately, and this only widens it to what the providers list now.
   const stopCatalogRefresh = refreshModelCatalogs();
@@ -127,6 +129,7 @@ export async function startDaemon() {
     // because the next instance SIGKILLs this one after 5 s.
     await Promise.race([interruptLiveCards(), sleep(3_000)]);
     await Promise.allSettled([channels.stop(), dashboard.close()]);
+    secretsServer.close();
     rmSync(PID_FILE, { force: true });
     process.exit(0);
   };

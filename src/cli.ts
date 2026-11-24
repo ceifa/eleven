@@ -39,6 +39,14 @@ if (!clientHandled) switch (command) {
   case "login":
     process.exitCode = await (await import("./login.ts")).login(args[0], args[1]);
     break;
+  case "secrets":
+    try {
+      process.exitCode = await (await import("./secrets-cli.ts")).runSecrets(args);
+    } catch (error) {
+      console.error(`error: ${error instanceof Error ? error.message : error}`);
+      process.exitCode = 1;
+    }
+    break;
   default:
     console.log(`eleven — a featherweight personal AI gateway
 
@@ -58,6 +66,12 @@ usage:
   eleven threads search <query> [--workspace <name>] [--channel <type>] [--limit N] [--json]
   eleven threads invoke --workspace <name> [--timeout <seconds>] [--detach] [--json] <message>
   eleven threads send <id> [--json] <message>
+
+  eleven secrets                       list the ephemeral secrets held in memory (names only)
+  eleven secrets run <NAME>... -- <command> [args]
+                                       run a command with the secrets as environment variables,
+                                       their values masked in its output
+  eleven secrets drop <NAME>           forget a secret before it expires
 
 thread filters:
   --workspace <name>  --running  --channel <type>  --since <24h|7d|ISO>
